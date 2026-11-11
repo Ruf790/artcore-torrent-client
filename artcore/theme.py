@@ -230,7 +230,7 @@ QCheckBox::indicator:hover, QTreeView::indicator:hover, QTableView::indicator:ho
 QCheckBox::indicator:checked, QTreeView::indicator:checked, QTableView::indicator:checked {{
   background: {c['primary']}; border-color: {c['primary']}; image: url("{img.get('check', '')}");
 }}
-QTreeView::indicator:indeterminate {{
+QTreeView::indicator:indeterminate, QCheckBox::indicator:indeterminate {{
   background: {c['primary']}; border-color: {c['primary']}; image: url("{img.get('minus', '')}");
 }}
 QCheckBox::indicator:disabled, QTableView::indicator:disabled {{ background: {c['tertiary_bg']}; border-color: {c['border']}; }}

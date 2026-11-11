@@ -1,6 +1,7 @@
 """Qt (PySide6) user interface in the ArtCore style."""
 from __future__ import annotations
 
+import html
 import os
 import platform
 import shutil
@@ -1301,30 +1302,307 @@ def remember_path(cfg: dict, path: str, keep: int = 12) -> None:
     cfg["recent_paths"] = [path] + rest[:keep - 1]
 
 
+def _torrent_meta(path: str) -> dict:
+    """Top-level 'publisher' / 'publisher-url' of a .torrent (rutracker and others write them)."""
+    import libtorrent as lt
+    try:
+        with open(path, "rb") as f:
+            d = lt.bdecode(f.read()) or {}
+    except Exception:
+        return {}
+    out = {}
+    for k in ("publisher", "publisher-url"):
+        v = d.get(k.encode()) or d.get(k)
+        if isinstance(v, bytes):
+            v = v.decode("utf-8", "replace")
+        if v:
+            out[k] = str(v)
+    return out
+
+
+class DiskBar(QWidget):
+    """BitComet's disk strip: used space, what this torrent will take, free space — with the numbers."""
+    def __init__(self):
+        super().__init__()
+        self.total = self.free = self.need = 0
+        self.setFixedHeight(30)
+
+    def set_values(self, total: int, free: int, need: int):
+        self.total, self.free, self.need = total, free, need
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        clip = QPainterPath(); clip.addRoundedRect(r, 6, 6)
+        p.setClipPath(clip)
+        p.fillRect(r, QColor(C["body_bg"]))
+        if self.total:
+            used = self.total - self.free
+            x_used = r.width() * used / self.total
+            c = QColor(C["primary"]); c.setAlpha(70)
+            p.fillRect(QRectF(r.left(), r.top(), x_used, r.height()), c)
+            short = self.need > self.free
+            w_need = r.width() * min(self.need, self.free if not short else self.total - used) / self.total
+            c2 = QColor(C["danger" if short else "orange"]); c2.setAlpha(110)
+            p.fillRect(QRectF(r.left() + x_used, r.top(), w_need, r.height()), c2)
+        p.setClipping(False)
+        p.setPen(QPen(QColor(C["border"]), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r, 6, 6)
+        p.setPen(QColor(C["body"]))
+        if self.total:
+            txt = t("ad_disk", fmt_size(self.total), fmt_size(self.free))
+            if self.need > self.free:
+                txt += "   ·   " + t("ad_no_space")
+        else:
+            txt = "—"
+        p.drawText(r, Qt.AlignCenter, txt)
+        p.end()
+
+
 class AddTorrentDialog(QDialog):
-    """Choose folder and files before adding (.torrent), or just folder for a magnet."""
+    """New BitTorrent task, laid out like BitComet's: save folder + file name, disk strip,
+    torrent contents with search and type filters, 'Download now' / 'Download later'."""
+    KIND_BOXES = (("video", "ad_k_video"), ("audio", "ad_k_audio"), ("image", "ad_k_image"), ("other", "ad_k_other"))
+
     def __init__(self, cfg: dict, name: str, ti=None, parent=None, cross: dict | None = None,
-                 scrape_src: tuple[list[str], bytes] | None = None):
+                 scrape_src: tuple[list[str], bytes] | None = None, meta: dict | None = None):
         super().__init__(parent)
         _theme_title_bar(self)
         self.setWindowTitle(t("ad_title"))
+        self.setWindowIcon(app_icon())
         self.cross_cb = None
-        self.setMinimumWidth(680)
+        self.cfg = cfg
         self.ti = ti
+        self.meta = meta or {}
+        self.start_paused = False
         self.leaves: list[tuple[QTreeWidgetItem, int, int]] = []
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 14, 20, 16)
-        lay.setSpacing(10)
+        self.files = torrent_files(ti) if ti is not None else []
+        self.single = ti is not None and len(self.files) == 1 and "/" not in self.files[0][1].replace("\\", "/")
+        self.orig_name = (os.path.basename(self.files[0][1]) if self.single else (ti.name() if ti is not None else name))
+        self.resize(940, 820)
+        self.setMinimumSize(760, 600)
 
-        head = _section(name)
-        head.setWordWrap(True)
-        lay.addWidget(head)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 14)
+        lay.setSpacing(10)
+        tabs = QTabWidget()
+        lay.addWidget(tabs, 1)
+
+        # ── Basic settings ─────────────────────────────────────
+        basic = QWidget()
+        bl = QVBoxLayout(basic)
+        bl.setContentsMargins(6, 10, 6, 6)
+        bl.setSpacing(8)
+        bl.addWidget(_section(t("ad_save_to"), "fa6s.folder-open", "warning"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        grid.addWidget(QLabel(t("ad_path")), 0, 0)
+        used = sorted({r.save_path for r in getattr(getattr(parent, "model", None), "rows", [])})
+        self.path = PathCombo(cfg, cfg.get("save_path", ""), used)
+        self.path.textChanged.connect(self._update)
+        grid.addWidget(self.path, 0, 1)
+        b = QPushButton("…")
+        b.setToolTip(t("set_browse"))
+        b.setFixedWidth(46)
+        b.clicked.connect(self._browse)
+        grid.addWidget(b, 0, 2)
+        self.cat = QComboBox()
+        self.cat.addItem(icon("fa6s.tag"), t("cat_none"), "")
+        for c in cfg.get("categories", []):
+            self.cat.addItem(icon("fa6s.tag", "purple"), c["name"], c["name"])
+        self.cat.currentIndexChanged.connect(self._cat_changed)
+        self.cat.setToolTip(t("cat_menu"))
+        grid.addWidget(self.cat, 0, 3)
+        grid.addWidget(QLabel(t("ad_fname" if self.single or ti is None else "ad_folder")), 1, 0)
+        self.name_edit = QLineEdit(self.orig_name)
+        self.name_edit.setEnabled(ti is not None)
+        self.name_edit.textChanged.connect(self._update)
+        grid.addWidget(self.name_edit, 1, 1, 1, 3)
+        self.subfolder = QCheckBox(t("ad_subfolder"))
+        self.subfolder.setVisible(self.single)
+        self.subfolder.toggled.connect(self._update)
+        grid.addWidget(self.subfolder, 2, 1, 1, 3)
+        grid.setColumnStretch(1, 1)
+        bl.addLayout(grid)
+        self.disk = DiskBar()
+        bl.addWidget(self.disk)
+
+        bl.addWidget(_section(t("ad_contents"), "fa6s.box-open", "primary"))
+        info = QGridLayout()
+        info.setHorizontalSpacing(14)
+        info.setVerticalSpacing(4)
+        for r, (k, v) in enumerate((("gen_name", name),
+                                    ("gen_size", fmt_size(sum(f[2] for f in self.files)) if self.files else "—"))):
+            lab = QLabel(t(k)); lab.setObjectName("rowLbl")
+            val = QLabel(v); val.setObjectName("rowVal"); val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            info.addWidget(lab, r, 0)
+            info.addWidget(val, r, 1)
+        pub = self.meta.get("publisher") or ""
+        pub_url = self.meta.get("publisher-url") or ""
+        lab = QLabel(t("ad_publisher")); lab.setObjectName("rowLbl")
+        info.addWidget(lab, 2, 0)
+        pub_lbl = QLabel()
+        pub_lbl.setTextFormat(Qt.RichText)
+        pub_lbl.setOpenExternalLinks(True)
+        if pub_url:
+            pub_lbl.setText(f'<a href="{html.escape(pub_url)}" style="color:{C["primary"]}">{html.escape(pub or pub_url)}</a>')
+        else:
+            pub_lbl.setText(html.escape(pub) or "—")
+        info.addWidget(pub_lbl, 2, 1)
         # seeds / leechers asked from the tracker in the background (scrape)
         self.health = QLabel(); self.health.setObjectName("meta"); self.health.setTextFormat(Qt.RichText)
+        info.addWidget(self.health, 3, 0, 1, 2)
+        info.setColumnStretch(1, 1)
+        top = QHBoxLayout()
+        top.addLayout(info, 1)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(t("ad_search"))
+        self.search.addAction(icon("fa6s.magnifying-glass"), QLineEdit.LeadingPosition)
+        self.search.setFixedWidth(280)
+        self.search.textChanged.connect(self._filter)
+        self.search.setVisible(ti is not None)
+        top.addWidget(self.search, 0, Qt.AlignBottom)
+        bl.addLayout(top)
+
+        self.kind_cbs: dict[str, QCheckBox] = {}
+        if ti is not None:
+            self.tree = QTreeWidget()
+            self.tree.setHeaderLabels([t("file_name"), t("col_size")])
+            self.tree.setRootIsDecorated(True)
+            self.tree.setUniformRowHeights(True)
+            hh = self.tree.header()
+            hh.setStretchLastSection(False)
+            hh.setSectionResizeMode(0, QHeaderView.Stretch)
+            hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            self._fill(self.files)
+            self.tree.itemChanged.connect(lambda *_: self._update())
+            bl.addWidget(self.tree, 1)
+            sel = QHBoxLayout()
+            self.all_cb = QCheckBox(t("ad_all_n", len(self.leaves)))
+            self.all_cb.setTristate(True)
+            self.all_cb.clicked.connect(lambda: self._check(lambda k: True, self.all_cb.checkState() != Qt.Unchecked))
+            sel.addWidget(self.all_cb)
+            sel.addSpacing(16)
+            self.sel_lbl = QLabel(); self.sel_lbl.setObjectName("meta")
+            sel.addWidget(self.sel_lbl)
+            sel.addStretch()
+            kinds = {self._kind(lf.text(0)) for lf, _, _ in self.leaves}
+            for k, key in self.KIND_BOXES:
+                cb = QCheckBox(t(key))
+                cb.setTristate(True)
+                cb.setEnabled(k in kinds)
+                cb.clicked.connect(lambda _=False, k=k, cb=cb: self._check(
+                    lambda kk, k=k: kk == k, cb.checkState() != Qt.Unchecked))
+                sel.addWidget(cb)
+                self.kind_cbs[k] = cb
+            bl.addLayout(sel)
+        else:
+            note = QLabel(t("ad_magnet_note")); note.setObjectName("meta"); note.setWordWrap(True)
+            bl.addWidget(note)
+            bl.addStretch()
+        tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
+
+        # ── Advanced ───────────────────────────────────────────
+        adv = QWidget()
+        al = QVBoxLayout(adv)
+        al.setContentsMargins(6, 10, 6, 6)
+        al.setSpacing(8)
+        if cross:
+            self.cross_cb = QCheckBox(t("cross_offer", cross["name"], cross["save_path"]))
+            self.cross_cb.setChecked(True)
+            self.cross_cb.setStyleSheet(f"color:{C['success_text'] if theme.current_name == 'dark' else C['success']};"
+                                        "font-weight:600;")
+            bl.insertWidget(0, self.cross_cb)          # important enough for the first tab
+        al.addWidget(_section(t("ad_tab_adv"), "fa6s.gears", "secondary"))
+        ag = QGridLayout()
+        ag.setHorizontalSpacing(14)
+        ag.setVerticalSpacing(6)
+        rows = []
+        if ti is not None:
+            ih = ti.info_hashes()
+            rows = [("gen_hash1", str(ih.v1) if ih.has_v1() else "—"),
+                    ("gen_hash2", str(ih.v2) if ih.has_v2() else "—"),
+                    ("gen_piece_info", f"{ti.num_pieces()} × {fmt_size(ti.piece_length())}"),
+                    ("gen_files", str(len(self.files))),
+                    ("gen_private", t("yes" if ti.priv() else "no")),
+                    ("gen_creator", ti.creator() or "—"),
+                    ("gen_created", datetime.fromtimestamp(ti.creation_date()).strftime("%Y-%m-%d %H:%M:%S")
+                     if ti.creation_date() else "—"),
+                    ("gen_comment", ti.comment() or "—")]
+        for r, (k, v) in enumerate(rows):
+            lab = QLabel(t(k)); lab.setObjectName("rowLbl")
+            val = QLabel(v); val.setObjectName("rowVal"); val.setWordWrap(True)
+            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            ag.addWidget(lab, r, 0)
+            ag.addWidget(val, r, 1)
+        ag.setColumnStretch(1, 1)
+        al.addLayout(ag)
+        trs = list(scrape_src[0]) if scrape_src else []
+        if trs:
+            al.addWidget(_section(t("tab_trackers"), "fa6s.server", "info"))
+            tl = QLabel("\n".join(trs)); tl.setObjectName("rowVal")
+            tl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            al.addWidget(tl)
+        al.addStretch()
+        tabs.addTab(adv, icon("fa6s.gears"), t("ad_tab_adv"))
+
+        # ── Publisher ──────────────────────────────────────────
+        pubw = QWidget()
+        pl = QVBoxLayout(pubw)
+        pl.setContentsMargins(6, 10, 6, 6)
+        pl.setSpacing(8)
+        pl.addWidget(_section(t("ad_publisher"), "fa6s.bullhorn", "orange"))
+        txt = []
+        if pub or pub_url:
+            txt.append(f'<b>{html.escape(pub or pub_url)}</b>')
+            if pub_url:
+                txt.append(f'<a href="{html.escape(pub_url)}" style="color:{C["primary"]}">{html.escape(pub_url)}</a>')
+        comment = ti.comment() if ti is not None else ""
+        if comment:
+            c_html = html.escape(comment)
+            if comment.startswith(("http://", "https://")):
+                c_html = f'<a href="{c_html}" style="color:{C["primary"]}">{c_html}</a>'
+            txt.append(f'{t("gen_comment")}: {c_html}')
+        pinfo = QLabel("<br><br>".join(txt) or t("ad_no_publisher"))
+        pinfo.setTextFormat(Qt.RichText)
+        pinfo.setOpenExternalLinks(True)
+        pinfo.setWordWrap(True)
+        pinfo.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        pl.addWidget(pinfo)
+        pl.addStretch()
+        tabs.addTab(pubw, icon("fa6s.bullhorn"), t("ad_publisher"))
+
+        if self.cross_cb is not None:          # cross-seed uses the other torrent's folder and all files
+            def cross_toggled(on):
+                for w in (self.path, self.name_edit, self.subfolder):
+                    w.setEnabled(not on)
+                if ti is not None:
+                    self.tree.setEnabled(not on)
+            self.cross_cb.toggled.connect(cross_toggled)
+            cross_toggled(True)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        self.ok = QPushButton(icon("fa6s.download", "white"), t("ad_now"))
+        self.ok.setObjectName("primary")
+        self.ok.setDefault(True)
+        self.ok.clicked.connect(self.accept)
+        self.later = QPushButton(icon("fa6s.clock"), t("ad_later"))
+        self.later.clicked.connect(self._later)
+        cancel = QPushButton(t("cancel"))
+        cancel.clicked.connect(self.reject)
+        for w in (self.ok, self.later, cancel):
+            w.setMinimumWidth(150)
+            btns.addWidget(w)
+        lay.addLayout(btns)
+
         self._scrape_res = None
         if scrape_src and scrape_src[0]:
             self.health.setText("&#8987; " + t("scr_wait"))
-            lay.addWidget(self.health)
             import threading
             from .netx import scrape
 
@@ -1337,87 +1615,18 @@ class AddTorrentDialog(QDialog):
             self._scrape_timer = QTimer(self)
             self._scrape_timer.timeout.connect(self._scrape_done)
             self._scrape_timer.start(200)
-        if cross:
-            self.cross_cb = QCheckBox(t("cross_offer", cross["name"], cross["save_path"]))
-            self.cross_cb.setChecked(True)
-            self.cross_cb.setStyleSheet(f"color:{C['success_text'] if theme.current_name == 'dark' else C['success']};"
-                                        "font-weight:600;")
-            lay.addWidget(self.cross_cb)
-
-        self.cfg = cfg
-        crow = QHBoxLayout()
-        crow.addWidget(QLabel(t("cat_menu")))
-        self.cat = QComboBox()
-        self.cat.addItem(t("cat_none"), "")
-        for c in cfg.get("categories", []):
-            self.cat.addItem(icon("fa6s.tag"), c["name"], c["name"])
-        self.cat.currentIndexChanged.connect(self._cat_changed)
-        crow.addWidget(self.cat, 1)
-        if len(cfg.get("categories", [])):
-            lay.addLayout(crow)
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel(t("ad_save_to")))
-        used = sorted({r.save_path for r in getattr(getattr(parent, "model", None), "rows", [])})
-        self.path = PathCombo(cfg, cfg.get("save_path", ""), used)
-        self.path.textChanged.connect(self._update)
-        row.addWidget(self.path, 1)
-        b = QPushButton(t("set_browse"))
-        b.clicked.connect(self._browse)
-        row.addWidget(b)
-        lay.addLayout(row)
-
-        if ti is not None:
-            self.tree = QTreeWidget()
-            self.tree.setHeaderLabels([t("file_name"), t("col_size")])
-            self.tree.setRootIsDecorated(True)
-            self.tree.setUniformRowHeights(True)
-            hh = self.tree.header()
-            hh.setStretchLastSection(False)
-            hh.setSectionResizeMode(0, QHeaderView.Stretch)
-            hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-            self._fill(torrent_files(ti))
-            self.tree.itemChanged.connect(lambda *_: self._update())
-            lay.addWidget(self.tree, 1)
-            self.setMinimumHeight(540)
-
-            sel = QHBoxLayout()
-            ball = QPushButton(t("ad_all"));  ball.clicked.connect(lambda: self._check_all(True))
-            bnone = QPushButton(t("ad_none")); bnone.clicked.connect(lambda: self._check_all(False))
-            sel.addWidget(ball)
-            sel.addWidget(bnone)
-            sel.addStretch()
-            self.sel_lbl = QLabel(); self.sel_lbl.setObjectName("meta")
-            sel.addWidget(self.sel_lbl)
-            lay.addLayout(sel)
         else:
-            note = QLabel(t("ad_magnet_note")); note.setObjectName("meta"); note.setWordWrap(True)
-            lay.addWidget(note)
-
-        bottom = QHBoxLayout()
-        self.paused = QCheckBox(t("ad_paused"))
-        bottom.addWidget(self.paused)
-        bottom.addStretch()
-        self.free_lbl = QLabel(); self.free_lbl.setObjectName("meta")
-        bottom.addWidget(self.free_lbl)
-        lay.addLayout(bottom)
-
-        if self.cross_cb is not None:          # cross-seed uses the other torrent's folder and all files
-            def cross_toggled(on):
-                self.path.setEnabled(not on)
-                if ti is not None:
-                    self.tree.setEnabled(not on)
-            self.cross_cb.toggled.connect(cross_toggled)
-            cross_toggled(True)
-
-        self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.ok = self.bb.button(QDialogButtonBox.Ok)
-        self.ok.setText(t("add_btn"))
-        self.ok.setObjectName("primary")
-        self.bb.accepted.connect(self.accept)
-        self.bb.rejected.connect(self.reject)
-        lay.addWidget(self.bb)
+            self.health.hide()
         self._update()
+
+    def _later(self):
+        self.start_paused = True
+        self.accept()
+
+    @staticmethod
+    def _kind(name: str) -> str:
+        k = widgets.kind_of(name)
+        return k if k in ("video", "audio", "image") else "other"
 
     def _scrape_done(self):
         if self._scrape_res is None:
@@ -1488,37 +1697,100 @@ class AddTorrentDialog(QDialog):
                 root.child(i).setExpanded(True)
         self.tree.blockSignals(False)
 
-    def _check_all(self, on: bool):
+    def _check(self, match, on: bool):
+        """Tick / untick every file whose kind matches (Select all, Video, Audio, …)."""
+        self.tree.blockSignals(True)
+        for leaf, _, _ in self.leaves:
+            if match(self._kind(leaf.text(0))):
+                leaf.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+        self.tree.blockSignals(False)
+        # folders are auto-tristate: nudge them by re-setting one leaf with signals on
+        if self.leaves:
+            lf = self.leaves[0][0]
+            st = lf.checkState(0)
+            lf.setCheckState(0, Qt.Unchecked if st == Qt.Checked else Qt.Checked)
+            lf.setCheckState(0, st)
+        self._update()
+
+    def _filter(self, text: str):
+        text = text.strip().lower()
+
+        def walk(it: QTreeWidgetItem) -> bool:
+            if it.childCount() == 0:
+                show = not text or text in it.text(0).lower()
+            else:
+                show = any([walk(it.child(i)) for i in range(it.childCount())])
+            it.setHidden(not show)
+            return show
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
-            root.child(i).setCheckState(0, Qt.Checked if on else Qt.Unchecked)
-        for leaf, _, _ in self.leaves:          # single-file / flat torrents have no folder items
-            leaf.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
-        self._update()
+            walk(root.child(i))
 
     def selected_size(self) -> int:
         return sum(sz for lf, _, sz in self.leaves if lf.checkState(0) == Qt.Checked)
 
+    @staticmethod
+    def _tri(on: int, total: int):
+        return Qt.Unchecked if on == 0 else Qt.Checked if on == total else Qt.PartiallyChecked
+
     def _update(self):
         need = 0
         if self.ti is not None:
+            shown = self.name_edit.text().strip() or self.orig_name     # the tree shows the new name
+            top = self.leaves[0][0] if self.single else self.tree.topLevelItem(0)
+            if top is not None and top.text(0) != shown and (self.single or self.tree.topLevelItemCount() == 1):
+                self.tree.blockSignals(True)
+                top.setText(0, shown)
+                self.tree.blockSignals(False)
             need = self.selected_size()
             total = sum(sz for _, _, sz in self.leaves)
+            on = sum(1 for lf, _, _ in self.leaves if lf.checkState(0) == Qt.Checked)
             self.sel_lbl.setText(t("ad_selected", fmt_size(need), fmt_size(total)))
-        free = free_space(self.path.text())
-        if free is None:
-            self.free_lbl.setText("")
-        elif need > free:
-            self.free_lbl.setText(f'<span style="color:{C["danger"]}">{t("ad_no_space")} · {t("ad_free", fmt_size(free))}</span>')
-        else:
-            self.free_lbl.setText(t("ad_free", fmt_size(free)))
-        self.ok.setEnabled(self.ti is None or need > 0 or not self.leaves)
-        self.ok.setToolTip("" if self.ok.isEnabled() else t("ad_nothing"))
+            self.all_cb.setCheckState(self._tri(on, len(self.leaves)))
+            for k, cb in self.kind_cbs.items():
+                mine = [lf for lf, _, _ in self.leaves if self._kind(lf.text(0)) == k]
+                if mine:
+                    cb.setCheckState(self._tri(sum(1 for lf in mine if lf.checkState(0) == Qt.Checked), len(mine)))
+        p = os.path.abspath(self.path.text() or ".")
+        while p and not os.path.exists(p) and os.path.dirname(p) != p:
+            p = os.path.dirname(p)
+        try:
+            du = shutil.disk_usage(p)
+            self.disk.set_values(du.total, du.free, need)
+        except OSError:
+            self.disk.set_values(0, 0, need)
+        name_ok = self.ti is None or bool(self.name_edit.text().strip()) and not any(
+            ch in self.name_edit.text() for ch in '\\/:*?"<>|')
+        self.name_edit.setStyleSheet("" if name_ok else f"border:1px solid {C['danger']};")
+        can = name_ok and (self.ti is None or need > 0 or not self.leaves)
+        for b in (self.ok, self.later):
+            b.setEnabled(can)
+            b.setToolTip("" if can else t("ad_nothing" if name_ok else "ad_bad_name"))
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, t("choose_folder"), self.path.text())
         if d:
             self.path.setText(d)
+
+    def renames(self) -> dict[int, str]:
+        """New file paths when the name was edited or a subfolder was asked for a single file."""
+        if self.ti is None or self.use_cross():
+            return {}
+        new = self.name_edit.text().strip()
+        out = {}
+        if self.single:
+            idx, path, _ = self.files[0]
+            target = new
+            if self.subfolder.isChecked():
+                target = os.path.splitext(new)[0] + "/" + new
+            if target != path:
+                out[idx] = target
+        elif new and new != self.orig_name:
+            for idx, path, _ in self.files:
+                parts = path.replace("\\", "/").split("/", 1)
+                if len(parts) == 2:
+                    out[idx] = new + "/" + parts[1]
+        return out
 
     def priorities(self) -> list[int] | None:
         """None = everything selected (keep libtorrent defaults)."""
@@ -2553,7 +2825,7 @@ class MainWindow(QMainWindow):
         import libtorrent as lt
         is_magnet = item.startswith("magnet:")
         try:
-            save_path, paused, prios, category = None, False, None, ""
+            save_path, paused, prios, category, renames = None, False, None, "", {}
             ti = None if is_magnet else lt.torrent_info(item)
             cross = self.engine.find_cross(ti) if ti is not None and self.cfg.get("cross_seed", True) else None
             if self.cfg.get("show_add_dialog", True):
@@ -2567,11 +2839,15 @@ class MainWindow(QMainWindow):
                     ihs = ti.info_hashes()
                     ih = (ihs.v1 if ihs.has_v1() else ihs.v2).to_bytes()[:20]
                     d = AddTorrentDialog(self.cfg, ti.name(), ti, self, cross=cross,
-                                         scrape_src=([tr.url for tr in ti.trackers()], ih))
+                                         scrape_src=([tr.url for tr in ti.trackers()], ih),
+                                         meta=_torrent_meta(item))
                 self.show_normal()
                 if not d.exec():
                     return
-                save_path, paused, prios = d.path.text().strip() or None, d.paused.isChecked(), d.priorities()
+                save_path, paused, prios = d.path.text().strip() or None, d.start_paused, d.priorities()
+                renames = d.renames()
+                for idx, new_path in renames.items():      # the existing-files check below sees the new names
+                    ti.rename_file(idx, new_path)
                 category = d.cat.currentData() or ""
                 if not d.use_cross():
                     cross = None
@@ -2602,7 +2878,7 @@ class MainWindow(QMainWindow):
                 key = self.engine.add_magnet(item, save_path=save_path, paused=paused)
             else:
                 key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios,
-                                                   seed_mode=seed_mode)
+                                                   seed_mode=seed_mode, renames=renames)
             if category:
                 self.engine.set_category(key, category)
             if not cross:

@@ -516,8 +516,11 @@ class Engine:
 
     # ── adding / removing ──────────────────────────────────────
     def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False,
-                         file_priorities: list[int] | None = None, seed_mode: bool = False) -> str:
+                         file_priorities: list[int] | None = None, seed_mode: bool = False,
+                         renames: dict[int, str] | None = None) -> str:
         ti = lt.torrent_info(path)
+        for idx, new_path in (renames or {}).items():     # name edited in the add dialog
+            ti.rename_file(idx, new_path)
         atp = lt.add_torrent_params()
         atp.ti = ti
         if seed_mode:      # files known to be complete: skip the full check, pieces are verified when sent
