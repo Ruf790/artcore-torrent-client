@@ -55,13 +55,20 @@ def selftest() -> int:
             app.processEvents()
         win.tabs.setCurrentIndex(5)
         win.tick()
-        toasts = "n/a"
+        toasts = taskbar = "n/a"
         if sys.platform == "win32":
             importlib.import_module("windows_toasts")
             toasts = "ok"
+            winint.keep_awake(True)
+            winint.keep_awake(False)
+            hr = win.taskbar.set(int(win.winId()), winint.TBPF_NORMAL, 500, 1000)
+            taskbar = f"{'ok' if win.taskbar.ok else 'unavailable'} hr={hr & 0xFFFFFFFF:#x}"
+        win.set_mini(True)
+        app.processEvents()
+        win.set_mini(False)
         win.quit()
         with open(out, "w", encoding="utf-8") as f:
-            f.write(f"OK {VERSION} libtorrent {lt.__version__} toasts {toasts} font {theme.TITLE_FONT}\n")
+            f.write(f"OK {VERSION} libtorrent {lt.__version__} toasts {toasts} taskbar {taskbar} font {theme.TITLE_FONT}\n")
         return 0
     except Exception:
         with open(out, "w", encoding="utf-8") as f:

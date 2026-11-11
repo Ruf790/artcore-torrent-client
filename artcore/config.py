@@ -43,6 +43,14 @@ DEFAULTS = {
     "ban_bad_peers":    True,       # leech-only clients (Xunlei …) and fake-progress peers
     "cross_seed":       True,       # reuse data of an existing torrent when the files match
     "tags":             [],         # known tags (also those not used by any torrent yet)
+    "keep_awake":       True,       # no Windows sleep while downloading
+    "keep_awake_seed":  False,      # … and while seeding with traffic
+    "min_free_gb":      0,          # pause downloads below this free space, 0 = off
+    "done_cmd":         "",         # run when a torrent finishes: %N name, %F full path, %D folder, %H hash, %L category
+    "done_open_folder": False,
+    "mini_widget":      False,      # floating speed window
+    "mini_pos":         None,
+    "speed_in_title":   True,       # speeds in the window title = taskbar button tooltip
 }
 
 
