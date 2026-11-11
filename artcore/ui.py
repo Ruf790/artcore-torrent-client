@@ -1991,6 +1991,118 @@ class CreateTorrentDialog(QDialog):
         self.accept()
 
 
+class AboutDialog(QDialog):
+    """About: logo, version, components, license, links, 'Check for updates'."""
+    REPO = "https://github.com/Ruf790/artcore-torrent-client"
+    CREDITS = (("Qt 6 / PySide6", "LGPL v3"), ("libtorrent-rasterbar", "BSD 3-Clause"), ("Python", "PSF"),
+               ("QtAwesome · Font Awesome Free", "MIT · CC BY 4.0 / OFL"), ("Oswald", "SIL OFL 1.1"),
+               ("flag-icons", "MIT"), ("psutil", "BSD 3-Clause"), ("maxminddb", "Apache 2.0"),
+               ("windows-toasts", "Apache 2.0"), ("DB-IP IP to Country Lite", "CC BY 4.0"),
+               ("PyInstaller · Inno Setup", "GPL v2 + exception · Inno Setup License"))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        import libtorrent as lt
+        import PySide6
+        from PySide6.QtCore import qVersion
+        _theme_title_bar(self)
+        self.setWindowTitle(t("about"))
+        self.setWindowIcon(app_icon())
+        self.setMinimumWidth(560)
+        self.main = parent
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(26, 22, 26, 18)
+        lay.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.setSpacing(18)
+        logo = QLabel()
+        logo.setPixmap(app_icon(256).pixmap(84, 84))
+        head.addWidget(logo, 0, Qt.AlignTop)
+        tcol = QVBoxLayout()
+        tcol.setSpacing(2)
+        title = QLabel(APP_TITLE)
+        title.setStyleSheet(f'font-family:"{theme.TITLE_FONT}"; font-size: 22pt; font-weight: 600; color:{C["emphasis"]};')
+        tcol.addWidget(title)
+        ver = QLabel(t("ab_version", VERSION) + (f"  ·  {t('meta_portable')}" if config.is_portable() else ""))
+        ver.setStyleSheet(f"font-size: 11pt; font-weight: 600; color:{C['primary']};")
+        tcol.addWidget(ver)
+        sub = QLabel(t("ab_tagline")); sub.setObjectName("meta"); sub.setWordWrap(True)
+        tcol.addWidget(sub)
+        tcol.addStretch()
+        head.addLayout(tcol, 1)
+        lay.addLayout(head)
+
+        self.info = [
+            (t("ab_lt"), lt.__version__),
+            ("Qt / PySide6", f"{qVersion()} / {PySide6.__version__}"),
+            ("Python", platform.python_version()),
+            (t("ab_os"), f"{platform.system()} {platform.release()} ({platform.machine()})"),
+            (t("ab_data"), config.data_dir()),
+        ]
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(4)
+        for r, (k, v) in enumerate(self.info):
+            lab = QLabel(k); lab.setObjectName("rowLbl")
+            val = QLabel(v); val.setObjectName("rowVal"); val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            grid.addWidget(lab, r, 0)
+            grid.addWidget(val, r, 1)
+        grid.setColumnStretch(1, 1)
+        lay.addLayout(grid)
+
+        def link(url, text):
+            return f'<a href="{url}" style="color:{C["primary"]}; text-decoration:none">{text}</a>'
+        lic = QLabel(t("ab_license", link(self.REPO + "/blob/main/LICENSE", "GNU LGPL v3")))
+        lic.setTextFormat(Qt.RichText); lic.setOpenExternalLinks(True); lic.setWordWrap(True)
+        lay.addWidget(lic)
+        links = QLabel("  ·  ".join((link(self.REPO, "GitHub"), link(self.REPO + "/releases", t("ab_releases")),
+                                     link(self.REPO + "/issues", t("ab_issues")))))
+        links.setTextFormat(Qt.RichText); links.setOpenExternalLinks(True)
+        lay.addWidget(links)
+
+        lay.addWidget(_section(t("ab_components"), "fa6s.cubes", "orange"))
+        comp = QGridLayout()
+        comp.setHorizontalSpacing(16)
+        comp.setVerticalSpacing(2)
+        for r, (name, licn) in enumerate(self.CREDITS):
+            a = QLabel(name); a.setObjectName("rowVal")
+            b = QLabel(licn); b.setObjectName("meta")
+            comp.addWidget(a, r, 0)
+            comp.addWidget(b, r, 1)
+        comp.setColumnStretch(1, 1)
+        lay.addLayout(comp)
+        note = QLabel(t("ab_third")); note.setObjectName("meta"); note.setWordWrap(True)
+        lay.addWidget(note)
+        copy = QLabel("© 2026 Ruffneck"); copy.setObjectName("meta")
+        lay.addWidget(copy)
+
+        btns = QHBoxLayout()
+        upd = QPushButton(icon("fa6s.rotate"), t("ab_check"))
+        upd.clicked.connect(self._check)
+        cp = QPushButton(icon("fa6s.copy"), t("ab_copy"))
+        cp.clicked.connect(self._copy)
+        close = QPushButton(t("close"))
+        close.setObjectName("primary")
+        close.setDefault(True)
+        close.clicked.connect(self.accept)
+        btns.addWidget(upd)
+        btns.addWidget(cp)
+        btns.addStretch()
+        btns.addWidget(close)
+        lay.addLayout(btns)
+
+    def _check(self):
+        if self.main is not None and hasattr(self.main, "check_updates"):
+            self.accept()
+            self.main.check_updates(manual=True)
+
+    def _copy(self):
+        """Versions for a bug report."""
+        lines = [f"{APP_TITLE} {VERSION}"] + [f"{k}: {v}" for k, v in self.info if k != t("ab_data")]
+        QGuiApplication.clipboard().setText("\n".join(lines))
+
+
 class UpdateDialog(QDialog):
     """Release notes + download & silent install of the new Setup.exe."""
     progress = Signal(int, int)
@@ -2187,7 +2299,13 @@ class MainWindow(QMainWindow):
         ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
+        ibtn("fa6s.circle-info", t("about") + " (F1)", self.about_dialog)
+        a = QAction(self); a.setShortcut(QKeySequence("F1")); a.triggered.connect(self.about_dialog)
+        self.addAction(a)
         return h
+
+    def about_dialog(self):
+        AboutDialog(self).exec()
 
     def _build_actions(self) -> QHBoxLayout:
         lay = QHBoxLayout()
