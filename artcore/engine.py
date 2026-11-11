@@ -648,6 +648,9 @@ class Engine:
             pass
         if not reason:
             reason = a.error.message() if a.error.value() else a.message()
+        code = int(getattr(a, "status_code", 0) or 0)
+        if code >= 300:                              # libtorrent puts the HTTP status text in failure_reason
+            reason = _http_reason(code, reason)
         self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = reason
 
     def tracker_error(self, key: str) -> str:
@@ -1067,7 +1070,10 @@ class Engine:
                         st = "working"
                     else:
                         st = "not_contacted"
-                    msg = ih.get("message") or (reason if st in ("not_working", "tracker_error") else "")
+                    http = st == "tracker_error" and reason.startswith("HTTP ")
+                    if http:
+                        st = "not_working"            # the web server answered, the tracker script didn't
+                    msg = reason if http else ih.get("message") or (reason if st in ("not_working", "tracker_error") else "")
                     children.append({
                         "proto": "v1" if i == 0 else "v2",
                         "endpoint": f"{addr[0]}:{addr[1]}" if addr[0] else "",
@@ -1168,6 +1174,19 @@ def _match_files(new: list[tuple[int, str, int]], old: list[tuple[str, int]]) ->
     return renamed
 
 
+
+
+def _http_reason(code: int, text: str) -> str:
+    """'Not Found' → 'HTTP 404 Not Found — the announce URL doesn't exist on the server (…)'.
+    An HTTP error means the request never reached the tracker script, so there is no tracker text."""
+    from .i18n import t
+    hint = {401: "http_auth", 403: "http_forbidden", 404: "http_not_found", 410: "http_not_found",
+            429: "http_too_many"}.get(code)
+    if hint is None and code >= 500:
+        hint = "http_down" if code in (502, 503, 504) else "http_server"
+    text = text if text and not text[0].isdigit() else ""
+    out = f"HTTP {code} {text}".rstrip()
+    return f"{out} — {t(hint)}" if hint else out
 
 def _left(t, now: float) -> int:
     """Seconds until a posix time from an announce entry, 0 when it's due / unknown."""
