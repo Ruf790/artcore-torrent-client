@@ -322,9 +322,14 @@ def _section(text: str) -> QLabel:
     return lab
 
 
+def _theme_title_bar(w: QWidget) -> None:
+    winint.set_title_bar(int(w.winId()), theme.current_name == "dark", C["page_bg"], C["emphasis"])
+
+
 class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
+        _theme_title_bar(self)
         self.setWindowTitle(t("settings"))
         self.setMinimumWidth(560)
         self.cfg = dict(cfg)
@@ -442,6 +447,7 @@ class HashThread(QThread):
 class CreateTorrentDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
+        _theme_title_bar(self)
         self.setWindowTitle(t("ct_title"))
         self.setMinimumWidth(600)
         self.cfg = cfg
@@ -798,7 +804,7 @@ class MainWindow(QMainWindow):
         self.empty_ico.setStyleSheet(f"background:{C['tertiary_bg']}; border-radius: 16px;")
         dark = theme.current_name == "dark"
         self.theme_btn.setIcon(icon("fa6s.sun" if dark else "fa6s.moon"))
-        winint.set_dark_title_bar(int(self.winId()), dark)
+        winint.set_title_bar(int(self.winId()), dark, C["page_bg"], C["emphasis"])
         self.table.viewport().update()
 
     def toggle_theme(self):

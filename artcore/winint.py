@@ -44,19 +44,45 @@ def init_process() -> None:
         pass
 
 
-def set_dark_title_bar(win_id: int, dark: bool) -> None:
+def _colorref(hex_color: str) -> int:
+    """'#rrggbb' -> COLORREF 0x00BBGGRR."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (b << 16) | (g << 8) | r
+
+
+def set_title_bar(win_id: int, dark: bool, caption: str | None = None, text: str | None = None) -> None:
+    """Dark/light title bar; on Windows 11 also paint it in the page colour,
+    so it matches the window even with "Show accent color on title bars" on."""
     if not IS_WIN:
         return
     import ctypes
     from ctypes import wintypes
-    val = ctypes.c_int(1 if dark else 0)
-    for attr in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 2004+ / older builds)
+    hwnd = wintypes.HWND(int(win_id))
+    dwm = ctypes.windll.dwmapi
+
+    def setattr_(attr: int, value: int) -> bool:
+        v = ctypes.c_int(value)
         try:
-            if ctypes.windll.dwmapi.DwmSetWindowAttribute(wintypes.HWND(int(win_id)), attr,
-                                                          ctypes.byref(val), ctypes.sizeof(val)) == 0:
-                return
+            return dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v)) == 0
         except Exception:
-            return
+            return False
+
+    # DWMWA_USE_IMMERSIVE_DARK_MODE: 20 (Win10 2004+ / Win11), 19 (older Win10 builds)
+    if not setattr_(20, 1 if dark else 0):
+        setattr_(19, 1 if dark else 0)
+    # Windows 11 (22000+) only; silently ignored on Windows 10
+    if caption:
+        setattr_(35, _colorref(caption))   # DWMWA_CAPTION_COLOR
+    if text:
+        setattr_(36, _colorref(text))      # DWMWA_TEXT_COLOR
+    # repaint the non-client area now instead of on the next activation
+    SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
+    try:
+        ctypes.windll.user32.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                                          SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+    except Exception:
+        pass
 
 
 # ── autostart ───────────────────────────────────────────────────
