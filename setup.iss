@@ -4,7 +4,7 @@
 
 #define AppName      "ArtCore Client"
 #define AppVersion   "1.0.0"
-#define AppPublisher "ArtCore Gangsta"
+#define AppPublisher "ArtCore Client"
 #define AppURL       "https://github.com/Ruf790/artcore-torrent-client"
 #define AppExe       "ArtCoreClient.exe"
 #define ProgIdT      "ArtCoreClient.torrent"

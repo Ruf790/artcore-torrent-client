@@ -89,7 +89,7 @@ STRINGS = {
     "ct_done":         ("Торрент создан:\n{0}\n\nЗагрузите его на трекер.", "Torrent created:\n{0}\n\nUpload it to the tracker."),
     "ct_working":      ("Хеширование…",                      "Hashing…"),
     # site-style UI
-    "subtitle":        ("Торрент-клиент · ArtCore Gangsta",  "Torrent client · ArtCore Gangsta"),
+    "subtitle":        ("Торрент-клиент · ArtCore Client",   "Torrent client · ArtCore Client"),
     "meta_version":    ("Версия {0}",                        "Version {0}"),
     "meta_port":       ("Порт {0}",                          "Port {0}"),
     "meta_dht":        ("DHT: {0} узлов",                    "DHT: {0} nodes"),
