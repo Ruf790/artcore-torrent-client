@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import datetime
 
 import qtawesome as qta
@@ -15,10 +16,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QTableView, QTableWidget,
-                               QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget)
+                               QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import APP_TITLE, VERSION, config, theme, winint
-from .engine import Engine, TorrentRow, create_torrent
+from .engine import (Engine, TorrentRow, create_torrent, torrent_files,
+                     PRIO_SKIP, PRIO_NORMAL, PRIO_HIGH)
 from .i18n import t
 
 C = theme.current   # live colour dict, updated in place on theme switch
@@ -360,6 +363,8 @@ class SettingsDialog(QDialog):
         form.addRow(t("set_lang"), self.lang)
         self.tray = QCheckBox(t("set_tray")); self.tray.setChecked(cfg["minimize_to_tray"])
         form.addRow(self.tray)
+        self.show_add = QCheckBox(t("set_show_add")); self.show_add.setChecked(cfg.get("show_add_dialog", True))
+        form.addRow(self.show_add)
 
         # ── connection
         form.addRow(_section(t("set_grp_conn")))
@@ -425,9 +430,181 @@ class SettingsDialog(QDialog):
                  active_seeds=self.act_seed.value(), dht=self.dht.isChecked(),
                  lsd=self.dht.isChecked(), upnp=self.upnp.isChecked(),
                  minimize_to_tray=self.tray.isChecked(),
+                 show_add_dialog=self.show_add.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
+
+
+def free_space(path: str) -> int | None:
+    p = os.path.abspath(path or ".")
+    while p and not os.path.exists(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return None
+
+
+class AddTorrentDialog(QDialog):
+    """Choose folder and files before adding (.torrent), or just folder for a magnet."""
+    def __init__(self, cfg: dict, name: str, ti=None, parent=None):
+        super().__init__(parent)
+        _theme_title_bar(self)
+        self.setWindowTitle(t("ad_title"))
+        self.setMinimumWidth(680)
+        self.ti = ti
+        self.leaves: list[tuple[QTreeWidgetItem, int, int]] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 16)
+        lay.setSpacing(10)
+
+        head = _section(name)
+        head.setWordWrap(True)
+        lay.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel(t("ad_save_to")))
+        self.path = QLineEdit(cfg.get("save_path", ""))
+        self.path.textChanged.connect(self._update)
+        row.addWidget(self.path, 1)
+        b = QPushButton(t("set_browse"))
+        b.clicked.connect(self._browse)
+        row.addWidget(b)
+        lay.addLayout(row)
+
+        if ti is not None:
+            self.tree = QTreeWidget()
+            self.tree.setHeaderLabels([t("file_name"), t("col_size")])
+            self.tree.setRootIsDecorated(True)
+            self.tree.setUniformRowHeights(True)
+            hh = self.tree.header()
+            hh.setStretchLastSection(False)
+            hh.setSectionResizeMode(0, QHeaderView.Stretch)
+            hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            self._fill(torrent_files(ti))
+            self.tree.itemChanged.connect(lambda *_: self._update())
+            lay.addWidget(self.tree, 1)
+            self.setMinimumHeight(540)
+
+            sel = QHBoxLayout()
+            ball = QPushButton(t("ad_all"));  ball.clicked.connect(lambda: self._check_all(True))
+            bnone = QPushButton(t("ad_none")); bnone.clicked.connect(lambda: self._check_all(False))
+            sel.addWidget(ball)
+            sel.addWidget(bnone)
+            sel.addStretch()
+            self.sel_lbl = QLabel(); self.sel_lbl.setObjectName("meta")
+            sel.addWidget(self.sel_lbl)
+            lay.addLayout(sel)
+        else:
+            note = QLabel(t("ad_magnet_note")); note.setObjectName("meta"); note.setWordWrap(True)
+            lay.addWidget(note)
+
+        bottom = QHBoxLayout()
+        self.paused = QCheckBox(t("ad_paused"))
+        bottom.addWidget(self.paused)
+        bottom.addStretch()
+        self.free_lbl = QLabel(); self.free_lbl.setObjectName("meta")
+        bottom.addWidget(self.free_lbl)
+        lay.addLayout(bottom)
+
+        self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.ok = self.bb.button(QDialogButtonBox.Ok)
+        self.ok.setText(t("add_btn"))
+        self.ok.setObjectName("primary")
+        self.bb.accepted.connect(self.accept)
+        self.bb.rejected.connect(self.reject)
+        lay.addWidget(self.bb)
+        self._update()
+
+    def _fill(self, files):
+        folders: dict[tuple, QTreeWidgetItem] = {}
+        ic_dir, ic_file = icon("fa6s.folder", "warning"), icon("fa6s.file")
+        self.tree.blockSignals(True)
+        for idx, path, size in files:
+            parts = path.replace("\\", "/").split("/")
+            parent, key = self.tree.invisibleRootItem(), ()
+            for part in parts[:-1]:
+                key += (part,)
+                it = folders.get(key)
+                if it is None:
+                    it = QTreeWidgetItem(parent, [part, ""])
+                    it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+                    it.setCheckState(0, Qt.Checked)
+                    it.setIcon(0, ic_dir)
+                    folders[key] = it
+                parent = it
+            leaf = QTreeWidgetItem(parent, [parts[-1], fmt_size(size)])
+            leaf.setFlags(leaf.flags() | Qt.ItemIsUserCheckable)
+            leaf.setCheckState(0, Qt.Checked)
+            leaf.setIcon(0, ic_file)
+            leaf.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            self.leaves.append((leaf, idx, size))
+
+        leaf_size = {id(lf): sz for lf, _, sz in self.leaves}
+
+        def folder_size(it: QTreeWidgetItem) -> int:
+            if it.childCount() == 0:
+                return leaf_size.get(id(it), 0)
+            total = sum(folder_size(it.child(i)) for i in range(it.childCount()))
+            it.setText(1, fmt_size(total))
+            it.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            return total
+
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            folder_size(root.child(i))
+        if len(files) <= 300:
+            self.tree.expandAll()
+        else:
+            for i in range(root.childCount()):
+                root.child(i).setExpanded(True)
+        self.tree.blockSignals(False)
+
+    def _check_all(self, on: bool):
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            root.child(i).setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+        for leaf, _, _ in self.leaves:          # single-file / flat torrents have no folder items
+            leaf.setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+        self._update()
+
+    def selected_size(self) -> int:
+        return sum(sz for lf, _, sz in self.leaves if lf.checkState(0) == Qt.Checked)
+
+    def _update(self):
+        need = 0
+        if self.ti is not None:
+            need = self.selected_size()
+            total = sum(sz for _, _, sz in self.leaves)
+            self.sel_lbl.setText(t("ad_selected", fmt_size(need), fmt_size(total)))
+        free = free_space(self.path.text())
+        if free is None:
+            self.free_lbl.setText("")
+        elif need > free:
+            self.free_lbl.setText(f'<span style="color:{C["danger"]}">{t("ad_no_space")} · {t("ad_free", fmt_size(free))}</span>')
+        else:
+            self.free_lbl.setText(t("ad_free", fmt_size(free)))
+        self.ok.setEnabled(self.ti is None or need > 0 or not self.leaves)
+        self.ok.setToolTip("" if self.ok.isEnabled() else t("ad_nothing"))
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, t("choose_folder"), self.path.text())
+        if d:
+            self.path.setText(d)
+
+    def priorities(self) -> list[int] | None:
+        """None = everything selected (keep libtorrent defaults)."""
+        if self.ti is None or all(lf.checkState(0) == Qt.Checked for lf, _, _ in self.leaves):
+            return None
+        prios = [PRIO_NORMAL] * self.ti.num_files()
+        for lf, idx, _ in self.leaves:
+            if lf.checkState(0) != Qt.Checked:
+                prios[idx] = PRIO_SKIP
+        return prios
 
 
 class HashThread(QThread):
@@ -755,6 +932,14 @@ class MainWindow(QMainWindow):
         grid.setRowStretch(4, 1)
         self.tabs.addTab(gen, t("tab_general"))
 
+        self.files_tbl = self._mk_table(["file_name", "col_size", "col_progress", "file_prio"], stretch=0)
+        self.files_tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.files_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.files_tbl.customContextMenuRequested.connect(self.files_menu)
+        for c, w in ((1, 100), (2, 90), (3, 120)):
+            self.files_tbl.setColumnWidth(c, w)
+        self.tabs.addTab(self.files_tbl, t("tab_files"))
+
         self.peers_tbl = self._mk_table(["peer_ip", "peer_client", "col_progress", "col_down", "col_up"], stretch=1)
         self.tabs.addTab(self.peers_tbl, t("tab_peers"))
         self.tr_tbl = self._mk_table(["tr_url", "tr_tier", "tr_msg"], stretch=0)
@@ -762,7 +947,7 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.tabs.addTab(self.log, t("tab_log"))
-        for i, name in enumerate(("fa6s.circle-info", "fa6s.users", "fa6s.server", "fa6s.list")):
+        for i, name in enumerate(("fa6s.circle-info", "fa6s.folder-tree", "fa6s.users", "fa6s.server", "fa6s.list")):
             self._themed_icon(lambda ic, i=i: self.tabs.setTabIcon(i, ic), name)
         self.tabs.currentChanged.connect(lambda _: self.refresh_details())
         lay.addWidget(self.tabs)
@@ -827,12 +1012,26 @@ class MainWindow(QMainWindow):
     # ── adding ─────────────────────────────────────────────────
     def add_item(self, item: str):
         """Path to .torrent or magnet URI (dialog, drag & drop, command line, Explorer)."""
+        import libtorrent as lt
+        is_magnet = item.startswith("magnet:")
         try:
-            if item.startswith("magnet:"):
-                self.engine.add_magnet(item)
+            save_path, paused, prios = None, False, None
+            if self.cfg.get("show_add_dialog", True):
+                if is_magnet:
+                    name = lt.parse_magnet_uri(item).name or item[:80]
+                    d = AddTorrentDialog(self.cfg, name, None, self)
+                else:
+                    ti = lt.torrent_info(item)
+                    d = AddTorrentDialog(self.cfg, ti.name(), ti, self)
+                self.show_normal()
+                if not d.exec():
+                    return
+                save_path, paused, prios = d.path.text().strip() or None, d.paused.isChecked(), d.priorities()
+            if is_magnet:
+                self.engine.add_magnet(item, save_path=save_path, paused=paused)
             else:
-                self.engine.add_torrent_file(item)
-            self.log_line(item if item.startswith("magnet:") else os.path.basename(item))
+                self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios)
+            self.log_line(item if is_magnet else os.path.basename(item))
         except Exception as e:
             QMessageBox.warning(self, APP_TITLE, t("add_error", e))
         self.tick()
@@ -983,6 +1182,7 @@ class MainWindow(QMainWindow):
                 lab.setText("—")
             self.peers_tbl.setRowCount(0)
             self.tr_tbl.setRowCount(0)
+            self.files_tbl.setRowCount(0)
             return
         trs = self.engine.trackers(row.key)
         self.g["gen_path"].setText(row.save_path)
@@ -994,18 +1194,74 @@ class MainWindow(QMainWindow):
         self.g["gen_error"].setText(row.error or "—")
         self.g["gen_error"].setStyleSheet(f"color:{C['danger']};" if row.error else "")
 
-        if self.tabs.currentIndex() == 1:
+        tab = self.tabs.currentIndex()
+        if tab == 1:
+            self.refresh_files(row.key)
+        elif tab == 2:
             peers = self.engine.peers(row.key)
             self.peers_tbl.setRowCount(len(peers))
             for i, p in enumerate(peers):
                 for j, v in enumerate((p["ip"], p["client"], f"{p['progress'] * 100:.1f}%",
                                        fmt_speed(p["down"]), fmt_speed(p["up"]))):
                     self.peers_tbl.setItem(i, j, QTableWidgetItem(v))
-        elif self.tabs.currentIndex() == 2:
+        elif tab == 3:
             self.tr_tbl.setRowCount(len(trs))
             for i, tr in enumerate(trs):
                 for j, v in enumerate((tr["url"], str(tr["tier"]), tr["message"])):
                     self.tr_tbl.setItem(i, j, QTableWidgetItem(v))
+
+    # ── files tab ──────────────────────────────────────────────
+    PRIO_TEXT = {PRIO_SKIP: "prio_skip", PRIO_NORMAL: "prio_normal", PRIO_HIGH: "prio_high"}
+
+    def refresh_files(self, key: str):
+        files = self.engine.files(key)
+        tbl = self.files_tbl
+        if not files:
+            tbl.setRowCount(1)
+            for j, v in enumerate((t("files_wait"), "", "", "")):
+                tbl.setItem(0, j, QTableWidgetItem(v))
+            return
+        # keep the same items (and selection) between 1 s refreshes
+        same = (tbl.rowCount() == len(files) and tbl.item(0, 0) is not None
+                and tbl.item(0, 0).data(Qt.UserRole) == (key, files[0]["index"]))
+        if not same:
+            tbl.setRowCount(len(files))
+        ic = icon("fa6s.file")
+        for i, f in enumerate(files):
+            prio = f["priority"]
+            label = t(self.PRIO_TEXT.get(prio, "prio_high" if prio > PRIO_NORMAL else "prio_normal"))
+            vals = (f["path"], fmt_size(f["size"]), f"{f['progress'] * 100:.1f}%", label)
+            for j, v in enumerate(vals):
+                it = tbl.item(i, j) if same else None
+                if it is None:
+                    it = QTableWidgetItem()
+                    if j == 0:
+                        it.setIcon(ic)
+                    if j in (1, 2):
+                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    tbl.setItem(i, j, it)
+                it.setText(v)
+                it.setData(Qt.UserRole, (key, f["index"]))
+                skip = prio == PRIO_SKIP
+                it.setForeground(QColor(C["secondary"]) if skip else
+                                 QColor(C["primary_text"] if theme.current_name == "dark" else C["primary"])
+                                 if (j == 3 and prio > PRIO_NORMAL) else QColor(C["body"]))
+
+    def files_menu(self, pos):
+        rows = sorted({i.row() for i in self.files_tbl.selectedItems()})
+        data = [self.files_tbl.item(r, 0).data(Qt.UserRole) for r in rows if self.files_tbl.item(r, 0)]
+        data = [d for d in data if d]
+        if not data:
+            return
+        key = data[0][0]
+        idxs = [d[1] for d in data]
+        m = QMenu(self)
+        for prio, name, col in ((PRIO_HIGH, "fa6s.angles-up", "primary"),
+                                (PRIO_NORMAL, "fa6s.minus", "secondary"),
+                                (PRIO_SKIP, "fa6s.ban", "danger")):
+            m.addAction(icon(name, col), t(self.PRIO_TEXT[prio]),
+                        lambda p=prio: (self.engine.set_file_priority(key, idxs, p), self.refresh_files(key)))
+        m.exec(self.files_tbl.viewport().mapToGlobal(pos))
 
     # ── window / quit ──────────────────────────────────────────
     def show_normal(self):

@@ -40,6 +40,13 @@ def main() -> int:
     cfg = config.load()
     set_lang(cfg.get("language", "ru"))
 
+    # Qt's own buttons (Cancel, Yes/No, file dialogs) in the same language
+    if cfg.get("language", "ru") == "ru":
+        from PySide6.QtCore import QLibraryInfo, QTranslator
+        qt_tr = QTranslator(app)
+        if qt_tr.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
+            app.installTranslator(qt_tr)
+
     # imported after set_lang() so labels pick the right language
     from . import theme
     from .engine import Engine
