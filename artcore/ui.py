@@ -2118,10 +2118,7 @@ class MainWindow(QMainWindow):
         pl.addWidget(self.peers_summary)
         pl.addWidget(self.peers_tbl, 1)
         self.tabs.addTab(peers_page, t("tab_peers"))
-        self.tr_tbl = self._mk_table(["tr_url", "tr_tier", "tr_msg"], stretch=0)
-        self.tr_tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
-        self.tr_tbl.setColumnWidth(1, 80)
-        self.tr_tbl.setColumnWidth(2, 380)
+        self.tr_tbl = widgets.TrackersView()
         self.tabs.addTab(self.tr_tbl, t("tab_trackers"))
 
         speed = QWidget()
@@ -2700,6 +2697,8 @@ class MainWindow(QMainWindow):
             "splitter": b64(self.split.saveState()),
             "tab": self.tabs.currentIndex(),
             "files_header": b64(self.files_tbl.header().saveState()),
+            "trackers_header": b64(self.tr_tbl.header().saveState()),
+            "trackers_columns": len(widgets.TrackersView.COLS),
         }
         config.save(self.cfg)
 
@@ -2718,6 +2717,8 @@ class MainWindow(QMainWindow):
             self.split.restoreState(ba("splitter"))
         if ba("files_header") is not None:
             self.files_tbl.header().restoreState(ba("files_header"))
+        if ba("trackers_header") is not None and st.get("trackers_columns") == len(widgets.TrackersView.COLS):
+            self.tr_tbl.header().restoreState(ba("trackers_header"))
         if isinstance(st.get("tab"), int):
             self.tabs.setCurrentIndex(st["tab"])
 
@@ -2995,7 +2996,7 @@ class MainWindow(QMainWindow):
                 lab.setText("—")
             self.peers_tbl.setRowCount(0)
             self.peers_summary.hide()
-            self.tr_tbl.setRowCount(0)
+            self.tr_tbl.clear_view()
             self.files_tbl.clear()
             self.files_tbl.key = None
             self.piecebar.set_pieces([], False)
@@ -3067,18 +3068,7 @@ class MainWindow(QMainWindow):
                         it.setToolTip(f"{code} — {cname}")
                     self.peers_tbl.setItem(i, j, it)
         elif tab == 3:
-            self.tr_tbl.setRowCount(len(trs))
-            for i, tr in enumerate(trs):
-                bad = bool(tr["message"])
-                for j, v in enumerate((tr["url"], str(tr["tier"]), tr["message"] or t("tr_ok"))):
-                    it = QTableWidgetItem(v)
-                    it.setToolTip(v)
-                    if j == 0:
-                        it.setIcon(widgets.icon("fa6s.circle-exclamation" if bad else "fa6s.circle-check",
-                                                "danger" if bad else "success"))
-                    elif j == 2:
-                        it.setForeground(QColor(C["danger" if bad else "success"]))
-                    self.tr_tbl.setItem(i, j, it)
+            self.tr_tbl.update_trackers(row.key, trs, self.engine.peer_sources(row.key))
 
     # ── speed schedule ─────────────────────────────────────────
     def apply_schedule(self) -> bool:
