@@ -187,3 +187,86 @@ class GeoIP:
             self._cache.clear()
         self._cache[ip] = res
         return res
+
+
+# ── scrape (seeds / leechers before adding) ────────────────────
+def scrape_url(announce: str) -> str | None:
+    """BEP 48: …/announce → …/scrape. TBDev-style rewritten passkey URLs (/name-a-<passkey>) map to
+    scrape.php?passkey=…"""
+    import re
+    from urllib.parse import urlsplit, urlunsplit
+    u = urlsplit(announce)
+    head, _, last = u.path.rpartition("/")
+    if "announce" in last:
+        return urlunsplit((u.scheme, u.netloc, head + "/" + last.replace("announce", "scrape", 1), u.query, ""))
+    m = re.search(r"-a-([0-9a-fA-F]{32})$", last)
+    if m:
+        return urlunsplit((u.scheme, u.netloc, "/scrape.php", "passkey=" + m.group(1), ""))
+    return None
+
+
+def _scrape_http(announce: str, ih: bytes, timeout: float) -> dict | None:
+    import urllib.request
+    from urllib.parse import quote_from_bytes
+    import libtorrent as lt
+    url = scrape_url(announce)
+    if not url:
+        return None
+    url += ("&" if "?" in url else "?") + "info_hash=" + quote_from_bytes(ih, safe="")
+    req = urllib.request.Request(url, headers={"User-Agent": "ArtCore"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        d = lt.bdecode(r.read(1 << 20))
+    if not isinstance(d, dict):
+        return None
+    if b"failure reason" in d:
+        return {"error": d[b"failure reason"].decode("utf-8", "replace")}
+    f = (d.get(b"files") or {}).get(ih)
+    if not isinstance(f, dict):
+        return None
+    return {"seeds": int(f.get(b"complete", 0)), "peers": int(f.get(b"incomplete", 0)),
+            "done": int(f.get(b"downloaded", 0))}
+
+
+def _scrape_udp(announce: str, ih: bytes, timeout: float) -> dict | None:
+    """BEP 15: connect, then scrape one info-hash."""
+    import os as _os
+    import socket
+    import struct
+    from urllib.parse import urlsplit
+    u = urlsplit(announce)
+    if not u.hostname or not u.port:
+        return None
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout / 2)
+        addr = (socket.gethostbyname(u.hostname), u.port)
+        tid = struct.unpack(">I", _os.urandom(4))[0]
+        s.sendto(struct.pack(">QII", 0x41727101980, 0, tid), addr)
+        data, _ = s.recvfrom(64)
+        action, rtid, conn = struct.unpack(">IIQ", data[:16])
+        if action != 0 or rtid != tid:
+            return None
+        s.sendto(struct.pack(">QII", conn, 2, tid) + ih, addr)
+        data, _ = s.recvfrom(64)
+        action, rtid = struct.unpack(">II", data[:8])
+        if action != 2 or rtid != tid or len(data) < 20:
+            return None
+        seeds, done, peers = struct.unpack(">III", data[8:20])
+        return {"seeds": seeds, "peers": peers, "done": done}
+
+
+def scrape(trackers: list[str], ih: bytes, timeout: float = 6.0) -> dict | None:
+    """First tracker that answers: {"seeds", "peers", "done", "host"} or {"error", "host"}; None = nobody."""
+    from urllib.parse import urlsplit
+    last_err = None
+    for url in trackers[:6]:
+        host = (urlsplit(url).hostname or "").removeprefix("www.")
+        try:
+            res = _scrape_udp(url, ih, timeout) if url.startswith("udp://") else _scrape_http(url, ih, timeout)
+        except Exception:
+            res = None
+        if res and "error" not in res:
+            res["host"] = host
+            return res
+        if res:
+            last_err = dict(res, host=host)
+    return last_err

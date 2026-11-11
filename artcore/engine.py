@@ -88,6 +88,11 @@ class Engine:
         except (FileNotFoundError, ValueError):
             self.stats_saved = {"all_down": 0, "all_up": 0}
         self._stats_flushed = time.time()
+        # per-tracker totals: host → [uploaded, downloaded]; seen = last counted all_time values per torrent
+        self.tr_totals: dict[str, list[int]] = self.stats_saved.get("trackers", {})
+        self._tr_seen: dict[str, list[int]] = self.stats_saved.get("seen", {})
+        self._low_space: set[str] = set()       # paused because the disk is (almost) full
+        self.space_events: list[tuple[str, str, int]] = []   # ("paused" | "resumed", name, free bytes)
         self.finished_names: list[str] = []    # for tray notifications
         self.stopped_names: list[str] = []     # paused by a stop-seeding rule
         self._hosts: dict[str, str] = {}
@@ -115,6 +120,7 @@ class Engine:
 
         self.ses = lt.session(self._settings())
         self._load_state()
+        self._low_space = {k for k, o in self.opts.items() if o.get("low_space") and k in self.handles}
         if self.bans:
             self._apply_filter()
 
@@ -249,6 +255,98 @@ class Engine:
                     self.ban(ip, f"fake progress: got {sent >> 20} MiB, progress +{max(gained, 0) / size:.1%} ({client})")
         if len(self._peer_seen) > 20000:
             self._peer_seen.clear()
+
+    # ── per-tracker totals ─────────────────────────────────────
+    def _count_trackers(self) -> None:
+        """Add what each torrent moved since the last count to its tracker. A torrent seen for the
+        first time brings its whole history (all_time_* is kept in resume data)."""
+        for key, h in self.handles.items():
+            if not h.is_valid():
+                continue
+            s = h.status()
+            up, down = int(s.all_time_upload), int(s.all_time_download)
+            last = self._tr_seen.get(key)
+            du, dd = (up, down) if last is None else (up - last[0], down - last[1])
+            self._tr_seen[key] = [up, down]
+            if du <= 0 and dd <= 0:
+                continue
+            tot = self.tr_totals.setdefault(self._host(key, h), [0, 0])
+            tot[0] += max(du, 0)
+            tot[1] += max(dd, 0)
+
+    def tracker_totals(self) -> list[tuple[str, int, int, int]]:
+        """[(host, uploaded, downloaded, torrents now)] sorted by uploaded."""
+        self._count_trackers()
+        count: dict[str, int] = {}
+        for key, h in self.handles.items():
+            if h.is_valid():
+                host = self._host(key, h)
+                count[host] = count.get(host, 0) + 1
+        hosts = set(self.tr_totals) | set(count)
+        return sorted(((hst, *self.tr_totals.get(hst, [0, 0]), count.get(hst, 0)) for hst in hosts),
+                      key=lambda x: -x[1])
+
+    # ── low disk space ─────────────────────────────────────────
+    def _check_space(self) -> None:
+        """Pause downloads when the target disk has less than min_free_gb, resume when 1 GB more is free."""
+        import shutil
+        need = float(self.cfg.get("min_free_gb", 0) or 0) * (1 << 30)
+        if not need and not self._low_space:
+            return
+        free_by_path: dict[str, int] = {}
+
+        def free(path: str) -> int:
+            if path not in free_by_path:
+                try:
+                    free_by_path[path] = shutil.disk_usage(path).free
+                except OSError:
+                    free_by_path[path] = 1 << 62
+            return free_by_path[path]
+
+        for key, h in self.handles.items():
+            if not h.is_valid():
+                continue
+            s = h.status()
+            if key in self._low_space:
+                if not need or free(s.save_path) >= need + (1 << 30):
+                    self._low_space.discard(key)
+                    self.opts.get(key, {}).pop("low_space", None)
+                    self._save_opts()
+                    self.resume(key)
+                    self.space_events.append(("resumed", s.name, free(s.save_path)))
+                continue
+            if need and s.state == lt.torrent_status.downloading and not (s.flags & lt.torrent_flags.paused) \
+                    and free(s.save_path) < need:
+                self.pause(key)
+                self._low_space.add(key)
+                self.opts.setdefault(key, {})["low_space"] = True    # survives a restart
+                self._save_opts()
+                self.space_events.append(("paused", s.name, free(s.save_path)))
+                self._log("error", f"low disk space ({free(s.save_path) >> 20} MiB free): paused {s.name}")
+
+    # ── files already on disk ──────────────────────────────────
+    @staticmethod
+    def existing_files(ti, save_path: str) -> tuple[int, int, int, bool]:
+        """(files present, files total, bytes present, every file present with its full size)."""
+        fs = ti.files()
+        have = total = got = 0
+        full = True
+        for i in range(fs.num_files()):
+            if fs.file_flags(i) & lt.file_storage.flag_pad_file:
+                continue
+            total += 1
+            p = os.path.join(save_path, fs.file_path(i))
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                full = False
+                continue
+            if size > 0:
+                have += 1
+                got += min(size, fs.file_size(i))
+            if size != fs.file_size(i):
+                full = False
+        return have, total, got, full and have == total
 
     # ── tracker rules: H&R + per-tracker speed ─────────────────
     def tracker_rule(self, host: str) -> dict:
@@ -398,10 +496,12 @@ class Engine:
 
     # ── adding / removing ──────────────────────────────────────
     def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False,
-                         file_priorities: list[int] | None = None) -> str:
+                         file_priorities: list[int] | None = None, seed_mode: bool = False) -> str:
         ti = lt.torrent_info(path)
         atp = lt.add_torrent_params()
         atp.ti = ti
+        if seed_mode:      # files known to be complete: skip the full check, pieces are verified when sent
+            atp.flags |= lt.torrent_flags.seed_mode
         if file_priorities is not None:
             atp.file_priorities = file_priorities
         return self._add(atp, save_path, paused)
@@ -437,6 +537,9 @@ class Engine:
         self.tr_status.pop(key, None)
         self._limited.discard(key)
         self._cross_check.discard(key)
+        self._low_space.discard(key)
+        self._count_trackers()           # bank its last traffic before it disappears
+        self._tr_seen.pop(key, None)
         h = self.handles.pop(key, None)
         if h is None:
             return
@@ -524,6 +627,9 @@ class Engine:
             self._check_cross()
         if self._polls % 3 == 0:
             self._apply_tracker_limits()
+        if self._polls % 15 == 0:
+            self._count_trackers()
+            self._check_space()
         if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
             try:
                 self._scan_peers()
@@ -559,8 +665,10 @@ class Engine:
     # ── statistics ─────────────────────────────────────────────
     def _flush_stats(self) -> None:
         st = self.ses.status()
+        self._count_trackers()
         data = {"all_down": self.stats_saved["all_down"] + st.total_payload_download,
-                "all_up": self.stats_saved["all_up"] + st.total_payload_upload}
+                "all_up": self.stats_saved["all_up"] + st.total_payload_upload,
+                "trackers": self.tr_totals, "seen": self._tr_seen}
         tmp = self.stats_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)

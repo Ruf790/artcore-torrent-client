@@ -9,7 +9,7 @@ from collections import deque
 from datetime import datetime
 
 import qtawesome as qta
-from PySide6.QtCore import (Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QThread,
+from PySide6.QtCore import (Qt, QPoint, QAbstractTableModel, QModelIndex, QTimer, QUrl, QThread,
                             Signal, QRectF, QSortFilterProxyModel, QSize, QTime, QPointF)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap,
                            QPainterPath, QKeySequence, QGuiApplication, QFontMetrics, QPen)
@@ -624,6 +624,81 @@ def _fmt_uptime(sec: int) -> str:
     return (f"{d}d " if d else "") + f"{h}:{m:02d}:{s:02d}"
 
 
+class MiniWidget(QWidget):
+    """Floating always-on-top speed window (BitComet-style): drag to move, double-click opens the
+    client, right-click for a menu. Small graph of the last two minutes behind the numbers."""
+    def __init__(self, win: "MainWindow"):
+        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.win = win
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(196, 58)
+        self.down: deque[int] = deque(maxlen=120)
+        self.up: deque[int] = deque(maxlen=120)
+        self._drag = None
+        self.setCursor(Qt.SizeAllCursor)
+        self.setToolTip(t("mini_tip"))
+
+    def push(self, down: int, up: int):
+        self.down.append(down)
+        self.up.append(up)
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        p.setPen(QPen(QColor(C["border"]), 1))
+        p.setBrush(QColor(C["body_bg"]))
+        p.drawRoundedRect(r, 10, 10)
+        # sparkline
+        vals_d, vals_u = list(self.down), list(self.up)
+        top = max(vals_d + vals_u + [32 * 1024]) * 1.1
+        if len(vals_d) > 1:
+            for vals, key in ((vals_d, "primary"), (vals_u, "success")):
+                path = QPainterPath()
+                n = len(vals)
+                for i, v in enumerate(vals):
+                    x = r.left() + 4 + (r.width() - 8) * (i + 120 - n) / 119
+                    y = r.bottom() - 4 - (r.height() - 10) * v / top
+                    path.lineTo(x, y) if i else path.moveTo(x, y)
+                col = QColor(C[key]); col.setAlpha(110)
+                p.setPen(QPen(col, 1.4))
+                p.setBrush(Qt.NoBrush)
+                p.drawPath(path)
+        f = p.font(); f.setPointSizeF(9.5); f.setWeight(QFont.DemiBold); p.setFont(f)
+        d = vals_d[-1] if vals_d else 0
+        u = vals_u[-1] if vals_u else 0
+        for i, (txt, key, ic) in enumerate(((fmt_speed(d) or "0 B/s", "primary", "fa6s.arrow-down"),
+                                            (fmt_speed(u) or "0 B/s", "success", "fa6s.arrow-up"))):
+            y = r.top() + 7 + i * 22
+            p.drawPixmap(int(r.left() + 10), int(y + 3), qta.icon(ic, color=C[key]).pixmap(12, 12))
+            p.setPen(QColor(C[key]))
+            p.drawText(QRectF(r.left() + 28, y, r.width() - 36, 18), Qt.AlignVCenter | Qt.AlignLeft, txt)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e):
+        if self._drag is not None:
+            self.move(e.globalPosition().toPoint() - self._drag)
+
+    def mouseReleaseEvent(self, e):
+        if self._drag is not None:
+            self._drag = None
+            self.win.cfg["mini_pos"] = [self.x(), self.y()]
+            config.save(self.win.cfg)
+
+    def mouseDoubleClickEvent(self, e):
+        self.win.show_normal()
+
+    def contextMenuEvent(self, e):
+        m = QMenu(self)
+        m.addAction(icon("fa6s.window-maximize"), t("show"), self.win.show_normal)
+        m.addAction(icon("fa6s.eye-slash"), t("mini_hide"), lambda: self.win.set_mini(False))
+        m.exec(e.globalPos())
+
+
 class StatsView(QTableWidget):
     """Global statistics like BitComet's Statistics tab, grouped Item / Value rows."""
     def __init__(self):
@@ -653,7 +728,8 @@ class StatsView(QTableWidget):
     def SECTION_ICONS(self):
         return {t("sg_general"): ("fa6s.circle-info", "primary"), t("sg_network"): ("fa6s.network-wired", "info"),
                 t("sg_speed"): ("fa6s.gauge-high", "orange"), t("sg_system"): ("fa6s.microchip", "purple"),
-                t("sg_totals"): ("fa6s.square-poll-vertical", "success")}
+                t("sg_totals"): ("fa6s.square-poll-vertical", "success"),
+                t("sg_trackers"): ("fa6s.server", "info")}
 
     def set_rows(self, rows: list[tuple[str, str] | str]):
         """str = section header, (label, value) = item row."""
@@ -768,6 +844,10 @@ class StatsView(QTableWidget):
             (t("st_all_down"), f"{fmt_size(all_dl)}  {t('st_session', fmt_size(st['session_down']))}"),
             (t("st_all_up"), f"{fmt_size(all_ul)}  {t('st_session', fmt_size(st['session_up']))}"),
             (t("st_ratio"), f"{ratio:.3f}"),
+            t("sg_trackers"),
+            *[(f"{host}  ({n})", t("st_tracker_v", fmt_size(up), fmt_size(down),
+                                     f"{up / down:.2f}" if down else ("∞" if up else "—")))
+              for host, up, down, n in eng.tracker_totals()],
         ])
 
 
@@ -940,6 +1020,26 @@ class SettingsDialog(QDialog):
         self.cross = QCheckBox(t("set_cross")); self.cross.setChecked(cfg.get("cross_seed", True))
         form.addRow(self.cross)
 
+        form.addRow(_section(t("set_grp_power"), "fa6s.bolt", "warning"))
+        self.awake = QCheckBox(t("set_awake")); self.awake.setChecked(cfg.get("keep_awake", True))
+        self.awake_seed = QCheckBox(t("set_awake_seed")); self.awake_seed.setChecked(cfg.get("keep_awake_seed", False))
+        form.addRow(self.awake)
+        form.addRow(self.awake_seed)
+        self.min_free = spin(cfg.get("min_free_gb", 0), 0, 100_000)
+        self.min_free.setSuffix(" GB"); self.min_free.setSpecialValueText(t("pm_off"))
+        form.addRow(t("set_min_free"), self.min_free)
+        self.done_open = QCheckBox(t("set_done_open")); self.done_open.setChecked(cfg.get("done_open_folder", False))
+        form.addRow(self.done_open)
+        self.done_cmd = QLineEdit(cfg.get("done_cmd", ""))
+        self.done_cmd.setPlaceholderText('"C:\\Program Files\\Windows Defender\\MpCmdRun.exe" -Scan -ScanType 3 -File "%F"')
+        form.addRow(t("set_done_cmd"), self.done_cmd)
+        dh = QLabel(t("set_done_hint")); dh.setObjectName("meta"); dh.setWordWrap(True)
+        form.addRow(dh)
+        self.mini_cb = QCheckBox(t("set_mini")); self.mini_cb.setChecked(cfg.get("mini_widget", False))
+        form.addRow(self.mini_cb)
+        self.title_speed = QCheckBox(t("set_title_speed")); self.title_speed.setChecked(cfg.get("speed_in_title", True))
+        form.addRow(self.title_speed)
+
         form.addRow(_section(t("set_grp_sched"), "fa6s.clock", "orange"))
         self.sch_on = QCheckBox(t("sch_enable")); self.sch_on.setChecked(cfg.get("sched_enabled", False))
         form.addRow(self.sch_on)
@@ -1045,6 +1145,10 @@ class SettingsDialog(QDialog):
                  categories=self.cats.categories(),
                  tracker_rules=self.tr_rules.rules(), ban_bad_peers=self.ban_bad.isChecked(),
                  cross_seed=self.cross.isChecked(),
+                 keep_awake=self.awake.isChecked(), keep_awake_seed=self.awake_seed.isChecked(),
+                 min_free_gb=self.min_free.value(), done_open_folder=self.done_open.isChecked(),
+                 done_cmd=self.done_cmd.text().strip(), mini_widget=self.mini_cb.isChecked(),
+                 speed_in_title=self.title_speed.isChecked(),
                  watch_dir=self.watch.text().strip(), watch_category=self.watch_cat.currentData() or "",
                  move_done_dir=self.move_done.text().strip(), move_done_by_category=self.move_bycat.isChecked(),
                  bind_interface=self.iface.currentData() or "", encryption=self.enc.currentData(),
@@ -1070,7 +1174,8 @@ def free_space(path: str) -> int | None:
 
 class AddTorrentDialog(QDialog):
     """Choose folder and files before adding (.torrent), or just folder for a magnet."""
-    def __init__(self, cfg: dict, name: str, ti=None, parent=None, cross: dict | None = None):
+    def __init__(self, cfg: dict, name: str, ti=None, parent=None, cross: dict | None = None,
+                 scrape_src: tuple[list[str], bytes] | None = None):
         super().__init__(parent)
         _theme_title_bar(self)
         self.setWindowTitle(t("ad_title"))
@@ -1085,6 +1190,24 @@ class AddTorrentDialog(QDialog):
         head = _section(name)
         head.setWordWrap(True)
         lay.addWidget(head)
+        # seeds / leechers asked from the tracker in the background (scrape)
+        self.health = QLabel(); self.health.setObjectName("meta"); self.health.setTextFormat(Qt.RichText)
+        self._scrape_res = None
+        if scrape_src and scrape_src[0]:
+            self.health.setText("&#8987; " + t("scr_wait"))
+            lay.addWidget(self.health)
+            import threading
+            from .netx import scrape
+
+            def work():
+                try:
+                    self._scrape_res = ("ok", scrape(*scrape_src))
+                except Exception as e:
+                    self._scrape_res = ("ok", {"error": str(e), "host": ""})
+            threading.Thread(target=work, daemon=True).start()
+            self._scrape_timer = QTimer(self)
+            self._scrape_timer.timeout.connect(self._scrape_done)
+            self._scrape_timer.start(200)
         if cross:
             self.cross_cb = QCheckBox(t("cross_offer", cross["name"], cross["save_path"]))
             self.cross_cb.setChecked(True)
@@ -1165,6 +1288,23 @@ class AddTorrentDialog(QDialog):
         self.bb.rejected.connect(self.reject)
         lay.addWidget(self.bb)
         self._update()
+
+    def _scrape_done(self):
+        if self._scrape_res is None:
+            return
+        self._scrape_timer.stop()
+        res = self._scrape_res[1]
+        dark = theme.current_name == "dark"
+        if not res:
+            self.health.setText(t("scr_none"))
+        elif "error" in res:
+            self.health.setText(f'<span style="color:{C["danger"]}">{t("scr_error", res["host"], res["error"][:120])}</span>')
+        else:
+            alive = res["seeds"] > 0
+            col = C["success_text" if dark else "success"] if alive else C["danger"]
+            self.health.setText(f'<span style="color:{col};font-weight:600">'
+                                f'{t("scr_alive" if alive else "scr_dead")}</span> &nbsp; '
+                                + t("scr_counts", res["seeds"], res["peers"], res["done"], res["host"]))
 
     def use_cross(self) -> bool:
         return self.cross_cb is not None and self.cross_cb.isChecked()
@@ -1528,6 +1668,13 @@ class MainWindow(QMainWindow):
         self.cfg = cfg
         self._quitting = False
         self._themed: list[tuple] = []        # (setter, icon name, colour key) for re-theming
+        self.taskbar = winint.Taskbar()
+        self._tb_state = None
+        self._awake = None
+        self.mini: MiniWidget | None = None
+        self.after_done = "none"                 # sleep | hibernate | shutdown, one-shot
+        self._had_dl = False
+        self._countdown = None
         self._session_up0 = engine.ses.status().total_payload_upload
         self._sched_state: bool | None = None   # None = not applied yet
 
@@ -1575,6 +1722,8 @@ class MainWindow(QMainWindow):
             self.check_updates()
 
         self._tr_bad: set[str] = set()          # torrents already toasted for a tracker error
+        if self.cfg.get("mini_widget"):
+            self.set_mini(True)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(1000)
@@ -1621,6 +1770,14 @@ class MainWindow(QMainWindow):
         self.update_pill.hide()
         self._themed_icon(self.update_pill.setIcon, "fa6s.circle-arrow-up", "#ffffff")
         lay.addWidget(self.update_pill)
+        self.power_pill = QPushButton()              # armed "when everything is downloaded" action
+        self.power_pill.setObjectName("danger")
+        self.power_pill.setCursor(Qt.PointingHandCursor)
+        self.power_pill.setToolTip(t("pw_cancel_tip"))
+        self.power_pill.clicked.connect(lambda: self.set_after_done("none"))
+        self.power_pill.hide()
+        self._themed_icon(self.power_pill.setIcon, "fa6s.power-off", "danger")
+        lay.addWidget(self.power_pill)
         ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
@@ -1922,10 +2079,154 @@ class MainWindow(QMainWindow):
                 a.setChecked(kib == cur)
                 a.triggered.connect(lambda _=False, k=cfg_key, v=kib: self.set_limit(k, v))
         m.addSeparator()
+        a = m.addAction(icon("fa6s.gauge-high"), t("mini_toggle"))
+        a.setCheckable(True)
+        a.setChecked(self.mini is not None and self.mini.isVisible())
+        a.toggled.connect(self.set_mini)
+        pw = m.addMenu(icon("fa6s.power-off"), t("pw_menu"))
+        for kind in ("none", "sleep", "hibernate", "shutdown"):
+            act = pw.addAction(t("pw_" + kind))
+            act.setCheckable(True)
+            act.setChecked(self.after_done == kind)
+            act.triggered.connect(lambda _=False, k=kind: self.set_after_done(k))
+        m.addSeparator()
         m.addAction(icon("fa6s.pause"), t("tray_pause_all"), lambda: self._all(self.engine.pause))
         m.addAction(icon("fa6s.play", "success"), t("tray_resume_all"), lambda: self._all(self.engine.resume))
         m.addSeparator()
         m.addAction(icon("fa6s.power-off", "danger"), t("quit"), self.quit)
+
+    # ── mini widget / power / taskbar ──────────────────────────
+    def set_mini(self, on: bool):
+        if on and self.mini is None:
+            self.mini = MiniWidget(self)
+            pos = self.cfg.get("mini_pos")
+            geo = QGuiApplication.primaryScreen().availableGeometry()
+            if pos and any(sc.availableGeometry().contains(QPoint(*pos)) for sc in QGuiApplication.screens()):
+                self.mini.move(*pos)
+            else:
+                self.mini.move(geo.right() - self.mini.width() - 24, geo.bottom() - self.mini.height() - 24)
+        if self.mini is not None:
+            self.mini.setVisible(on)
+        if self.cfg.get("mini_widget") != on:
+            self.cfg["mini_widget"] = on
+            config.save(self.cfg)
+
+    def set_after_done(self, kind: str):
+        self.after_done = kind
+        self._had_dl = any(r.state in ("downloading", "metadata") for r in self.model.rows)
+        if kind == "none":
+            self.power_pill.hide()
+            if self._countdown is not None:
+                self._countdown.close()
+        else:
+            self.power_pill.setText(t("pw_pill_" + kind))
+            self.power_pill.show()
+            self.log_event("system", t("pw_armed", t("pw_" + kind)))
+
+    def _tick_extras(self, rows, down: int, up: int):
+        dl = [r for r in rows if r.state in ("downloading", "metadata")
+              or (r.state == "tracker_error" and r.progress < 1)]
+        # no sleep while downloading (optionally while seeding with traffic)
+        need = bool(dl) and self.cfg.get("keep_awake", True) or bool(self.cfg.get("keep_awake_seed") and up > 0)
+        if need != self._awake:
+            winint.keep_awake(need)
+            self._awake = need
+        # speeds in the title = taskbar button tooltip
+        title = APP_TITLE
+        if self.cfg.get("speed_in_title", True) and (down > 0 or up > 0):
+            title = f"↓ {fmt_size(down)}/s  ↑ {fmt_size(up)}/s — {APP_TITLE}"
+        if self.windowTitle() != title:
+            self.setWindowTitle(title)
+        # taskbar button progress
+        if self.taskbar.ok:
+            if dl:
+                total = sum(r.size for r in dl) or 1
+                done = sum(int(r.size * r.progress) for r in dl)
+                bad = any(r.state == "tracker_error" for r in dl)
+                st = (winint.TBPF_ERROR if bad else winint.TBPF_NORMAL, done * 1000 // total)
+            else:
+                st = (winint.TBPF_NOPROGRESS, 0)
+            if st != self._tb_state:
+                self._tb_state = st
+                self.taskbar.set(int(self.winId()), st[0], st[1], 1000)
+        if self.mini is not None and self.mini.isVisible():
+            self.mini.push(down, up)
+        # disk space
+        while self.engine.space_events:
+            kind, name, free = self.engine.space_events.pop(0)
+            msg = t("space_" + kind, name, fmt_size(free))
+            self.log_event("error" if kind == "paused" else "torrent", msg)
+            if kind == "paused":
+                self.notify(msg, "", folder=False)
+        # power action once everything is downloaded
+        if self.after_done != "none":
+            if dl:
+                self._had_dl = True
+            elif self._had_dl and self._countdown is None:
+                self._start_power_countdown()
+
+    def _start_power_countdown(self, seconds: int = 60):
+        kind = self.after_done
+        box = QMessageBox(QMessageBox.Warning, APP_TITLE, "", QMessageBox.NoButton, self)
+        now_btn = box.addButton(t("pw_now"), QMessageBox.AcceptRole)
+        box.addButton(t("pw_cancel"), QMessageBox.RejectRole)
+        box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        left = [seconds]
+
+        def fire():
+            timer.stop()
+            box.done(0)
+            self._countdown = None
+            self.set_after_done("none")
+            self.log_event("system", t("pw_fired", t("pw_" + kind)))
+            try:
+                self.engine.save_all()
+                winint.power_action(kind)
+            except Exception as e:
+                self.log_event("error", str(e))
+
+        def step():
+            left[0] -= 1
+            if left[0] <= 0:
+                fire()
+            else:
+                box.setText(t("pw_countdown", t("pw_" + kind), left[0]))
+
+        def closed(_):
+            timer.stop()
+            if self._countdown is box:
+                self._countdown = None
+                if box.clickedButton() is now_btn:
+                    fire()
+                else:
+                    self.set_after_done("none")
+
+        timer = QTimer(box)
+        timer.timeout.connect(step)
+        box.setText(t("pw_countdown", t("pw_" + kind), seconds))
+        box.finished.connect(closed)
+        self._countdown = box
+        timer.start(1000)
+        self.show_normal()
+        box.show()
+
+    def _run_done_action(self, key: str):
+        row = next((r for r in self.engine.rows() if r.key == key), None)
+        if row is None:
+            return
+        full = os.path.join(row.save_path, row.name)
+        if self.cfg.get("done_open_folder"):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(row.save_path))
+        cmd = self.cfg.get("done_cmd", "").strip()
+        if cmd:
+            import subprocess
+            for ph, val in (("%N", row.name), ("%F", full), ("%D", row.save_path), ("%H", row.key), ("%L", row.category)):
+                cmd = cmd.replace(ph, val)
+            try:
+                subprocess.Popen(cmd, shell=True, creationflags=0x08000000 if winint.IS_WIN else 0)
+                self.log_event("system", t("done_cmd_run", cmd))
+            except Exception as e:
+                self.log_event("error", t("done_cmd_fail", e))
 
     def set_limit(self, cfg_key: str, kib: int):
         self.cfg[cfg_key] = kib
@@ -2056,10 +2357,16 @@ class MainWindow(QMainWindow):
             cross = self.engine.find_cross(ti) if ti is not None and self.cfg.get("cross_seed", True) else None
             if self.cfg.get("show_add_dialog", True):
                 if is_magnet:
-                    name = lt.parse_magnet_uri(item).name or item[:80]
-                    d = AddTorrentDialog(self.cfg, name, None, self)
+                    atp = lt.parse_magnet_uri(item)
+                    ihs = atp.info_hashes
+                    ih = (ihs.v1 if ihs.has_v1() else ihs.v2).to_bytes()[:20]
+                    d = AddTorrentDialog(self.cfg, atp.name or item[:80], None, self,
+                                         scrape_src=(list(atp.trackers), ih))
                 else:
-                    d = AddTorrentDialog(self.cfg, ti.name(), ti, self, cross=cross)
+                    ihs = ti.info_hashes()
+                    ih = (ihs.v1 if ihs.has_v1() else ihs.v2).to_bytes()[:20]
+                    d = AddTorrentDialog(self.cfg, ti.name(), ti, self, cross=cross,
+                                         scrape_src=([tr.url for tr in ti.trackers()], ih))
                 self.show_normal()
                 if not d.exec():
                     return
@@ -2067,13 +2374,34 @@ class MainWindow(QMainWindow):
                 category = d.cat.currentData() or ""
                 if not d.use_cross():
                     cross = None
+            seed_mode = False
+            if not cross and ti is not None:
+                # files of this torrent already in the folder: check them, or trust them as complete
+                folder = save_path or self.cfg.get("save_path") or os.path.expanduser("~/Downloads")
+                have, total, got, full = self.engine.existing_files(ti, folder)
+                if have:
+                    box = QMessageBox(QMessageBox.Question, t("ex_title"),
+                                      t("ex_text", have, total, fmt_size(got), folder), QMessageBox.NoButton, self)
+                    b_check = box.addButton(t("ex_check"), QMessageBox.AcceptRole)
+                    b_seed = box.addButton(t("ex_seed"), QMessageBox.ActionRole) if full else None
+                    box.addButton(t("cancel"), QMessageBox.RejectRole)
+                    box.setDefaultButton(b_check)
+                    if full:
+                        box.setInformativeText(t("ex_seed_hint"))
+                    self.show_normal()
+                    box.exec()
+                    if box.clickedButton() is b_seed and b_seed is not None:
+                        seed_mode = True
+                    elif box.clickedButton() is not b_check:
+                        return
             if cross:
                 key = self.engine.add_cross(item, cross, paused=paused)
                 self.log_event("torrent", t("cross_found", cross["name"]))
             elif is_magnet:
                 key = self.engine.add_magnet(item, save_path=save_path, paused=paused)
             else:
-                key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios)
+                key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios,
+                                                   seed_mode=seed_mode)
             if category:
                 self.engine.set_category(key, category)
             if is_magnet:
@@ -2428,6 +2756,7 @@ class MainWindow(QMainWindow):
             self.cfg.update(d.result_cfg())
             config.save(self.cfg)
             self.engine.apply_settings(self.cfg)
+            self.set_mini(bool(self.cfg.get("mini_widget")))
             self._sched_state = None             # re-apply schedule limits on next tick
             self.refresh_category_combo()
             if (self.cfg.get("ip_filter"), self.cfg.get("geoip")) != old_net:
@@ -2487,6 +2816,7 @@ class MainWindow(QMainWindow):
             name, key = self.engine.finished_names.pop(0)
             self.log_event("torrent", t("finished_note", name))
             self.notify(t("finished_note", name), key, folder=True)
+            self._run_done_action(key)
 
         bad = {r.key for r in rows if r.state == "tracker_error"}
         for r in rows:
@@ -2511,6 +2841,7 @@ class MainWindow(QMainWindow):
         st = self.engine.ses.status()
         down, up = st.payload_download_rate, st.payload_upload_rate
         self.graph.push(down, up)
+        self._tick_extras(rows, down, up)
         active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking", "tracker_error"))
         self.k_down.set(fmt_size(down) + "/s", t("kpi_down"))
         self.k_up.set(fmt_size(up) + "/s", t("kpi_up"))
@@ -2688,6 +3019,9 @@ class MainWindow(QMainWindow):
             pass
         self.timer.stop()
         self.tray.hide()
+        if self.mini is not None:
+            self.mini.hide()
+        winint.keep_awake(False)
         self.engine.shutdown()
         if installer:                            # self-update: session saved, let the installer in
             from . import updater

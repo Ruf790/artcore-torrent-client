@@ -179,3 +179,85 @@ def firewall_allowed() -> bool | None:
     found = [b for b in blocks if needle in b]
     # netsh output is localized: "Action: Allow" (en) / "Действие: Разрешить" (ru)
     return any(("allow" in b or "разреш" in b) for b in found)
+
+
+# ── power ──────────────────────────────────────────────────────
+_ES_CONTINUOUS, _ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+
+
+def keep_awake(on: bool) -> None:
+    """Stop Windows from going to sleep while on (display may still turn off).
+    Per-thread state: always call from the UI thread."""
+    if not IS_WIN:
+        return
+    import ctypes
+    ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS | (_ES_SYSTEM_REQUIRED if on else 0))
+
+
+def power_action(kind: str) -> None:
+    """sleep | hibernate | shutdown."""
+    if not IS_WIN:
+        raise OSError("Windows only")
+    import ctypes
+    import subprocess
+    if kind == "shutdown":
+        subprocess.Popen(["shutdown.exe", "/s", "/t", "0"], creationflags=0x08000000)
+    elif kind in ("sleep", "hibernate"):
+        # SetSuspendState(bHibernate, bForce, bWakeupEventsDisabled)
+        ctypes.windll.powrprof.SetSuspendState(kind == "hibernate", False, False)
+
+
+# ── taskbar button progress (ITaskbarList3) ────────────────────
+TBPF_NOPROGRESS, TBPF_INDETERMINATE, TBPF_NORMAL, TBPF_ERROR, TBPF_PAUSED = 0, 1, 2, 4, 8
+
+
+class Taskbar:
+    """Progress on the taskbar button, like Explorer's file copy. Raw COM via ctypes (Qt 6 dropped
+    QWinTaskbarProgress). Every call is best-effort: a failure just leaves the button plain."""
+    _SET_VALUE, _SET_STATE = 9, 10      # vtable: IUnknown 0-2, HrInit 3, AddTab…MarkFullscreenWindow 4-8
+
+    def __init__(self):
+        self.ptr = None
+        self.ok = False
+        if not IS_WIN:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("a", wintypes.DWORD), ("b", wintypes.WORD), ("c", wintypes.WORD), ("d", ctypes.c_ubyte * 8)]
+
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitialize(None)          # S_FALSE when Qt already did it — fine
+            clsid, iid = GUID(), GUID()
+            ole32.CLSIDFromString("{56FDF344-FD6D-11d0-958A-006097C9A090}", ctypes.byref(clsid))
+            ole32.CLSIDFromString("{ea1afb91-9e28-4b86-90e9-9e9f8a5eee6f}", ctypes.byref(iid))
+            ptr = ctypes.c_void_p()
+            hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(ptr))
+            if hr != 0 or not ptr.value:
+                return
+            self.ptr = ptr
+            self.ok = self._call(3, ()) == 0      # HrInit
+        except Exception:
+            self.ptr = None
+
+    def _call(self, idx: int, args: tuple, argtypes: tuple = ()):
+        import ctypes
+        vtbl = ctypes.cast(self.ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[idx])
+        return fn(self.ptr, *args)
+
+    def set(self, hwnd: int, state: int, done: int = 0, total: int = 0) -> int:
+        if not self.ok:
+            return -1
+        import ctypes
+        from ctypes import wintypes
+        try:
+            hr = self._call(self._SET_STATE, (hwnd, state), (wintypes.HWND, ctypes.c_int))
+            if state in (TBPF_NORMAL, TBPF_ERROR, TBPF_PAUSED) and total > 0:
+                hr = self._call(self._SET_VALUE, (hwnd, done, total),
+                                (wintypes.HWND, ctypes.c_ulonglong, ctypes.c_ulonglong))
+            return hr
+        except Exception:
+            return -1
