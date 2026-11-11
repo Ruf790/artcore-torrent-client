@@ -253,8 +253,16 @@ class ProgressDelegate(QStyledItemDelegate):
             key = ("success" if r.state in ("seeding", "finished") else
                    "danger" if r.state == "error" else
                    "secondary" if r.state in ("paused", "queued") else "primary")
-            painter.setBrush(QColor(C[key]))
-            painter.drawRoundedRect(QRectF(bar.left(), bar.top(), max(6.0, bar.width() * r.progress), 6), 3, 3)
+            fill = QRectF(bar.left(), bar.top(), max(6.0, bar.width() * r.progress), 6)
+            if theme.current_style != "muted" and key in ("primary", "success"):
+                from PySide6.QtGui import QLinearGradient
+                g = QLinearGradient(fill.topLeft(), fill.topRight())
+                g.setColorAt(0, QColor(C[key]))
+                g.setColorAt(1, QColor(C["teal"] if key == "success" else C["purple"]))
+                painter.setBrush(g)
+            else:
+                painter.setBrush(QColor(C[key]))
+            painter.drawRoundedRect(fill, 3, 3)
         painter.restore()
 
 
@@ -295,13 +303,22 @@ def card() -> QFrame:
 
 
 class Kpi(QFrame):
-    """Gray KPI tile with a faint corner icon (.st-kpi--muted)."""
-    def __init__(self, icon_name: str):
+    """KPI tile. muted: gray with a faint corner icon (.st-kpi--muted);
+    soft: coloured icon square + coloured value; vivid: gradient tile."""
+    def __init__(self, icon_name: str, tone: str):
         super().__init__()
         self.setObjectName("kpi")
-        self.icon_name = icon_name
+        self.setProperty("tone", tone)
+        self.icon_name, self.tone = icon_name, tone
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 10, 12, 10)
+        lay.setSpacing(12)
+        self.ico_box = QLabel()
+        self.ico_box.setObjectName("kpiIco")
+        self.ico_box.setProperty("tone", tone)
+        self.ico_box.setFixedSize(44, 44)
+        self.ico_box.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.ico_box)
         col = QVBoxLayout()
         col.setSpacing(1)
         self.val = QLabel("—"); self.val.setObjectName("kpiVal")
@@ -316,9 +333,21 @@ class Kpi(QFrame):
         self.retheme()
 
     def retheme(self):
-        c = QColor(C["secondary"])
-        c.setAlpha(70)
-        self.ico.setPixmap(qta.icon(self.icon_name, color=c).pixmap(34, 34))
+        style = theme.current_style
+        fam = theme.TONES[self.tone]
+        self.ico_box.setVisible(style == "soft")
+        self.ico.setVisible(style != "soft")
+        if style == "soft":
+            col = C[fam + "_text"] if theme.current_name == "dark" else C[fam]
+            self.ico_box.setPixmap(qta.icon(self.icon_name, color=col).pixmap(20, 20))
+        else:
+            c = QColor("#ffffff" if style == "vivid" else C["secondary"])
+            c.setAlpha(110 if style == "vivid" else 70)
+            self.ico.setPixmap(qta.icon(self.icon_name, color=c).pixmap(34, 34))
+        # dynamic-property selectors need a re-polish after a stylesheet change
+        for w in (self, self.ico_box, self.val, self.lbl):
+            w.style().unpolish(w)
+            w.style().polish(w)
 
     def set(self, val: str, lbl: str):
         self.val.setText(val)
@@ -747,6 +776,11 @@ class SettingsDialog(QDialog):
             self.theme.addItem(t(k))
         self.theme.setCurrentIndex({"system": 0, "light": 1, "dark": 2}.get(cfg.get("theme", "system"), 0))
         form.addRow(t("set_theme"), self.theme)
+        self.style_combo = QComboBox()
+        for k in ("muted", "soft", "vivid"):
+            self.style_combo.addItem(t("style_" + k), k)
+        self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(cfg.get("ui_style", "soft"))))
+        form.addRow(t("set_style"), self.style_combo)
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
@@ -919,6 +953,7 @@ class SettingsDialog(QDialog):
                  bind_interface=self.iface.currentData() or "", encryption=self.enc.currentData(),
                  ip_filter=self.ipf.text().strip(), geoip=self.geoip.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
+                 ui_style=self.style_combo.currentData(),
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
 
@@ -1430,6 +1465,7 @@ class MainWindow(QMainWindow):
 
     def _build_header(self) -> QFrame:
         h = card()
+        h.setObjectName("headCard")
         lay = QHBoxLayout(h)
         lay.setContentsMargins(18, 14, 14, 14)
         lay.setSpacing(14)
@@ -1438,7 +1474,7 @@ class MainWindow(QMainWindow):
         self.head_icon.setFixedSize(50, 50)
         self.head_icon.setAlignment(Qt.AlignCenter)
         self._themed_icon(lambda ic: self.head_icon.setPixmap(ic.pixmap(24, 24)),
-                          "fa6s.cloud-arrow-down", "primary_text")
+                          "fa6s.cloud-arrow-down", "head_logo")
         lay.addWidget(self.head_icon)
 
         col = QVBoxLayout(); col.setSpacing(2)
@@ -1453,7 +1489,7 @@ class MainWindow(QMainWindow):
             b = QToolButton(); b.setObjectName("iconBtn"); b.setToolTip(tip)
             b.setCursor(Qt.PointingHandCursor); b.setIconSize(QSize(15, 15))
             b.clicked.connect(slot)
-            self._themed_icon(b.setIcon, name)
+            self._themed_icon(b.setIcon, name, "head_ic")
             lay.addWidget(b)
             return b
 
@@ -1487,8 +1523,8 @@ class MainWindow(QMainWindow):
             return b
 
         btn("add_torrent", "fa6s.plus", self.add_torrent_dialog, "primary", shortcut="Ctrl+O")
-        btn("add_magnet", "fa6s.magnet", self.add_magnet_dialog, shortcut="Ctrl+U")
-        btn("create_torrent", "fa6s.file-circle-plus", self.create_torrent_dialog, shortcut="Ctrl+N")
+        btn("add_magnet", "fa6s.magnet", self.add_magnet_dialog, color="ic_magnet", shortcut="Ctrl+U")
+        btn("create_torrent", "fa6s.file-circle-plus", self.create_torrent_dialog, color="ic_create", shortcut="Ctrl+N")
         lay.addWidget(vsep())
         btn("start", "fa6s.play", lambda: self._each(self.engine.resume), color="success")
         btn("pause", "fa6s.pause", lambda: self._each(self.engine.pause), color="secondary")
@@ -1509,10 +1545,10 @@ class MainWindow(QMainWindow):
     def _build_kpis(self) -> QHBoxLayout:
         lay = QHBoxLayout()
         lay.setSpacing(12)
-        self.k_down = Kpi("fa6s.arrow-down")
-        self.k_up = Kpi("fa6s.arrow-up")
-        self.k_active = Kpi("fa6s.bolt")
-        self.k_session = Kpi("fa6s.chart-line")
+        self.k_down = Kpi("fa6s.arrow-down", "down")
+        self.k_up = Kpi("fa6s.arrow-up", "up")
+        self.k_active = Kpi("fa6s.bolt", "active")
+        self.k_session = Kpi("fa6s.chart-line", "session")
         for k in (self.k_down, self.k_up, self.k_active, self.k_session):
             lay.addWidget(k, 1)
         return lay
@@ -1784,14 +1820,14 @@ class MainWindow(QMainWindow):
             k.retheme()
         self.empty_ico.setStyleSheet(f"background:{C['tertiary_bg']}; border-radius: 16px;")
         dark = theme.current_name == "dark"
-        self.theme_btn.setIcon(icon("fa6s.sun" if dark else "fa6s.moon"))
+        self.theme_btn.setIcon(icon("fa6s.sun" if dark else "fa6s.moon", "head_ic"))
         winint.set_title_bar(int(self.winId()), dark, C["page_bg"], C["emphasis"])
         self.table.viewport().update()
 
     def toggle_theme(self):
         self.cfg["theme"] = "light" if theme.current_name == "dark" else "dark"
         config.save(self.cfg)
-        theme.apply(QApplication.instance(), self.cfg["theme"])
+        theme.apply(QApplication.instance(), self.cfg["theme"], self.cfg.get("ui_style", "soft"))
         self.retheme()
 
     # ── helpers ────────────────────────────────────────────────
@@ -2054,7 +2090,7 @@ class MainWindow(QMainWindow):
     def settings_dialog(self):
         d = SettingsDialog(self.cfg, self)
         if d.exec():
-            old_theme = self.cfg.get("theme")
+            old_theme = (self.cfg.get("theme"), self.cfg.get("ui_style"))
             old_net = (self.cfg.get("ip_filter"), self.cfg.get("geoip"))
             self.cfg.update(d.result_cfg())
             config.save(self.cfg)
@@ -2063,8 +2099,8 @@ class MainWindow(QMainWindow):
             self.refresh_category_combo()
             if (self.cfg.get("ip_filter"), self.cfg.get("geoip")) != old_net:
                 self.start_network_extras()
-            if self.cfg.get("theme") != old_theme:
-                theme.apply(QApplication.instance(), self.cfg["theme"])
+            if (self.cfg.get("theme"), self.cfg.get("ui_style")) != old_theme:
+                theme.apply(QApplication.instance(), self.cfg["theme"], self.cfg.get("ui_style", "soft"))
                 self.retheme()
 
     # ── refresh ────────────────────────────────────────────────

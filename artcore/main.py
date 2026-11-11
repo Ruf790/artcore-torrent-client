@@ -54,7 +54,7 @@ def main() -> int:
 
     app.setStyle("Fusion")
     theme.load_fonts()
-    theme.apply(app, cfg.get("theme", "system"))
+    theme.apply(app, cfg.get("theme", "system"), cfg.get("ui_style", "soft"))
     app.setWindowIcon(app_icon())
 
     engine = Engine(config.data_dir(), cfg)
