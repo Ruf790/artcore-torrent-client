@@ -92,9 +92,10 @@ def icon(name: str, color_key: str = "secondary") -> QIcon:
 # ============================================================
 
 COLS = ["col_name", "col_size", "col_progress", "col_state", "col_down", "col_up",
-        "col_seeds", "col_peers", "col_ratio", "col_eta", "col_tracker", "col_category"]
+        "col_seeds", "col_peers", "col_ratio", "col_eta", "col_tracker", "col_category", "col_tags"]
 (C_NAME, C_SIZE, C_PROG, C_STATE, C_DOWN, C_UP, C_SEEDS, C_PEERS,
- C_RATIO, C_ETA, C_TRACKER, C_CAT) = range(len(COLS))
+ C_RATIO, C_ETA, C_TRACKER, C_CAT, C_TAGS) = range(len(COLS))
+NO_TAG = "\x00none"
 NO_CATEGORY = "\x00none"
 
 # state → soft badge colours (.st-soft-*)
@@ -149,7 +150,7 @@ class TorrentModel(QAbstractTableModel):
                 C_STATE: t("st_" + r.state), C_DOWN: fmt_speed(r.down_rate), C_UP: fmt_speed(r.up_rate),
                 C_SEEDS: str(r.seeds), C_PEERS: str(r.peers), C_RATIO: fmt_ratio(r.ratio),
                 C_ETA: fmt_eta(r.eta) if r.state == "downloading" else "", C_TRACKER: r.tracker_host,
-                C_CAT: r.category,
+                C_CAT: r.category, C_TAGS: ", ".join(r.tags),
             }[c]
         if role == Qt.UserRole:  # sort key
             return {
@@ -157,7 +158,7 @@ class TorrentModel(QAbstractTableModel):
                 C_DOWN: r.down_rate, C_UP: r.up_rate, C_SEEDS: r.seeds, C_PEERS: r.peers,
                 C_RATIO: r.ratio if r.ratio != float("inf") else 1e18,
                 C_ETA: r.eta if r.eta >= 0 else 1e18, C_TRACKER: r.tracker_host,
-                C_CAT: r.category.lower(),
+                C_CAT: r.category.lower(), C_TAGS: ", ".join(r.tags).lower(),
             }[c]
         if role == Qt.ForegroundRole:
             dark = theme.current_name == "dark"
@@ -165,13 +166,15 @@ class TorrentModel(QAbstractTableModel):
                 return QColor(C["primary_text"] if dark else C["primary"])
             if c == C_UP and r.up_rate > 0:
                 return QColor(C["success_text"] if dark else C["success"])
-            if c in (C_TRACKER, C_ETA, C_SIZE, C_CAT):
+            if c in (C_TRACKER, C_ETA, C_SIZE, C_CAT, C_TAGS):
                 return QColor(C["secondary"])
         if role == Qt.DecorationRole:
             if c == C_NAME:
                 return widgets.torrent_icon(r.kind)
             if c == C_CAT and r.category:
                 return widgets.icon("fa6s.tag", "purple")
+            if c == C_TAGS and r.tags:
+                return widgets.icon("fa6s.hashtag", "teal")
             if c == C_TRACKER and r.tracker_host:
                 return widgets.icon("fa6s.globe" if r.tracker_host != "DHT" else "fa6s.diagram-project", "info")
         if role == Qt.FontRole and c == C_NAME:
@@ -179,8 +182,10 @@ class TorrentModel(QAbstractTableModel):
             f.setWeight(QFont.DemiBold)
             return f
         if role == Qt.ToolTipRole:
+            if c == C_STATE and r.hnr and not r.error:
+                return t("hnr_tip", r.hnr)
             return r.error or (r.name if c == C_NAME else None)
-        if role == Qt.TextAlignmentRole and c not in (C_NAME, C_STATE, C_TRACKER, C_CAT):
+        if role == Qt.TextAlignmentRole and c not in (C_NAME, C_STATE, C_TRACKER, C_CAT, C_TAGS):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
@@ -211,10 +216,13 @@ class FilterProxy(QSortFilterProxyModel):
         self.state = "all"
         self.tracker = ""
         self.category = ""
+        self.tag = ""
         self.text = ""
         self.setSortRole(Qt.UserRole)
 
-    def set_filter(self, state=None, tracker=None, text=None, category=None):
+    def set_filter(self, state=None, tracker=None, text=None, category=None, tag=None):
+        if tag is not None:
+            self.tag = tag
         if category is not None:
             self.category = category
         if state is not None:
@@ -231,6 +239,7 @@ class FilterProxy(QSortFilterProxyModel):
         return ((states is None or r.state in states)
                 and (not self.tracker or r.tracker_host == self.tracker)
                 and (not self.category or r.category == ("" if self.category == NO_CATEGORY else self.category))
+                and (not self.tag or (not r.tags if self.tag == NO_TAG else self.tag in r.tags))
                 and (not self.text or self.text in r.name.lower()))
 
 
@@ -306,6 +315,9 @@ class BadgeDelegate(QStyledItemDelegate):
                            qta.icon(ic, color=C[fg]).pixmap(10, 10))
         painter.setPen(QColor(C[fg]))
         painter.drawText(pill.adjusted(16, 0, 0, 0), Qt.AlignCenter, text)
+        if r.hnr and pill.right() + 18 < option.rect.right():       # still owes the tracker seeding time
+            painter.drawPixmap(int(pill.right() + 6), int(pill.center().y() - 6),
+                               qta.icon("fa6s.shield-halved", color=C["warning"]).pixmap(12, 12))
         painter.restore()
 
 
@@ -831,6 +843,9 @@ class SettingsDialog(QDialog):
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
+        if config.is_portable():
+            pl = QLabel(t("set_portable", config.data_dir())); pl.setObjectName("meta"); pl.setWordWrap(True)
+            form.addRow(pl)
         self.tray = QCheckBox(t("set_tray")); self.tray.setChecked(cfg["minimize_to_tray"])
         form.addRow(self.tray)
         self.toasts = None
@@ -903,6 +918,28 @@ class SettingsDialog(QDialog):
         hint = QLabel(t("pr_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
         form.addRow(hint)
 
+        from .dialogs import TrackerRulesEditor
+        form.addRow(_section(t("set_grp_trackers"), "fa6s.server", "info"))
+        hosts = sorted({r.tracker_host for r in parent.model.rows}) if parent is not None else []
+        self.tr_rules = TrackerRulesEditor(cfg.get("tracker_rules", {}), hosts)
+        form.addRow(self.tr_rules)
+        th = QLabel(t("tr_rules_hint")); th.setObjectName("meta"); th.setWordWrap(True)
+        form.addRow(th)
+
+        form.addRow(_section(t("set_grp_protect"), "fa6s.user-shield", "danger"))
+        self.ban_bad = QCheckBox(t("set_ban_bad")); self.ban_bad.setChecked(cfg.get("ban_bad_peers", True))
+        brow = QHBoxLayout()
+        brow.addWidget(self.ban_bad, 1)
+        self._engine = parent.engine if parent is not None else None
+        nb = len(self._engine.bans) if self._engine else 0
+        self.unban = QPushButton(t("set_unban", nb))
+        self.unban.setEnabled(nb > 0)
+        self.unban.clicked.connect(self._clear_bans)
+        brow.addWidget(self.unban)
+        form.addRow(brow)
+        self.cross = QCheckBox(t("set_cross")); self.cross.setChecked(cfg.get("cross_seed", True))
+        form.addRow(self.cross)
+
         form.addRow(_section(t("set_grp_sched"), "fa6s.clock", "orange"))
         self.sch_on = QCheckBox(t("sch_enable")); self.sch_on.setChecked(cfg.get("sched_enabled", False))
         form.addRow(self.sch_on)
@@ -972,6 +1009,12 @@ class SettingsDialog(QDialog):
         if f:
             self.ipf.setText(f)
 
+    def _clear_bans(self):
+        if self._engine:
+            self._engine.clear_bans()
+        self.unban.setText(t("set_unban", 0))
+        self.unban.setEnabled(False)
+
     def _assoc(self):
         try:
             winint.register_associations()
@@ -1000,6 +1043,8 @@ class SettingsDialog(QDialog):
                  sched_to=self.sch_to.time().toString("HH:mm"),
                  sched_dl=self.sch_dl.value(), sched_ul=self.sch_ul.value(),
                  categories=self.cats.categories(),
+                 tracker_rules=self.tr_rules.rules(), ban_bad_peers=self.ban_bad.isChecked(),
+                 cross_seed=self.cross.isChecked(),
                  watch_dir=self.watch.text().strip(), watch_category=self.watch_cat.currentData() or "",
                  move_done_dir=self.move_done.text().strip(), move_done_by_category=self.move_bycat.isChecked(),
                  bind_interface=self.iface.currentData() or "", encryption=self.enc.currentData(),
@@ -1025,10 +1070,11 @@ def free_space(path: str) -> int | None:
 
 class AddTorrentDialog(QDialog):
     """Choose folder and files before adding (.torrent), or just folder for a magnet."""
-    def __init__(self, cfg: dict, name: str, ti=None, parent=None):
+    def __init__(self, cfg: dict, name: str, ti=None, parent=None, cross: dict | None = None):
         super().__init__(parent)
         _theme_title_bar(self)
         self.setWindowTitle(t("ad_title"))
+        self.cross_cb = None
         self.setMinimumWidth(680)
         self.ti = ti
         self.leaves: list[tuple[QTreeWidgetItem, int, int]] = []
@@ -1039,6 +1085,12 @@ class AddTorrentDialog(QDialog):
         head = _section(name)
         head.setWordWrap(True)
         lay.addWidget(head)
+        if cross:
+            self.cross_cb = QCheckBox(t("cross_offer", cross["name"], cross["save_path"]))
+            self.cross_cb.setChecked(True)
+            self.cross_cb.setStyleSheet(f"color:{C['success_text'] if theme.current_name == 'dark' else C['success']};"
+                                        "font-weight:600;")
+            lay.addWidget(self.cross_cb)
 
         self.cfg = cfg
         crow = QHBoxLayout()
@@ -1097,6 +1149,14 @@ class AddTorrentDialog(QDialog):
         bottom.addWidget(self.free_lbl)
         lay.addLayout(bottom)
 
+        if self.cross_cb is not None:          # cross-seed uses the other torrent's folder and all files
+            def cross_toggled(on):
+                self.path.setEnabled(not on)
+                if ti is not None:
+                    self.tree.setEnabled(not on)
+            self.cross_cb.toggled.connect(cross_toggled)
+            cross_toggled(True)
+
         self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.ok = self.bb.button(QDialogButtonBox.Ok)
         self.ok.setText(t("add_btn"))
@@ -1105,6 +1165,9 @@ class AddTorrentDialog(QDialog):
         self.bb.rejected.connect(self.reject)
         lay.addWidget(self.bb)
         self._update()
+
+    def use_cross(self) -> bool:
+        return self.cross_cb is not None and self.cross_cb.isChecked()
 
     def _cat_changed(self):
         name = self.cat.currentData() or ""
@@ -1511,6 +1574,7 @@ class MainWindow(QMainWindow):
                 and _time.time() - self.cfg.get("last_update_check", 0) > self.UPDATE_EVERY / 2:
             self.check_updates()
 
+        self._tr_bad: set[str] = set()          # torrents already toasted for a tracker error
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(1000)
@@ -1650,7 +1714,15 @@ class MainWindow(QMainWindow):
             lambda _: self.proxy.set_filter(category=self.cat_combo.currentData() or ""))
         self._themed_icon(lambda ic: [self.cat_combo.setItemIcon(i, ic) for i in range(self.cat_combo.count())],
                           "fa6s.tag")
+        self.tag_combo = QComboBox()
+        self.tag_combo.setMinimumWidth(150)
+        self.tag_combo.currentIndexChanged.connect(
+            lambda _: self.proxy.set_filter(tag=self.tag_combo.currentData() or ""))
+        self._themed_icon(lambda ic: [self.tag_combo.setItemIcon(i, ic) for i in range(self.tag_combo.count())],
+                          "fa6s.hashtag")
+        self._tags_shown: list[str] | None = None
         pills.addWidget(self.cat_combo)
+        pills.addWidget(self.tag_combo)
         pills.addWidget(self.tracker_combo)
         lay.addLayout(pills)
 
@@ -1721,9 +1793,9 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(6)
         self.g: dict[str, QLabel] = {}
         columns = [   # three columns like BitComet's summary: transfer · torrent · metadata
-            ["gen_path", "gen_size", "gen_downloaded", "gen_uploaded", "gen_ratio", "gen_active"],
-            ["gen_tracker", "gen_error", "gen_added", "gen_completed", "gen_private", "gen_creator"],
-            ["gen_hash1", "gen_hash2", "gen_piece_info", "gen_files", "gen_created", "gen_comment"],
+            ["gen_path", "gen_size", "gen_downloaded", "gen_uploaded", "gen_ratio", "gen_active", "gen_hnr"],
+            ["gen_tracker", "gen_error", "gen_added", "gen_completed", "gen_private", "gen_creator", "gen_tags"],
+            ["gen_hash1", "gen_hash2", "gen_piece_info", "gen_files", "gen_created", "gen_comment", "gen_cat"],
         ]
         gen_icons = {"gen_path": ("fa6s.folder-open", "warning"), "gen_size": ("fa6s.hard-drive", "secondary"),
                      "gen_downloaded": ("fa6s.arrow-down", "primary"), "gen_uploaded": ("fa6s.arrow-up", "success"),
@@ -1734,7 +1806,8 @@ class MainWindow(QMainWindow):
                      "gen_creator": ("fa6s.wrench", "secondary"), "gen_hash1": ("fa6s.fingerprint", "purple"),
                      "gen_hash2": ("fa6s.fingerprint", "pink"), "gen_piece_info": ("fa6s.cubes", "orange"),
                      "gen_files": ("fa6s.copy", "info"), "gen_created": ("fa6s.calendar", "secondary"),
-                     "gen_comment": ("fa6s.comment", "teal")}
+                     "gen_comment": ("fa6s.comment", "teal"), "gen_hnr": ("fa6s.shield-halved", "warning"),
+                     "gen_tags": ("fa6s.hashtag", "teal"), "gen_cat": ("fa6s.tag", "purple")}
         cells = [(k, r, col * 2) for col, ks in enumerate(columns) for r, k in enumerate(ks)]
         for k, r, c in cells:
             lab = QLabel(t(k)); lab.setObjectName("rowLbl")
@@ -1756,12 +1829,12 @@ class MainWindow(QMainWindow):
         ptxt = QLabel(t("gen_pieces")); ptxt.setObjectName("rowLbl")
         pbox.addWidget(pic); pbox.addWidget(ptxt); pbox.addStretch()
         self.piecebar = PieceBar()
-        grid.addWidget(plab, 6, 0)
-        grid.addWidget(self.piecebar, 6, 1, 1, 5)
+        grid.addWidget(plab, 7, 0)
+        grid.addWidget(self.piecebar, 7, 1, 1, 5)
         grid.setColumnStretch(1, 2)
         grid.setColumnStretch(3, 2)
         grid.setColumnStretch(5, 3)
-        grid.setRowStretch(7, 1)
+        grid.setRowStretch(8, 1)
         self.tabs.addTab(gen, t("tab_general"))
 
         self.files_tbl = widgets.FilesView()
@@ -1772,6 +1845,8 @@ class MainWindow(QMainWindow):
         self.peers_tbl = self._mk_table(["peer_ip", "peer_country", "peer_client", "col_progress", "col_down", "col_up"], stretch=2)
         self.peers_tbl.setColumnWidth(0, 170)
         self.peers_tbl.setColumnWidth(1, 170)
+        self.peers_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.peers_tbl.customContextMenuRequested.connect(self.peers_menu)
         self.tabs.addTab(self.peers_tbl, t("tab_peers"))
         self.tr_tbl = self._mk_table(["tr_url", "tr_tier", "tr_msg"], stretch=0)
         self.tr_tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
@@ -1857,7 +1932,6 @@ class MainWindow(QMainWindow):
         config.save(self.cfg)
         self.engine.apply_settings(self.cfg)
         self._sched_state = None               # schedule re-applies its own limits if active
-        self._tr_bad: set[str] = set()          # torrents already toasted for a tracker error
 
     def _all(self, fn):
         for k in list(self.engine.handles):
@@ -1917,6 +1991,10 @@ class MainWindow(QMainWindow):
         info = getattr(self, "update_info", None)
         if not info:
             return
+        from .updater import can_self_update
+        if not can_self_update():           # portable / source run: just open the release page
+            QDesktopServices.openUrl(QUrl(info["page"]))
+            return
         d = UpdateDialog(info, self)
         if d.exec() and d.path:
             self.quit(installer=d.path)
@@ -1974,21 +2052,25 @@ class MainWindow(QMainWindow):
         is_magnet = item.startswith("magnet:")
         try:
             save_path, paused, prios, category = None, False, None, ""
+            ti = None if is_magnet else lt.torrent_info(item)
+            cross = self.engine.find_cross(ti) if ti is not None and self.cfg.get("cross_seed", True) else None
             if self.cfg.get("show_add_dialog", True):
                 if is_magnet:
                     name = lt.parse_magnet_uri(item).name or item[:80]
                     d = AddTorrentDialog(self.cfg, name, None, self)
                 else:
-                    ti = lt.torrent_info(item)
-                    d = AddTorrentDialog(self.cfg, ti.name(), ti, self)
+                    d = AddTorrentDialog(self.cfg, ti.name(), ti, self, cross=cross)
                 self.show_normal()
                 if not d.exec():
                     return
                 save_path, paused, prios = d.path.text().strip() or None, d.paused.isChecked(), d.priorities()
                 category = d.cat.currentData() or ""
-            else:
-                category = ""
-            if is_magnet:
+                if not d.use_cross():
+                    cross = None
+            if cross:
+                key = self.engine.add_cross(item, cross, paused=paused)
+                self.log_event("torrent", t("cross_found", cross["name"]))
+            elif is_magnet:
                 key = self.engine.add_magnet(item, save_path=save_path, paused=paused)
             else:
                 key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios)
@@ -2045,7 +2127,13 @@ class MainWindow(QMainWindow):
         keys = self.selected_keys()
         if not keys:
             return
-        box = QMessageBox(QMessageBox.Question, t("remove_title"), t("remove_text", len(keys)),
+        rows = {r.key: r for r in self.model.rows}
+        owe = [rows[k] for k in keys if k in rows and self.engine.hnr_left(k)]
+        text = t("remove_text", len(keys))
+        if owe:
+            lines = "\n".join(f"• {r.name[:70]} — {self.engine.hnr_left(r.key)}" for r in owe[:8])
+            text += "\n\n" + t("hnr_remove_warn", lines)
+        box = QMessageBox(QMessageBox.Warning if owe else QMessageBox.Question, t("remove_title"), text,
                           QMessageBox.Yes | QMessageBox.No, self)
         cb = QCheckBox(t("remove_files"))
         box.setCheckBox(cb)
@@ -2085,6 +2173,7 @@ class MainWindow(QMainWindow):
             cm.addAction(c["name"], lambda n=c["name"]: self.set_category_selected(n))
         cm.addSeparator()
         cm.addAction(icon("fa6s.plus"), t("cat_new"), self.new_category_for_selected)
+        m.addAction(icon("fa6s.hashtag", "teal"), t("tags_menu"), self.tags_dialog)
         m.addAction(icon("fa6s.folder-tree"), t("move_to"), self.move_selected)
         m.addAction(icon("fa6s.server"), t("edit_trackers"), self.edit_trackers)
         m.addAction(icon("fa6s.right-left"), t("replace_trackers"), self.replace_trackers)
@@ -2201,6 +2290,62 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(icon("fa6s.rotate-left"), t("cols_reset"), lambda: hh.restoreState(self._default_header))
         m.exec(hh.mapToGlobal(pos))
+
+    def tags_dialog(self):
+        from .dialogs import TagsDialog
+        keys = self.selected_keys()
+        if not keys:
+            return
+        rows = {r.key: r for r in self.model.rows}
+        sets = [set(rows[k].tags) for k in keys if k in rows]
+        all_on = set.intersection(*sets) if sets else set()
+        some = set.union(*sets) - all_on if sets else set()
+        d = TagsDialog(self.engine.all_tags(), all_on, some, self)
+        if not d.exec():
+            return
+        states = d.states()
+        for k in keys:
+            cur = set(rows[k].tags) if k in rows else set()
+            for tag, st in states.items():
+                if st == Qt.Checked:
+                    cur.add(tag)
+                elif st == Qt.Unchecked:
+                    cur.discard(tag)
+            self.engine.set_tags(k, list(cur))
+        self.cfg["tags"] = sorted(states, key=str.lower)
+        config.save(self.cfg)
+        self.tick()
+
+    def refresh_tag_combo(self):
+        tags = self.engine.all_tags()
+        if tags == self._tags_shown:
+            return
+        self._tags_shown = tags
+        cur = self.tag_combo.currentData()
+        ic = icon("fa6s.hashtag")
+        self.tag_combo.blockSignals(True)
+        self.tag_combo.clear()
+        self.tag_combo.addItem(ic, t("tags_all"), "")
+        for tag in tags:
+            self.tag_combo.addItem(ic, tag, tag)
+        self.tag_combo.addItem(ic, t("tags_none"), NO_TAG)
+        self.tag_combo.setCurrentIndex(max(0, self.tag_combo.findData(cur)))
+        self.tag_combo.blockSignals(False)
+        self.proxy.set_filter(tag=self.tag_combo.currentData() or "")
+
+    def peers_menu(self, pos):
+        it = self.peers_tbl.itemAt(pos)
+        if it is None:
+            return
+        cell = self.peers_tbl.item(it.row(), 0)
+        ip = cell.data(Qt.UserRole) if cell else ""
+        if not ip:
+            return
+        m = QMenu(self)
+        m.addAction(icon("fa6s.ban", "danger"), t("peer_ban", ip),
+                    lambda: (self.engine.ban(ip, t("peer_ban_manual")), self.tick()))
+        m.addAction(icon("fa6s.copy"), t("peer_copy_ip"), lambda: QGuiApplication.clipboard().setText(ip))
+        m.exec(self.peers_tbl.viewport().mapToGlobal(pos))
 
     def set_category_selected(self, name: str):
         for k in self.selected_keys():
@@ -2349,6 +2494,13 @@ class MainWindow(QMainWindow):
                 self.notify(f"{t('toast_tr_error')}: {r.name}\n{r.error}", r.key, folder=False)
         self._tr_bad = bad
 
+        self.refresh_tag_combo()
+        while self.engine.cross_results:
+            name, key, prog = self.engine.cross_results.pop(0)
+            msg = t("cross_ok", name) if prog >= 1.0 else t("cross_partial", name, f"{prog:.1%}")
+            self.log_event("torrent" if prog >= 1.0 else "error", msg)
+            self.notify(msg, key, folder=False)
+
         while self.engine.stopped_names:
             name, key = self.engine.stopped_names.pop(0)
             self.log_event("torrent", t("stopped_note", name))
@@ -2368,6 +2520,10 @@ class MainWindow(QMainWindow):
         dht = t("meta_dht", st.dht_nodes) if self.cfg.get("dht") else t("meta_dht_off")
         dot = f'<span style="color:{C["border"]}">&nbsp;•&nbsp;</span>'
         parts = [t("subtitle"), t("meta_version", VERSION), t("meta_port", self.engine.ses.listen_port()), dht]
+        if config.is_portable():
+            parts.insert(2, t("meta_portable"))
+        if self.engine.bans:
+            parts.append(t("meta_bans", len(self.engine.bans)))
         if sched:
             parts.append(f'<span style="color:{C["warning_text"]}">&#9200; {t("meta_sched")}</span>')
         bind = self.cfg.get("bind_interface", "")
@@ -2422,6 +2578,9 @@ class MainWindow(QMainWindow):
             "gen_files": str(inf.get("files") or "—"),
             "gen_created": when(inf.get("created")),
             "gen_comment": inf.get("comment") or "—",
+            "gen_hnr": row.hnr or ("✓" if self.engine.tracker_rule(row.tracker_host) else "—"),
+            "gen_tags": ", ".join(row.tags) or "—",
+            "gen_cat": row.category or "—",
         }
         for k, v in vals.items():
             lab = self.g[k]
@@ -2444,6 +2603,7 @@ class MainWindow(QMainWindow):
                                        fmt_speed(p["down"]), fmt_speed(p["up"]))):
                     it = QTableWidgetItem(v)
                     if j == 0:
+                        it.setData(Qt.UserRole, p["host"])
                         it.setIcon(widgets.icon("fa6s.circle-user" if p["progress"] < 1 else "fa6s.seedling",
                                                 "primary" if p["progress"] < 1 else "success"))
                     elif j == 1 and code:
