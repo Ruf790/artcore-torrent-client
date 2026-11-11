@@ -3,7 +3,7 @@
 
 APP_NAME      = "ArtCore"
 APP_TITLE     = "ArtCore Client"
-VERSION_TUPLE = (1, 0, 8, 0)
+VERSION_TUPLE = (1, 0, 10, 0)
 VERSION       = "1.0.10"
 # Azureus-style peer_id prefix: -Ag1000- — built from MAJOR.MINOR only, so 1.0.x bug-fix
 # releases keep the same prefix; 1.1.0 becomes -Ag1100-.
