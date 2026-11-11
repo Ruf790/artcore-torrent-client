@@ -62,7 +62,7 @@ def selftest() -> int:
             winint.keep_awake(True)
             winint.keep_awake(False)
             hr = win.taskbar.set(int(win.winId()), winint.TBPF_NORMAL, 500, 1000)
-            taskbar = f"{'ok' if win.taskbar.ok else 'unavailable'} hr={hr & 0xFFFFFFFF:#x}"
+            taskbar = f"{'ok' if win.taskbar.ok else 'unavailable ' + win.taskbar.diag} hr={hr & 0xFFFFFFFF:#x}"
         win.set_mini(True)
         app.processEvents()
         win.set_mini(False)

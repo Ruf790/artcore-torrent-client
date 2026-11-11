@@ -219,6 +219,7 @@ class Taskbar:
     def __init__(self):
         self.ptr = None
         self.ok = False
+        self.diag = ""
         if not IS_WIN:
             return
         try:
@@ -236,11 +237,15 @@ class Taskbar:
             ptr = ctypes.c_void_p()
             hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(ptr))
             if hr != 0 or not ptr.value:
+                self.diag = f"CoCreateInstance {hr & 0xFFFFFFFF:#x}"
                 return
             self.ptr = ptr
-            self.ok = self._call(3, ()) == 0      # HrInit
-        except Exception:
+            hr = self._call(3, ())                # HrInit
+            self.ok = hr == 0
+            self.diag = "" if self.ok else f"HrInit {hr & 0xFFFFFFFF:#x}"
+        except Exception as e:
             self.ptr = None
+            self.diag = repr(e)
 
     def _call(self, idx: int, args: tuple, argtypes: tuple = ()):
         import ctypes
