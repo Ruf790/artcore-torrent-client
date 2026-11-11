@@ -363,6 +363,13 @@ STRINGS = {
     "upd_restart":     ("Клиент закроется, установит обновление и запустится снова.",
                         "The client will close, install the update and start again."),
     "upd_error":       ("Не удалось проверить обновления: {0}", "Update check failed: {0}"),
+    # columns / notifications
+    "cols_menu":       ("Колонки",                           "Columns"),
+    "cols_reset":      ("Сбросить колонки",                  "Reset columns"),
+    "nt_open_folder":  ("Открыть папку",                     "Open folder"),
+    "nt_show":         ("Показать",                          "Show"),
+    "set_toasts":      ("Уведомления Windows (о завершении загрузки и остановке раздачи)",
+                        "Windows notifications (download finished, seeding stopped)"),
 }
 
 

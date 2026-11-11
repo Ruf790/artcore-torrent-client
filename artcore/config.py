@@ -37,6 +37,8 @@ DEFAULTS = {
     "geoip":            True,
     "check_updates":    True,
     "last_update_check": 0,
+    "toasts":           True,
+    "ui_state":         {},         # window geometry, column layout, splitter, tab (base64 Qt states)
 }
 
 

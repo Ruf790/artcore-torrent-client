@@ -75,7 +75,7 @@ Name: "firewall";     Description: "{cm:Firewall}";          GroupDescription: "
 Source: "dist\ArtCoreClient\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; AppUserModelID: "ArtCore.Client"
 Name: "{autodesktop}\{#AppName}";  Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Registry]

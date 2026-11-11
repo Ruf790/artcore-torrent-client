@@ -826,6 +826,10 @@ class SettingsDialog(QDialog):
         form.addRow(t("set_lang"), self.lang)
         self.tray = QCheckBox(t("set_tray")); self.tray.setChecked(cfg["minimize_to_tray"])
         form.addRow(self.tray)
+        self.toasts = None
+        if winint.IS_WIN:
+            self.toasts = QCheckBox(t("set_toasts")); self.toasts.setChecked(cfg.get("toasts", True))
+            form.addRow(self.toasts)
         self.show_add = QCheckBox(t("set_show_add")); self.show_add.setChecked(cfg.get("show_add_dialog", True))
         form.addRow(self.show_add)
         urow = QHBoxLayout()
@@ -982,6 +986,7 @@ class SettingsDialog(QDialog):
                  lsd=self.dht.isChecked(), upnp=self.upnp.isChecked(),
                  minimize_to_tray=self.tray.isChecked(),
                  show_add_dialog=self.show_add.isChecked(), check_updates=self.upd.isChecked(),
+                 toasts=self.toasts.isChecked() if self.toasts is not None else c.get("toasts", True),
                  stop_ratio=self.stop_ratio.value(), stop_hours=self.stop_hours.value(),
                  sched_enabled=self.sch_on.isChecked(),
                  sched_from=self.sch_from.time().toString("HH:mm"),
@@ -1473,6 +1478,7 @@ class MainWindow(QMainWindow):
         root.addLayout(self._build_kpis())
 
         split = QSplitter(Qt.Vertical)
+        self.split = split
         split.setChildrenCollapsible(False)
         split.addWidget(self._build_list())
         split.addWidget(self._build_details())
@@ -1480,6 +1486,10 @@ class MainWindow(QMainWindow):
         root.addWidget(split, 1)
 
         self._build_tray()
+        from .notify import Notifier
+        self.notifier = Notifier(theme.asset("icon.ico"))
+        self.notifier.activated.connect(self.on_toast)
+        self.restore_ui_state()
         self.geo = None
         self._ipf_result = None
         self.start_network_extras()
@@ -1657,9 +1667,13 @@ class MainWindow(QMainWindow):
         hh.setHighlightSections(False)
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hh.setSectionResizeMode(C_NAME, QHeaderView.Stretch)
+        hh.setSectionsMovable(True)
+        hh.setContextMenuPolicy(Qt.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self.columns_menu)
         for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 120), (C_DOWN, 95), (C_UP, 95),
                      (C_SEEDS, 55), (C_PEERS, 55), (C_RATIO, 65), (C_ETA, 80), (C_TRACKER, 150), (C_CAT, 110)):
             self.table.setColumnWidth(c, w)
+        self._default_header = hh.saveState()
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.context_menu)
         self.table.doubleClicked.connect(lambda _: self.open_folder())
@@ -2072,6 +2086,78 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, t("imp_title"), t("imp_done", done, skipped))
             self.tick()
 
+    # ── notifications ──────────────────────────────────────────
+    def notify(self, text: str, key: str, folder: bool):
+        """Windows toast with buttons; tray balloon if toasts are off or unavailable."""
+        if self.cfg.get("toasts", True) and self.notifier.available:
+            buttons = ([(t("nt_open_folder"), f"open:{key}")] if folder else []) + [(t("nt_show"), f"show:{key}")]
+            if self.notifier.show(APP_TITLE, text, buttons):
+                return
+        if self.tray.isVisible():
+            self.tray.showMessage(APP_TITLE, text, app_icon(), 5000)
+
+    def on_toast(self, arg: str):
+        action, _, key = arg.partition(":")
+        if action == "open" and key in self.engine.handles:
+            row = next((r for r in self.engine.rows() if r.key == key), None)
+            if row:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(row.save_path))
+            return
+        self.show_normal()
+        if key:
+            for i in range(self.proxy.rowCount()):
+                if _row_of(self.proxy.index(i, 0)).key == key:
+                    self.table.selectRow(i)
+                    break
+
+    # ── window / column state ──────────────────────────────────
+    def save_ui_state(self):
+        from PySide6.QtCore import QByteArray
+        def b64(ba: QByteArray) -> str:
+            return bytes(ba.toBase64()).decode()
+        self.cfg["ui_state"] = {
+            "geometry": b64(self.saveGeometry()),
+            "header": b64(self.table.horizontalHeader().saveState()),
+            "columns": len(COLS),
+            "splitter": b64(self.split.saveState()),
+            "tab": self.tabs.currentIndex(),
+            "files_header": b64(self.files_tbl.header().saveState()),
+        }
+        config.save(self.cfg)
+
+    def restore_ui_state(self):
+        from PySide6.QtCore import QByteArray
+        st = self.cfg.get("ui_state") or {}
+
+        def ba(key):
+            v = st.get(key)
+            return QByteArray.fromBase64(v.encode()) if v else None
+        if ba("geometry") is not None:
+            self.restoreGeometry(ba("geometry"))
+        if ba("header") is not None and st.get("columns") == len(COLS):   # a new column = start fresh
+            self.table.horizontalHeader().restoreState(ba("header"))
+        if ba("splitter") is not None:
+            self.split.restoreState(ba("splitter"))
+        if ba("files_header") is not None:
+            self.files_tbl.header().restoreState(ba("files_header"))
+        if isinstance(st.get("tab"), int):
+            self.tabs.setCurrentIndex(st["tab"])
+
+    def columns_menu(self, pos):
+        hh = self.table.horizontalHeader()
+        m = QMenu(self)
+        m.addSection(t("cols_menu"))
+        for c in range(len(COLS)):
+            if c == C_NAME:
+                continue
+            a = m.addAction(t(COLS[c]))
+            a.setCheckable(True)
+            a.setChecked(not hh.isSectionHidden(c))
+            a.toggled.connect(lambda on, c=c: hh.setSectionHidden(c, not on))
+        m.addSeparator()
+        m.addAction(icon("fa6s.rotate-left"), t("cols_reset"), lambda: hh.restoreState(self._default_header))
+        m.exec(hh.mapToGlobal(pos))
+
     def set_category_selected(self, name: str):
         for k in self.selected_keys():
             self.engine.set_category(k, name)
@@ -2207,16 +2293,14 @@ class MainWindow(QMainWindow):
         while self.engine.messages:
             self.log_event(*self.engine.messages.pop(0))
         while self.engine.finished_names:
-            name = self.engine.finished_names.pop(0)
+            name, key = self.engine.finished_names.pop(0)
             self.log_event("torrent", t("finished_note", name))
-            if self.tray.isVisible():
-                self.tray.showMessage(APP_TITLE, t("finished_note", name), app_icon(), 5000)
+            self.notify(t("finished_note", name), key, folder=True)
 
         while self.engine.stopped_names:
-            name = self.engine.stopped_names.pop(0)
+            name, key = self.engine.stopped_names.pop(0)
             self.log_event("torrent", t("stopped_note", name))
-            if self.tray.isVisible():
-                self.tray.showMessage(APP_TITLE, t("stopped_note", name), app_icon(), 5000)
+            self.notify(t("stopped_note", name), key, folder=False)
 
         sched = self.apply_schedule()
 
@@ -2359,6 +2443,10 @@ class MainWindow(QMainWindow):
         if self._quitting:
             return
         self._quitting = True
+        try:
+            self.save_ui_state()
+        except Exception:
+            pass
         self.timer.stop()
         self.tray.hide()
         self.engine.shutdown()

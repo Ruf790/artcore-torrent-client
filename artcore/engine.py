@@ -294,7 +294,7 @@ class Engine:
                 self._write_resume(a)
             elif isinstance(a, lt.torrent_finished_alert):
                 st = a.handle.status()
-                self.finished_names.append(st.name)
+                self.finished_names.append((st.name, _key(a.handle)))
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
                 self._move_when_done(a.handle, st)
             elif isinstance(a, lt.storage_moved_alert):
@@ -487,7 +487,7 @@ class Engine:
                 self.pause(key)
                 self.opts.setdefault(key, {})["rule_done"] = True
                 self._save_opts()
-                self.stopped_names.append(s.name)
+                self.stopped_names.append((s.name, key))
 
     def pieces(self, key: str) -> list[bool]:
         h = self.handles.get(key)
