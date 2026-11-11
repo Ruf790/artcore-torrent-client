@@ -20,10 +20,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QTableView, QTableWidget,
-                               QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
+                               QScrollArea, QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import APP_TITLE, VERSION, config, theme, winint
+from . import APP_TITLE, VERSION, config, details, theme, winint
 from .engine import (Engine, TorrentRow, create_torrent, torrent_files,
                      PRIO_SKIP, PRIO_NORMAL, PRIO_HIGH)
 from .i18n import t
@@ -391,16 +391,23 @@ class Kpi(QFrame):
 
 class SpeedGraph(QWidget):
     """Download / upload history, drawn like the site's charts: soft areas, thin lines."""
-    def __init__(self):
+    def __init__(self, compact: bool = False):
         super().__init__()
         self.down: deque[int] = deque(maxlen=3600)
         self.up: deque[int] = deque(maxlen=3600)
         self.span = 300          # seconds shown
-        self.setMinimumHeight(140)
+        self.compact = compact   # small Summary graph: no axes, peak speed in the corner
+        self.setMinimumHeight(70 if compact else 140)
 
     def push(self, down: int, up: int):
         self.down.append(down)
         self.up.append(up)
+        if self.isVisible():
+            self.update()
+
+    def set_series(self, down: deque, up: deque):
+        """Show someone else's history (a torrent's, or the global one) without copying it."""
+        self.down, self.up = down, up
         if self.isVisible():
             self.update()
 
@@ -412,12 +419,23 @@ class SpeedGraph(QWidget):
         down = list(self.down)[-self.span:]
         up = list(self.up)[-self.span:]
         top = max(down + up + [10 * 1024]) * 1.15
-        left, right, tp, bottom = 74, self.width() - 14, 30, self.height() - 22
+        if self.compact:
+            left, right, tp, bottom = 2, self.width() - 2, 2, self.height() - 2
+        else:
+            left, right, tp, bottom = 74, self.width() - 14, 30, self.height() - 22
         w, h = right - left, bottom - tp
+        if self.compact:
+            p.setPen(QPen(QColor(C["border"]), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 6, 6)
+            p.setPen(QPen(QColor(C["border_soft"]), 1))
+            for i in range(1, 4):
+                y = tp + h * i / 4
+                p.drawLine(QPointF(left, y), QPointF(right, y))
 
         # grid + y labels
         p.setPen(QPen(QColor(C["border_soft"]), 1))
-        for i in range(5):
+        for i in range(0 if self.compact else 5):
             y = tp + h * i / 4
             p.drawLine(QPointF(left, y), QPointF(right, y))
             p.setPen(QColor(C["secondary"]))
@@ -427,8 +445,9 @@ class SpeedGraph(QWidget):
         # x labels
         p.setPen(QColor(C["secondary"]))
         mins = self.span // 60
-        p.drawText(QRectF(left, bottom + 4, 80, 16), Qt.AlignLeft, f"-{mins} min")
-        p.drawText(QRectF(right - 80, bottom + 4, 80, 16), Qt.AlignRight, "0")
+        if not self.compact:
+            p.drawText(QRectF(left, bottom + 4, 80, 16), Qt.AlignLeft, f"-{mins} min")
+            p.drawText(QRectF(right - 80, bottom + 4, 80, 16), Qt.AlignRight, "0")
 
         def series(vals, color_key):
             if len(vals) < 2:
@@ -450,6 +469,11 @@ class SpeedGraph(QWidget):
 
         series(down, "primary")
         series(up, "success")
+        if self.compact:
+            p.setPen(QColor(C["secondary"]))
+            p.drawText(QRectF(left + 6, tp + 2, w - 12, 16), Qt.AlignRight, fmt_size(top / 1.15) + "/s")
+            p.end()
+            return
 
         # legend with current values
         x = left
@@ -495,6 +519,11 @@ class PieceBar(QWidget):
                     c = QColor(base); c.setAlphaF(0.25 + 0.75 * frac)
                     p.fillRect(QRectF(r.left() + x, r.top(), 1.2, r.height()), c)
         p.end()
+
+
+PEER_COLS = ["peer_ip", "peer_country", "peer_client", "col_progress", "peer_pieces", "peer_source",
+             "col_down", "col_up", "peer_downloaded", "peer_uploaded", "peer_rate", "peer_init",
+             "peer_proto", "peer_enc", "peer_time"]
 
 
 LOG_KINDS = ("system", "network", "torrent", "tracker", "error")
@@ -2037,77 +2066,129 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.list_stack, 1)
         return box
 
+    # Summary layout: (left key, right key) per row, like BitComet's two-column summary
+    SUM_TRANSFER = [("gen_active", "gen_eta"), ("gen_downloaded", "gen_uploaded"),
+                    ("gen_dl_speed", "gen_ul_speed"), ("gen_dl_limit", "gen_ul_limit"),
+                    ("gen_ratio", "gen_conn")]
+    SUM_BASIC = [("gen_name", "gen_tags"), ("gen_path", "gen_cat"), ("gen_size", "gen_left"),
+                 ("gen_hash1", "gen_piece_info"), ("gen_hash2", "gen_files"),
+                 ("gen_added", "gen_creator"), ("gen_completed", "gen_created"),
+                 ("gen_tracker", "gen_private"), ("gen_error", "gen_hnr"), ("gen_comment", None)]
+    GEN_ICONS = {"gen_path": ("fa6s.folder-open", "warning"), "gen_size": ("fa6s.hard-drive", "secondary"),
+                 "gen_downloaded": ("fa6s.arrow-down", "primary"), "gen_uploaded": ("fa6s.arrow-up", "success"),
+                 "gen_ratio": ("fa6s.scale-balanced", "purple"), "gen_tracker": ("fa6s.server", "info"),
+                 "gen_error": ("fa6s.circle-exclamation", "danger"),
+                 "gen_active": ("fa6s.stopwatch", "teal"), "gen_added": ("fa6s.calendar-plus", "primary"),
+                 "gen_completed": ("fa6s.calendar-check", "success"), "gen_private": ("fa6s.lock", "orange"),
+                 "gen_creator": ("fa6s.wrench", "secondary"), "gen_hash1": ("fa6s.fingerprint", "purple"),
+                 "gen_hash2": ("fa6s.fingerprint", "pink"), "gen_piece_info": ("fa6s.cubes", "orange"),
+                 "gen_files": ("fa6s.copy", "info"), "gen_created": ("fa6s.calendar", "secondary"),
+                 "gen_comment": ("fa6s.comment", "teal"), "gen_hnr": ("fa6s.shield-halved", "warning"),
+                 "gen_tags": ("fa6s.hashtag", "teal"), "gen_cat": ("fa6s.tag", "purple"),
+                 "gen_eta": ("fa6s.hourglass-half", "info"), "gen_dl_speed": ("fa6s.gauge-high", "primary"),
+                 "gen_ul_speed": ("fa6s.gauge-high", "success"), "gen_dl_limit": ("fa6s.sliders", "primary"),
+                 "gen_ul_limit": ("fa6s.sliders", "success"), "gen_conn": ("fa6s.users", "info"),
+                 "gen_name": ("fa6s.file", "secondary"), "gen_left": ("fa6s.download", "primary")}
+
+    def _sum_grid(self, rows) -> QWidget:
+        w = QWidget()
+        grid = QGridLayout(w)
+        grid.setContentsMargins(4, 4, 4, 4)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(5)
+        for r, pair in enumerate(rows):
+            for side, k in enumerate(pair):
+                if not k:
+                    continue
+                lab = QLabel(t(k)); lab.setObjectName("rowLbl")
+                ic = QLabel()
+                self._themed_icon(lambda q, ic=ic: ic.setPixmap(q.pixmap(14, 14)), *self.GEN_ICONS[k])
+                lab_w = QWidget()
+                lb = QHBoxLayout(lab_w); lb.setContentsMargins(0, 0, 0, 0); lb.setSpacing(7)
+                lb.addWidget(ic); lb.addWidget(lab); lb.addStretch()
+                val = QLabel(); val.setObjectName("rowVal")
+                val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                val.setMinimumWidth(40)
+                grid.addWidget(lab_w, r, side * 2)
+                grid.addWidget(val, r, side * 2 + 1)
+                self.g[k] = val
+        grid.setColumnStretch(1, 3)
+        grid.setColumnStretch(3, 2)
+        return w
+
+    def _build_summary(self) -> QWidget:
+        self.g: dict[str, QLabel] = {}
+        inner = QWidget()
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(16, 10, 16, 10)
+        v.setSpacing(4)
+        top = QHBoxLayout()
+        top.setSpacing(18)
+        speed = QVBoxLayout()
+        speed.setSpacing(2)
+        cap = QLabel(t("gen_dl_speed")); cap.setObjectName("rowLbl")
+        self.sum_speed = QLabel("—")
+        self.sum_speed.setStyleSheet(f'font-family:"{theme.TITLE_FONT}"; font-size: 15pt; font-weight: 600;')
+        speed.addWidget(cap)
+        speed.addWidget(self.sum_speed)
+        speed.addStretch()
+        top.addLayout(speed)
+        self.sum_graph = SpeedGraph(compact=True)
+        self.sum_graph.setFixedSize(280, 78)
+        top.addWidget(self.sum_graph)
+        bars = QGridLayout()
+        bars.setHorizontalSpacing(12)
+        bars.setVerticalSpacing(10)
+        self.sum_states = details.StateBar()
+        self.sum_avail = details.AvailBar()
+        self.sum_copies = QLabel(); self.sum_copies.setObjectName("meta")
+        self.sum_have = QLabel(); self.sum_have.setObjectName("meta")
+        for r, (key, bar, note) in enumerate((("gen_pieces_done", self.sum_states, self.sum_have),
+                                              ("gen_avail", self.sum_avail, self.sum_copies))):
+            lab = QLabel(t(key)); lab.setObjectName("rowLbl")
+            bars.addWidget(lab, r, 0)
+            bars.addWidget(bar, r, 1)
+            bars.addWidget(note, r, 2)
+        bars.setColumnStretch(1, 1)
+        top.addLayout(bars, 1)
+        v.addLayout(top)
+        v.addWidget(_section(t("sec_transfer"), "fa6s.right-left", "primary"))
+        v.addWidget(self._sum_grid(self.SUM_TRANSFER))
+        v.addWidget(_section(t("sec_basic"), "fa6s.circle-info", "info"))
+        v.addWidget(self._sum_grid(self.SUM_BASIC))
+        v.addStretch()
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setWidget(inner)
+        return sc
+
     def _build_details(self) -> QFrame:
         box = card()
         lay = QVBoxLayout(box)
         lay.setContentsMargins(1, 6, 1, 1)
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
+        self.tabs.setUsesScrollButtons(True)
 
-        gen = QWidget()
-        grid = QGridLayout(gen)
-        grid.setContentsMargins(16, 10, 16, 10)
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(6)
-        self.g: dict[str, QLabel] = {}
-        columns = [   # three columns like BitComet's summary: transfer · torrent · metadata
-            ["gen_path", "gen_size", "gen_downloaded", "gen_uploaded", "gen_ratio", "gen_active", "gen_hnr"],
-            ["gen_tracker", "gen_error", "gen_added", "gen_completed", "gen_private", "gen_creator", "gen_tags"],
-            ["gen_hash1", "gen_hash2", "gen_piece_info", "gen_files", "gen_created", "gen_comment", "gen_cat"],
-        ]
-        gen_icons = {"gen_path": ("fa6s.folder-open", "warning"), "gen_size": ("fa6s.hard-drive", "secondary"),
-                     "gen_downloaded": ("fa6s.arrow-down", "primary"), "gen_uploaded": ("fa6s.arrow-up", "success"),
-                     "gen_ratio": ("fa6s.scale-balanced", "purple"), "gen_tracker": ("fa6s.server", "info"),
-                     "gen_error": ("fa6s.circle-exclamation", "danger"),
-                     "gen_active": ("fa6s.stopwatch", "teal"), "gen_added": ("fa6s.calendar-plus", "primary"),
-                     "gen_completed": ("fa6s.calendar-check", "success"), "gen_private": ("fa6s.lock", "orange"),
-                     "gen_creator": ("fa6s.wrench", "secondary"), "gen_hash1": ("fa6s.fingerprint", "purple"),
-                     "gen_hash2": ("fa6s.fingerprint", "pink"), "gen_piece_info": ("fa6s.cubes", "orange"),
-                     "gen_files": ("fa6s.copy", "info"), "gen_created": ("fa6s.calendar", "secondary"),
-                     "gen_comment": ("fa6s.comment", "teal"), "gen_hnr": ("fa6s.shield-halved", "warning"),
-                     "gen_tags": ("fa6s.hashtag", "teal"), "gen_cat": ("fa6s.tag", "purple")}
-        cells = [(k, r, col * 2) for col, ks in enumerate(columns) for r, k in enumerate(ks)]
-        for k, r, c in cells:
-            lab = QLabel(t(k)); lab.setObjectName("rowLbl")
-            ic = QLabel()
-            self._themed_icon(lambda q, ic=ic: ic.setPixmap(q.pixmap(14, 14)), *gen_icons[k])
-            lab_w = QWidget()
-            lab_box = QHBoxLayout(lab_w); lab_box.setContentsMargins(0, 0, 0, 0); lab_box.setSpacing(7)
-            lab_box.addWidget(ic); lab_box.addWidget(lab); lab_box.addStretch()
-            val = QLabel(); val.setObjectName("rowVal")
-            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            val.setMinimumWidth(40)
-            grid.addWidget(lab_w, r, c)
-            grid.addWidget(val, r, c + 1)
-            self.g[k] = val
-        plab = QWidget()
-        pbox = QHBoxLayout(plab); pbox.setContentsMargins(0, 0, 0, 0); pbox.setSpacing(7)
-        pic = QLabel()
-        self._themed_icon(lambda q: pic.setPixmap(q.pixmap(14, 14)), "fa6s.puzzle-piece", "orange")
-        ptxt = QLabel(t("gen_pieces")); ptxt.setObjectName("rowLbl")
-        pbox.addWidget(pic); pbox.addWidget(ptxt); pbox.addStretch()
-        self.piecebar = PieceBar()
-        grid.addWidget(plab, 7, 0)
-        grid.addWidget(self.piecebar, 7, 1, 1, 5)
-        grid.setColumnStretch(1, 2)
-        grid.setColumnStretch(3, 2)
-        grid.setColumnStretch(5, 3)
-        grid.setRowStretch(8, 1)
-        self.tabs.addTab(gen, t("tab_general"))
-
+        self.summary_page = self._build_summary()
         self.files_tbl = widgets.FilesView()
         self.files_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_tbl.customContextMenuRequested.connect(self.files_menu)
-        self.tabs.addTab(self.files_tbl, t("tab_files"))
+        self.tr_tbl = widgets.TrackersView()
 
-        self.peers_tbl = self._mk_table(["peer_ip", "peer_country", "peer_client", "col_progress", "col_down", "col_up"], stretch=2)
-        self.peers_tbl.setColumnWidth(0, 170)
-        self.peers_tbl.setColumnWidth(1, 170)
+        self.peers_tbl = self._mk_table(PEER_COLS, stretch=2)
+        for c, w in enumerate((170, 150, 0, 80, 130, 95, 105, 105, 95, 90, 100, 100, 80, 100, 95)):
+            if w:
+                self.peers_tbl.setColumnWidth(c, w)
+        self.peers_tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
+        self.peers_tbl.setColumnWidth(2, 170)
+        self.peers_tbl.setItemDelegateForColumn(4, details.PeerPiecesDelegate(self.peers_tbl))
         self.peers_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.peers_tbl.customContextMenuRequested.connect(self.peers_menu)
         self.peers_tbl.setIconSize(QSize(20, 15))
-        peers_page = QWidget()
-        pl = QVBoxLayout(peers_page)
+        self.peers_page = QWidget()
+        pl = QVBoxLayout(self.peers_page)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.setSpacing(0)
         self.peers_summary = QLabel()           # "peers by country" strip with flags
@@ -2117,14 +2198,16 @@ class MainWindow(QMainWindow):
         self.peers_summary.setWordWrap(True)
         pl.addWidget(self.peers_summary)
         pl.addWidget(self.peers_tbl, 1)
-        self.tabs.addTab(peers_page, t("tab_peers"))
-        self.tr_tbl = widgets.TrackersView()
-        self.tabs.addTab(self.tr_tbl, t("tab_trackers"))
 
-        speed = QWidget()
-        sl = QVBoxLayout(speed)
+        self.task_log = details.TaskLogView()
+        self.piece_map = details.PieceMapView()
+
+        self.graph_page = QWidget()
+        sl = QVBoxLayout(self.graph_page)
         sl.setContentsMargins(12, 8, 12, 8)
         top = QHBoxLayout()
+        self.graph_title = QLabel(); self.graph_title.setObjectName("meta")
+        top.addWidget(self.graph_title)
         top.addStretch()
         self.range_combo = QComboBox()
         for m in (5, 30, 60):
@@ -2134,15 +2217,23 @@ class MainWindow(QMainWindow):
         top.addWidget(self.range_combo)
         sl.addLayout(top)
         self.graph = SpeedGraph()
+        self.g_hist = (self.graph.down, self.graph.up)      # global history; torrents keep their own
+        self.t_hist: dict[str, tuple[deque, deque]] = {}
         sl.addWidget(self.graph, 1)
-        self.tabs.addTab(speed, t("tab_speed"))
         self.stats_view = StatsView()
-        self.tabs.addTab(self.stats_view, t("tab_stats"))
         self.log = LogView()
-        self.tabs.addTab(self.log, t("tab_log"))
-        for i, name in enumerate(("fa6s.circle-info", "fa6s.folder-tree", "fa6s.users", "fa6s.server",
-                                  "fa6s.chart-area", "fa6s.chart-simple", "fa6s.list")):
-            self._themed_icon(lambda ic, i=i: self.tabs.setTabIcon(i, ic), name)
+
+        for w, key, ic in ((self.summary_page, "tab_summary", "fa6s.square-check"),
+                           (self.files_tbl, "tab_files", "fa6s.folder-tree"),
+                           (self.tr_tbl, "tab_trackers", "fa6s.server"),
+                           (self.peers_page, "tab_peers", "fa6s.users"),
+                           (self.task_log, "tab_tasklog", "fa6s.circle-info"),
+                           (self.piece_map, "tab_piecemap", "fa6s.chart-pie"),
+                           (self.graph_page, "tab_graph", "fa6s.chart-line"),
+                           (self.stats_view, "tab_stats", "fa6s.chart-simple"),
+                           (self.log, "tab_globallog", "fa6s.list")):
+            i = self.tabs.addTab(w, t(key))
+            self._themed_icon(lambda q, i=i: self.tabs.setTabIcon(i, q), ic)
         self.tabs.currentChanged.connect(lambda _: self.refresh_details())
         lay.addWidget(self.tabs)
         return box
@@ -2958,7 +3049,16 @@ class MainWindow(QMainWindow):
 
         st = self.engine.ses.status()
         down, up = st.payload_download_rate, st.payload_upload_rate
-        self.graph.push(down, up)
+        self.g_hist[0].append(down)
+        self.g_hist[1].append(up)
+        live = set()
+        for r in rows:
+            hd, hu = self.t_hist.setdefault(r.key, (deque(maxlen=3600), deque(maxlen=3600)))
+            hd.append(r.down_rate)
+            hu.append(r.up_rate)
+            live.add(r.key)
+        for k in [k for k in self.t_hist if k not in live]:
+            del self.t_hist[k]
         self._tick_extras(rows, down, up)
         active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking", "tracker_error"))
         self.k_down.set(fmt_size(down) + "/s", t("kpi_down"))
@@ -2987,44 +3087,96 @@ class MainWindow(QMainWindow):
         self.refresh_details()
 
     def refresh_details(self):
-        if self.tabs.currentIndex() == 5:        # global, works without a selected torrent
+        cur = self.tabs.currentWidget()
+        if cur is self.stats_view:          # global, works without a selected torrent
             self.stats_view.refresh(self)
         keys = self.selected_keys()
         row = next((r for r in self.model.rows if keys and r.key == keys[0]), None)
+        if cur is self.graph_page:
+            hist = self.t_hist.get(row.key) if row else None
+            self.graph.set_series(*(hist or self.g_hist))
+            self.graph_title.setText(row.name if row and hist else t("gr_all"))
         if row is None:
             for lab in self.g.values():
                 lab.setText("—")
+            self.sum_speed.setText("—")
+            self.sum_states.set_states([], False)
+            self.sum_avail.set_avail([])
+            self.sum_have.setText("")
+            self.sum_copies.setText("")
             self.peers_tbl.setRowCount(0)
             self.peers_summary.hide()
             self.tr_tbl.clear_view()
             self.files_tbl.clear()
             self.files_tbl.key = None
-            self.piecebar.set_pieces([], False)
+            self.task_log.show_log(None, [])
+            self.piece_map.show_map({}, False)
             return
-        trs = self.engine.trackers(row.key)
-        self.g["gen_path"].setText(row.save_path)
-        self.g["gen_size"].setText(fmt_size(row.size))
-        self.g["gen_downloaded"].setText(fmt_size(row.downloaded))
-        self.g["gen_uploaded"].setText(fmt_size(row.uploaded))
-        self.g["gen_ratio"].setText(fmt_ratio(row.ratio))
-        self.g["gen_tracker"].setText(trs[0]["url"] if trs else "DHT")
-        self.g["gen_error"].setText(row.error or "—")
-        self.g["gen_error"].setStyleSheet(f"color:{C['danger']};" if row.error else "")
+
+        if cur is self.summary_page:
+            self._refresh_summary(row)
+        elif cur is self.files_tbl:
+            self.refresh_files(row.key)
+        elif cur is self.tr_tbl:
+            self.tr_tbl.update_trackers(row.key, self.engine.trackers(row.key), self.engine.peer_sources(row.key))
+        elif cur is self.peers_page:
+            self._refresh_peers(row)
+        elif cur is self.task_log:
+            self.task_log.show_log(row.key, self.engine.task_log(row.key))
+        elif cur is self.piece_map:
+            self.piece_map.show_map(self.engine.piece_map(row.key), row.progress >= 1.0)
+
+    def _refresh_summary(self, row):
         inf = self.engine.info(row.key)
+        trs = self.engine.trackers(row.key)
+        pm = self.engine.piece_map(row.key)
+        hist = self.t_hist.get(row.key)
+        if hist:
+            self.sum_graph.set_series(*hist)
+        self.sum_speed.setText(f"↓ {fmt_size(row.down_rate)}/s   ↑ {fmt_size(row.up_rate)}/s")
+        states = pm.get("states", [])
+        self.sum_states.set_states(states, row.progress >= 1.0)
+        self.sum_avail.set_avail(pm.get("avail", []))
+        self.sum_have.setText(f"{row.progress * 100:.1f}%" if states else "")
+        self.sum_copies.setText(t("gen_copies", f"{details.copies(pm['avail']):.2f}") if states else "")
+
         def when(ts):
             return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts and ts > 0 else "—"
+
         def dur(sec):
             h, m = divmod(sec // 60, 60)
             return f"{h}:{m:02d}:{sec % 60:02d}"
+
+        active = inf.get("active", 0)
+        dl_lim, ul_lim = self.engine.limits(row.key)
+        avg_dl = row.downloaded / active if active else 0
+        avg_ul = row.uploaded / active if active else 0
+        left = max(0, row.size - int(row.size * row.progress))
         vals = {
-            "gen_active": t("gen_active_val", dur(inf.get("active", 0)), dur(inf.get("seeding", 0))),
+            "gen_active": t("gen_active_val", dur(active), dur(inf.get("seeding", 0))),
+            "gen_eta": fmt_eta(row.eta) if row.eta >= 0 and row.progress < 1 else "—",
+            "gen_downloaded": fmt_size(row.downloaded),
+            "gen_uploaded": fmt_size(row.uploaded),
+            "gen_dl_speed": t("gen_avg", fmt_size(row.down_rate) + "/s", fmt_size(avg_dl) + "/s"),
+            "gen_ul_speed": t("gen_avg", fmt_size(row.up_rate) + "/s", fmt_size(avg_ul) + "/s"),
+            "gen_dl_limit": fmt_size(dl_lim) + "/s" if dl_lim else t("unlimited"),
+            "gen_ul_limit": fmt_size(ul_lim) + "/s" if ul_lim else t("unlimited"),
+            "gen_ratio": fmt_ratio(row.ratio),
+            "gen_conn": t("gen_conn_val", row.seeds, row.peers),
+            "gen_name": row.name,
+            "gen_path": row.save_path,
+            "gen_size": f"{fmt_size(row.size)} ({row.size:,} B)".replace(",", " "),
+            "gen_left": fmt_size(left) if row.progress < 1 else "0",
+            "gen_tracker": trs[0]["url"] if trs else "DHT",
+            "gen_error": row.error or "—",
             "gen_added": when(inf.get("added")),
             "gen_completed": when(inf.get("completed")),
             "gen_private": "—" if inf.get("private") is None else t("yes" if inf["private"] else "no"),
             "gen_creator": inf.get("creator") or "—",
             "gen_hash1": inf.get("v1") or "—",
             "gen_hash2": inf.get("v2") or "—",
-            "gen_piece_info": (f"{inf['pieces']} × {fmt_size(inf['piece_len'])}" if inf.get("pieces") else "—"),
+            "gen_piece_info": (f"{pm['have']} / {pm['total']} × {fmt_size(inf['piece_len'])}"
+                               if pm and inf.get("piece_len") else "—"),
             "gen_files": str(inf.get("files") or "—"),
             "gen_created": when(inf.get("created")),
             "gen_comment": inf.get("comment") or "—",
@@ -3037,38 +3189,47 @@ class MainWindow(QMainWindow):
             if lab.text() != v:
                 lab.setText(v)
                 lab.setToolTip(v if len(v) > 30 else "")
+        self.g["gen_error"].setStyleSheet(f"color:{C['danger']};" if row.error else "")
 
-        tab = self.tabs.currentIndex()
-        if tab == 0:
-            self.piecebar.set_pieces(self.engine.pieces(row.key), row.progress >= 1.0)
-        elif tab == 1:
-            self.refresh_files(row.key)
-        elif tab == 2:
-            peers = self.engine.peers(row.key)
-            self.peers_tbl.setRowCount(len(peers))
-            by_country: dict[str, list] = {}
-            for p in peers:
-                code, cname = self.geo.lookup(p["host"]) if self.geo else ("", "")
-                ent = by_country.setdefault(code, [cname, 0])
-                ent[1] += 1
-            self.peers_summary.setText(_country_strip(by_country, len(peers)))
-            self.peers_summary.setVisible(bool(peers))
-            for i, p in enumerate(peers):
-                code, cname = self.geo.lookup(p["host"]) if self.geo else ("", "")
-                country = cname or code
-                for j, v in enumerate((p["ip"], country, p["client"], f"{p['progress'] * 100:.1f}%",
-                                       fmt_speed(p["down"]), fmt_speed(p["up"]))):
-                    it = QTableWidgetItem(v)
-                    if j == 0:
-                        it.setData(Qt.UserRole, p["host"])
-                        it.setIcon(widgets.icon("fa6s.circle-user" if p["progress"] < 1 else "fa6s.seedling",
-                                                "primary" if p["progress"] < 1 else "success"))
-                    elif j == 1 and code:
-                        it.setIcon(widgets.flag_icon(code) or widgets.icon("fa6s.earth-europe", "info"))
-                        it.setToolTip(f"{code} — {cname}")
-                    self.peers_tbl.setItem(i, j, it)
-        elif tab == 3:
-            self.tr_tbl.update_trackers(row.key, trs, self.engine.peer_sources(row.key))
+    def _refresh_peers(self, row):
+        peers = self.engine.peers(row.key)
+        by_country: dict[str, list] = {}
+        geo = {}
+        for p in peers:
+            code, cname = self.geo.lookup(p["host"]) if self.geo else ("", "")
+            geo[p["host"]] = (code, cname)
+            ent = by_country.setdefault(code, [cname, 0])
+            ent[1] += 1
+        self.peers_summary.setText(_country_strip(by_country, len(peers)))
+        self.peers_summary.setVisible(bool(peers))
+        self.peers_tbl.setSortingEnabled(False)
+        self.peers_tbl.setRowCount(len(peers))
+        for i, p in enumerate(peers):
+            code, cname = geo[p["host"]]
+            vals = (p["ip"], cname or code, p["client"], f"{p['progress'] * 100:.1f}%", "",
+                    t("src_" + p["source"]), fmt_speed(p["down"]), fmt_speed(p["up"]),
+                    fmt_size(p["downloaded"]) if p["downloaded"] else "0",
+                    fmt_size(p["uploaded"]) if p["uploaded"] else "0",
+                    fmt_speed(p["peer_rate"]), t("init_local" if p["local"] else "init_remote"),
+                    "uTP" if p["utp"] else "TCP", "✓" if p["encrypted"] else "—", fmt_eta(p["connected"]))
+            for j, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if j == 0:
+                    it.setData(Qt.UserRole, p["host"])
+                    it.setIcon(widgets.icon("fa6s.seedling" if p["seed"] else "fa6s.circle-user",
+                                            "success" if p["seed"] else "primary"))
+                elif j == 1 and code:
+                    it.setIcon(widgets.flag_icon(code) or widgets.icon("fa6s.earth-europe", "info"))
+                    it.setToolTip(f"{code} — {cname}")
+                elif j == 4:
+                    it.setData(details.PeerPiecesDelegate.ROLE, p["pieces"])
+                elif j == 13 and p["encrypted"]:
+                    it.setIcon(widgets.icon("fa6s.lock", "success"))
+                    it.setText("")
+                    it.setToolTip(t("peer_enc"))
+                if j in (3, 6, 7, 8, 9, 10):
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.peers_tbl.setItem(i, j, it)
 
     # ── speed schedule ─────────────────────────────────────────
     def apply_schedule(self) -> bool:

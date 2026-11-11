@@ -82,6 +82,9 @@ class Engine:
         # key → {(tracker url, v1/v2, local endpoint): last error, "" = ok}
         self.tr_status: dict[str, dict[tuple, str]] = {}
         self.tr_peers: dict[str, dict[tuple, int]] = {}     # same key → peers in the last tracker reply
+        self.task_logs: dict[str, list[tuple[str, str, str]]] = {}   # key → [(time, kind, text)] for "Task logs"
+        self._cur_key = ""                    # torrent of the alert being handled (for _log)
+        self._peer_seen: dict[tuple, float] = {}   # (key, ip:port) → when we first saw the connection
         self.stats_path = os.path.join(data_dir, "stats.json")
         try:
             with open(self.stats_path, encoding="utf-8") as f:
@@ -168,7 +171,7 @@ class Engine:
             "announce_to_all_tiers":    True,
             "alert_mask": (lt.alert_category.error | lt.alert_category.status
                            | lt.alert_category.storage | lt.alert_category.tracker
-                           | lt.alert_category.port_mapping),
+                           | lt.alert_category.port_mapping | lt.alert_category.performance_warning),
         }
 
     def apply_settings(self, cfg: dict) -> None:
@@ -225,6 +228,22 @@ class Engine:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.bans, f, indent=1)
         os.replace(tmp, self.bans_path)
+
+    def _track_peers(self) -> None:
+        """Remember when each connection was first seen ('Connected' column of the Peers tab)."""
+        now, seen = time.time(), set()
+        for key, h in self.handles.items():
+            try:
+                if not h.is_valid() or not h.status().num_peers:
+                    continue
+                for p in h.get_peer_info():
+                    sk = (key, f"{p.ip[0]}:{p.ip[1]}")
+                    seen.add(sk)
+                    self._peer_seen.setdefault(sk, now)
+            except Exception:
+                continue
+        for sk in [k for k in self._peer_seen if k not in seen]:
+            del self._peer_seen[sk]
 
     def _scan_peers(self) -> None:
         """Ban leech-only clients by peer-id / name, and peers that keep taking data while their
@@ -581,6 +600,16 @@ class Engine:
     def poll(self) -> None:
         """Process alerts. Call from the UI timer (~1 s)."""
         for a in self.ses.pop_alerts():
+            self._cur_key = ""
+            if isinstance(a, lt.torrent_alert):
+                try:
+                    if a.handle.is_valid():
+                        self._cur_key = _key(a.handle)
+                except Exception:
+                    pass
+            if self._cur_key and isinstance(a, TASK_ONLY_ALERTS):
+                self._task(self._cur_key, "tracker" if isinstance(a, lt.tracker_announce_alert)
+                           else "error" if isinstance(a, lt.hash_failed_alert) else "torrent", a.message())
             if isinstance(a, lt.save_resume_data_alert):
                 self._write_resume(a)
             elif isinstance(a, lt.torrent_finished_alert):
@@ -632,6 +661,8 @@ class Engine:
         if self._polls % 15 == 0:
             self._count_trackers()
             self._check_space()
+        if self._polls % 5 == 0:
+            self._track_peers()
         if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
             try:
                 self._scan_peers()
@@ -663,9 +694,20 @@ class Engine:
         return next(iter(st.values()))
 
     def _log(self, kind: str, text: str) -> None:
-        """kind: system | network | torrent | tracker | error."""
+        """kind: system | network | torrent | tracker | error.
+        Goes to the global log and, for an alert about a torrent, to that torrent's task log."""
         self.messages.append((kind, text))
         del self.messages[:-2000]
+        if self._cur_key:
+            self._task(self._cur_key, kind, text)
+
+    def _task(self, key: str, kind: str, text: str) -> None:
+        log = self.task_logs.setdefault(key, [])
+        log.append((time.strftime("%Y-%m-%d %H:%M:%S"), kind, text))
+        del log[:-500]
+
+    def task_log(self, key: str) -> list[tuple[str, str, str]]:
+        return self.task_logs.get(key, [])
 
     # ── statistics ─────────────────────────────────────────────
     def _flush_stats(self) -> None:
@@ -997,17 +1039,81 @@ class Engine:
         h = self.handles.get(key)
         if not h:
             return []
-        res = []
+        res, now, seen = [], time.time(), set()
         for p in h.get_peer_info():
+            addr = f"{p.ip[0]}:{p.ip[1]}"
+            sk = (key, addr)
+            seen.add(sk)
+            first = self._peer_seen.setdefault(sk, now)
+            src = p.source
+            source = ("tracker" if src & lt.peer_info.tracker else "dht" if src & lt.peer_info.dht
+                      else "pex" if src & lt.peer_info.pex else "lsd" if src & lt.peer_info.lsd
+                      else "resume" if src & lt.peer_info.resume_data else "incoming")
+            fl = p.flags
             res.append({
-                "ip": f"{p.ip[0]}:{p.ip[1]}",
+                "ip": addr,
                 "host": p.ip[0],
                 "client": p.client.decode("utf-8", "replace") if isinstance(p.client, bytes) else str(p.client),
                 "progress": p.progress,
                 "down": p.payload_down_speed,
                 "up": p.payload_up_speed,
+                "downloaded": p.total_download,
+                "uploaded": p.total_upload,
+                "peer_rate": int(getattr(p, "remote_dl_rate", 0) or 0),   # how fast the peer itself downloads
+                "source": source,
+                "local": bool(fl & _OUTGOING),                     # we connected to them
+                "utp": bool(fl & _UTP),
+                "encrypted": bool(fl & (int(lt.peer_info.rc4_encrypted) | int(lt.peer_info.plaintext_encrypted))),
+                "seed": bool(fl & int(lt.peer_info.seed)),
+                "connected": int(now - first),
+                "pieces": _buckets(p.pieces, 60),
             })
+        for sk in [k for k in self._peer_seen if k[0] == key and k not in seen]:
+            del self._peer_seen[sk]
         return res
+
+    def piece_map(self, key: str) -> dict:
+        """Piece states for the Piece map tab and the Summary bars.
+        state per piece: 0 empty · 1 downloading · 2 done · 3 skipped (files not wanted)."""
+        h = self.handles.get(key)
+        if not h:
+            return {}
+        s = h.status(lt.torrent_handle.query_pieces)
+        have = list(s.pieces)
+        if not have:
+            return {}
+        states = [2 if x else 0 for x in have]
+        try:
+            for i, pr in enumerate(h.get_piece_priorities()):
+                if pr == 0 and not have[i]:
+                    states[i] = 3
+        except Exception:
+            pass
+        try:
+            for q in h.get_download_queue():
+                i = q["piece_index"] if isinstance(q, dict) else q.piece_index
+                if 0 <= i < len(states) and states[i] != 2:
+                    states[i] = 1
+        except Exception:
+            pass
+        try:
+            avail = list(h.piece_availability())
+        except Exception:
+            avail = []
+        if len(avail) != len(states):
+            avail = [0] * len(states)
+        # a piece we have counts as one copy too (BitComet shows our own as available)
+        avail = [a + (1 if have[i] else 0) for i, a in enumerate(avail)]
+        ti = h.torrent_file()
+        return {"states": states, "avail": avail, "piece_len": ti.piece_length() if ti else 0,
+                "have": sum(have), "total": len(have)}
+
+    def limits(self, key: str) -> tuple[int, int]:
+        """Per-torrent (download, upload) limit in bytes/s, 0 = unlimited."""
+        h = self.handles.get(key)
+        if not h:
+            return 0, 0
+        return max(0, h.download_limit()), max(0, h.upload_limit())
 
     def info(self, key: str) -> dict:
         """Static metadata + timing for the General tab (BitComet-style summary)."""
@@ -1187,6 +1293,33 @@ def _http_reason(code: int, text: str) -> str:
     text = text if text and not text[0].isdigit() else ""
     out = f"HTTP {code} {text}".rstrip()
     return f"{out} — {t(hint)}" if hint else out
+
+
+_OUTGOING = int(getattr(lt.peer_info, "outgoing_connection", getattr(lt.peer_info, "local_connection", 0)))
+_UTP = int(getattr(lt.peer_info, "utp_socket", 1 << 17))     # not exported by the bindings; bit 17 in libtorrent
+
+TASK_ONLY_ALERTS = (lt.tracker_announce_alert, lt.state_changed_alert, lt.hash_failed_alert,
+                    lt.torrent_paused_alert, lt.torrent_resumed_alert, lt.torrent_checked_alert,
+                    lt.torrent_finished_alert, lt.metadata_received_alert, lt.add_torrent_alert,
+                    lt.file_renamed_alert, lt.performance_alert)
+
+
+def _buckets(bits, n: int) -> list[float]:
+    """A peer's piece bitfield squeezed to n fractions (0..1) for a small bar."""
+    try:
+        bits = list(bits)
+    except TypeError:
+        return []
+    total = len(bits)
+    if not total:
+        return []
+    n = min(n, total)
+    out = []
+    for b in range(n):
+        a, z = b * total // n, max((b + 1) * total // n, b * total // n + 1)
+        chunk = bits[a:z]
+        out.append(sum(1 for x in chunk if x) / len(chunk))
+    return out
 
 def _left(t, now: float) -> int:
     """Seconds until a posix time from an announce entry, 0 when it's due / unknown."""

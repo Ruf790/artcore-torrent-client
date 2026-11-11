@@ -53,8 +53,9 @@ def selftest() -> int:
         win.show()
         for _ in range(20):
             app.processEvents()
-        win.tabs.setCurrentIndex(5)
-        win.tick()
+        for i in range(win.tabs.count()):     # every detail tab must build and refresh
+            win.tabs.setCurrentIndex(i)
+            win.tick()
         toasts = taskbar = "n/a"
         if sys.platform == "win32":
             importlib.import_module("windows_toasts")
