@@ -151,7 +151,9 @@ class TorrentModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return {
                 C_NAME: r.name, C_SIZE: fmt_size(r.size), C_PROG: f"{r.progress * 100:.1f}%",
-                C_STATE: t("st_" + r.state), C_DOWN: fmt_speed(r.down_rate), C_UP: fmt_speed(r.up_rate),
+                C_STATE: t("st_" + r.state),
+                C_DOWN: ("↓ " + fmt_speed(r.down_rate)) if r.down_rate > 0 else "",
+                C_UP: ("↑ " + fmt_speed(r.up_rate)) if r.up_rate > 0 else "",
                 C_SEEDS: str(r.seeds), C_PEERS: str(r.peers), C_RATIO: fmt_ratio(r.ratio),
                 C_ETA: fmt_eta(r.eta) if r.eta >= 0 and r.progress < 1 else "", C_TRACKER: r.tracker_host,
                 C_CAT: r.category, C_TAGS: ", ".join(r.tags),
@@ -177,6 +179,13 @@ class TorrentModel(QAbstractTableModel):
                 return QColor(C["success_text"] if dark else C["success"])
             if c in (C_TRACKER, C_ETA, C_SIZE, C_CAT, C_TAGS, C_LEFT):
                 return QColor(C["secondary"])
+            if c == C_RATIO and (r.uploaded or r.downloaded):
+                if r.ratio >= 1:
+                    return QColor(C["success_text"] if dark else C["success"])
+                if r.ratio < 0.5 and r.progress >= 1:          # finished but gave back little
+                    return QColor(C["orange"])
+            if c in (C_SEEDS, C_PEERS) and not (r.seeds if c == C_SEEDS else r.peers):
+                return QColor(C["secondary"])
         if role == Qt.DecorationRole:
             if c == C_NAME:
                 return widgets.torrent_icon(r.kind)
@@ -186,7 +195,7 @@ class TorrentModel(QAbstractTableModel):
                 return widgets.icon("fa6s.hashtag", "teal")
             if c == C_TRACKER and r.tracker_host:
                 return widgets.icon("fa6s.globe" if r.tracker_host != "DHT" else "fa6s.diagram-project", "info")
-        if role == Qt.FontRole and c == C_NAME:
+        if role == Qt.FontRole and c in (C_NAME, C_DOWN, C_UP):
             f = QFont()
             f.setWeight(QFont.DemiBold)
             return f
@@ -265,38 +274,69 @@ def _paint_cell_bg(painter, option):
     painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
 
 
+PROGRESS_COLORS = {   # state → (start, end) of the bar gradient
+    "downloading": ("primary", "info"), "metadata": ("warning", "orange"), "checking": ("warning", "orange"),
+    "seeding": ("success", "teal"), "finished": ("success", "teal"),
+    "paused": ("secondary", "secondary"), "queued": ("secondary", "secondary"),
+    "error": ("danger", "pink"), "tracker_error": ("danger", "pink"),
+}
+
+
 class ProgressDelegate(QStyledItemDelegate):
-    """Percentage + thin rounded bar, like the site's progress bars."""
+    """Rounded pill bar with the percentage inside: dark text over the empty part,
+    white over the filled part. Gradient by state, light stripes while downloading."""
+    H = 16
+
     def paint(self, painter, option, index):
+        from PySide6.QtGui import QLinearGradient
         r = _row_of(index)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
         _paint_cell_bg(painter, option)
-        rect = option.rect.adjusted(8, 0, -8, 0)
-        f = painter.font(); f.setPointSizeF(8.5); painter.setFont(f)
-        tw = 46
-        painter.setPen(QColor(C["body"]))
-        painter.drawText(QRectF(rect.left(), rect.top(), tw, rect.height()),
-                         Qt.AlignVCenter | Qt.AlignLeft, f"{r.progress * 100:.1f}%")
-        bar = QRectF(rect.left() + tw + 4, rect.center().y() - 3, rect.width() - tw - 4, 6)
+        rect = option.rect.adjusted(8, 0, -10, 0)
+        bar = QRectF(rect.left(), rect.center().y() - self.H / 2 + 0.5, rect.width(), self.H)
+        rad = self.H / 2
+        track = QPainterPath(); track.addRoundedRect(bar, rad, rad)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(C["secondary_bg"]))
-        painter.drawRoundedRect(bar, 3, 3)
-        if r.progress > 0:
-            key = ("success" if r.state in ("seeding", "finished") else
-                   "danger" if r.state == "error" else
-                   "warning" if r.state == "tracker_error" else
-                   "secondary" if r.state in ("paused", "queued") else "primary")
-            fill = QRectF(bar.left(), bar.top(), max(6.0, bar.width() * r.progress), 6)
-            if theme.current_style != "muted" and key in ("primary", "success"):
-                from PySide6.QtGui import QLinearGradient
-                g = QLinearGradient(fill.topLeft(), fill.topRight())
-                g.setColorAt(0, QColor(C[key]))
-                g.setColorAt(1, QColor(C["teal"] if key == "success" else C["purple"]))
-                painter.setBrush(g)
-            else:
-                painter.setBrush(QColor(C[key]))
-            painter.drawRoundedRect(fill, 3, 3)
+        painter.fillPath(track, QColor(C["secondary_bg"]))
+        p = max(0.0, min(1.0, r.progress))
+        a, b = PROGRESS_COLORS.get(r.state, ("primary", "info"))
+        if theme.current_style == "muted":
+            b = a
+        fill = QRectF(bar.left(), bar.top(), bar.width() * p, bar.height())
+        if p > 0:
+            g = QLinearGradient(fill.topLeft(), fill.topRight())
+            ca, cb = QColor(C[a]), QColor(C[b])
+            if r.state in ("paused", "queued"):
+                ca.setAlpha(150); cb.setAlpha(150)
+            g.setColorAt(0, ca)
+            g.setColorAt(1, cb)
+            cut = QPainterPath(); cut.addRect(fill)
+            fp = track.intersected(cut)              # a sliver at 2 % still follows the rounded track
+            painter.fillPath(fp, g)
+            if r.state == "downloading":           # light diagonal stripes = active
+                painter.save()
+                painter.setClipPath(fp)
+                painter.setPen(QPen(QColor(255, 255, 255, 38), 4))
+                x = fill.left() - fill.height()
+                while x < fill.right():
+                    painter.drawLine(QPointF(x, fill.bottom()), QPointF(x + fill.height(), fill.top()))
+                    x += 10
+                painter.restore()
+            gloss = QLinearGradient(fill.topLeft(), fill.bottomLeft())   # soft top highlight
+            gloss.setColorAt(0, QColor(255, 255, 255, 55))
+            gloss.setColorAt(0.5, QColor(255, 255, 255, 0))
+            painter.fillPath(fp, gloss)
+        f = painter.font(); f.setPointSizeF(8); f.setWeight(QFont.DemiBold); painter.setFont(f)
+        txt = "100%" if p >= 1 else f"{p * 100:.1f}%"
+        painter.setPen(QColor(C["body"]))
+        painter.drawText(bar, Qt.AlignCenter, txt)
+        if p > 0:                                    # same text in white where the bar is filled
+            painter.save()
+            painter.setClipRect(fill)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(bar, Qt.AlignCenter, txt)
+            painter.restore()
         painter.restore()
 
 
@@ -316,9 +356,10 @@ class BadgeDelegate(QStyledItemDelegate):
             text = fm.elidedText(text, Qt.ElideRight, max(room, 10))
         w = fm.horizontalAdvance(text) + 36
         pill = QRectF(option.rect.left() + 6, option.rect.center().y() - 10, w, 20)
-        painter.setPen(Qt.NoPen)
+        edge = QColor(C[fg]); edge.setAlpha(45)
+        painter.setPen(QPen(edge, 1))
         painter.setBrush(QColor(C[bg]))
-        painter.drawRoundedRect(pill, 10, 10)
+        painter.drawRoundedRect(pill.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
         ic = STATE_ICON.get(r.state, "fa6s.circle")
         painter.drawPixmap(int(pill.left() + 9), int(pill.center().y() - 5),
                            qta.icon(ic, color=C[fg]).pixmap(10, 10))
@@ -2592,7 +2633,7 @@ class MainWindow(QMainWindow):
         hh.setSectionsMovable(True)
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
         hh.customContextMenuRequested.connect(self.columns_menu)
-        for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 145), (C_DOWN, 95), (C_UP, 95),
+        for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 145), (C_DOWN, 120), (C_UP, 120),
                      (C_SEEDS, 55), (C_PEERS, 55), (C_RATIO, 65), (C_ETA, 80), (C_TRACKER, 150), (C_CAT, 110)):
             self.table.setColumnWidth(c, w)
         for c in HIDDEN_COLS:
