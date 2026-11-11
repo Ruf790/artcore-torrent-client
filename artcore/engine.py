@@ -678,6 +678,32 @@ class Engine:
             })
         return res
 
+    def info(self, key: str) -> dict:
+        """Static metadata + timing for the General tab (BitComet-style summary)."""
+        h = self.handles.get(key)
+        if not h:
+            return {}
+        s = h.status()
+        ih = h.info_hashes()
+        d = {
+            "v1": str(ih.v1) if ih.has_v1() else "",
+            "v2": str(ih.v2) if ih.has_v2() else "",
+            "added": s.added_time, "completed": s.completed_time,
+            "active": int(s.active_duration.total_seconds()),
+            "seeding": int(s.seeding_duration.total_seconds()),
+            "pieces": 0, "piece_len": 0, "files": 0,
+            "creator": "", "created": 0, "comment": "", "private": None,
+        }
+        if s.has_metadata:
+            ti = h.torrent_file()
+            fs = ti.files()
+            d.update(pieces=ti.num_pieces(), piece_len=ti.piece_length(),
+                     files=sum(1 for i in range(fs.num_files())
+                               if not fs.file_flags(i) & lt.file_storage.flag_pad_file),
+                     creator=ti.creator(), created=ti.creation_date(),
+                     comment=_mask_passkey(ti.comment()), private=ti.priv())
+        return d
+
     def trackers(self, key: str) -> list[dict]:
         h = self.handles.get(key)
         if not h:
