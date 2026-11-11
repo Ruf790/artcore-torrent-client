@@ -20,6 +20,9 @@ PALETTES = {
         "warning": "#ffc107", "warning_subtle": "#fff3cd", "warning_text": "#664d03",
         "info": "#0dcaf0", "info_subtle": "#cff4fc", "info_text": "#055160",
         "muted_subtle": "#f1f3f5", "selection": "#e7f1ff",
+        "purple": "#6f42c1", "purple_subtle": "#e2d9f3", "purple_text": "#2c1a4d",
+        "orange": "#fd7e14", "orange_subtle": "#ffe5d0", "orange_text": "#652c00",
+        "teal": "#20c997", "pink": "#d63384",
     },
     "dark": {
         "body_bg": "#212529", "body": "#dee2e6", "emphasis": "#ffffff",
@@ -32,11 +35,22 @@ PALETTES = {
         "warning": "#ffc107", "warning_subtle": "#332701", "warning_text": "#ffda6a",
         "info": "#0dcaf0", "info_subtle": "#032830", "info_text": "#6edff6",
         "muted_subtle": "#2b3035", "selection": "#10294d",
+        "purple": "#8c68cd", "purple_subtle": "#1c1327", "purple_text": "#c29ffa",
+        "orange": "#fd9843", "orange_subtle": "#331904", "orange_text": "#feb272",
+        "teal": "#3dd5f3", "pink": "#e685b5",
     },
 }
 
 current: dict = dict(PALETTES["light"])
 current_name = "light"
+current_style = "soft"        # muted (gray, like the site) | soft (coloured accents) | vivid (gradients)
+
+# KPI tile → colour family
+TONES = {"down": "primary", "up": "success", "active": "orange", "session": "purple"}
+GRADIENTS = {   # vivid style: tile gradients (light and dark use the same saturated colours)
+    "down": ("#0d6efd", "#4d94ff"), "up": ("#198754", "#20c997"),
+    "active": ("#fd7e14", "#f5b70a"), "session": ("#6f42c1", "#d63384"),
+}
 TITLE_FONT = "Oswald"
 
 
@@ -74,13 +88,25 @@ def resolve(mode: str) -> str:
     return "dark" if system_is_dark() else "light"
 
 
-def apply(app: QApplication, mode: str) -> str:
-    """mode: 'system' | 'light' | 'dark'. Returns the resolved name."""
-    global current_name
+def apply(app: QApplication, mode: str, style: str | None = None) -> str:
+    """mode: 'system' | 'light' | 'dark'; style: muted | soft | vivid. Returns the resolved name."""
+    global current_name, current_style
     current_name = resolve(mode)
+    if style in ("muted", "soft", "vivid"):
+        current_style = style
     current.clear()
     current.update(PALETTES[current_name])
     c = current
+    dark = current_name == "dark"
+    colourful = current_style != "muted"
+    if colourful and not dark:
+        c["page_bg"] = "#eef2f8"            # a hint of blue instead of plain gray
+    # icon colours that depend on the style (looked up by key like any palette colour)
+    c["ic_magnet"] = c["purple"] if colourful else c["body"]
+    c["ic_create"] = c["orange"] if colourful else c["body"]
+    c["ic_add"] = "#ffffff"
+    c["head_ic"] = "#ffffff" if current_style == "vivid" else c["secondary"]
+    c["head_logo"] = "#ffffff" if colourful else c["primary_text"]
 
     pal = QPalette()
     pal.setColor(QPalette.Window, QColor(c["page_bg"]))
@@ -97,7 +123,7 @@ def apply(app: QApplication, mode: str) -> str:
     pal.setColor(QPalette.PlaceholderText, QColor(c["secondary"]))
     pal.setColor(QPalette.Link, QColor(c["primary_text"] if current_name == "dark" else c["primary"]))
     app.setPalette(pal)
-    app.setStyleSheet(build_qss(c, _arrow_images(c)))
+    app.setStyleSheet(build_qss(c, _arrow_images(c)) + style_qss(c))
     return current_name
 
 
@@ -128,7 +154,7 @@ QMainWindow, QDialog, QWidget#page {{ background: {c['page_bg']}; color: {c['bod
 QToolTip {{ background: {c['body_bg']}; color: {c['body']}; border: 1px solid {c['border']}; padding: 4px 6px; }}
 
 /* cards (.st-card) */
-QFrame#card {{ background: {c['body_bg']}; border: 1px solid {c['border']}; border-radius: 14px; }}
+QFrame#card, QFrame#headCard {{ background: {c['body_bg']}; border: 1px solid {c['border']}; border-radius: 14px; }}
 QLabel#title {{ font-family: "{TITLE_FONT}"; font-size: 17pt; font-weight: 600; color: {c['emphasis']}; }}
 QLabel#meta {{ color: {c['secondary']}; font-size: 9pt; }}
 QLabel#headIcon {{ background: {c['primary_subtle']}; border-radius: 12px; }}
@@ -256,3 +282,40 @@ QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 6px; }}
 QStatusBar {{ background: {c['page_bg']}; color: {c['secondary']}; }}
 QMessageBox QLabel {{ color: {c['body']}; }}
 """
+
+
+def style_qss(c: dict) -> str:
+    """Extra rules for the colourful styles; empty for 'muted' (the site's gray look)."""
+    if current_style == "muted":
+        return ""
+    dark = current_name == "dark"
+    out = f"""
+QLabel#headIcon {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {c['primary']}, stop:1 {c['purple']});
+                   border-radius: 12px; }}
+QPushButton#pill:checked {{ background: {c['primary']}; color: #ffffff; }}
+QFrame#kpi {{ background: {c['body_bg']}; }}
+QTabBar::tab:selected {{ color: {c['primary_text'] if dark else c['primary']}; border-bottom: 2px solid {c['primary']}; }}
+"""
+    for tone, fam in TONES.items():
+        out += f"""
+QFrame#kpi[tone="{tone}"] QLabel#kpiVal {{ color: {c[fam + '_text'] if dark else c[fam]}; }}
+QLabel#kpiIco[tone="{tone}"] {{ background: {c[fam + '_subtle']}; border-radius: 12px; }}
+"""
+    if current_style == "vivid":
+        out += """
+QFrame#headCard { border: none; border-radius: 14px;
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0d6efd, stop:0.55 #6f42c1, stop:1 #d63384); }
+QFrame#headCard QLabel#title { color: #ffffff; }
+QFrame#headCard QLabel#meta { color: rgba(255,255,255,210); }
+QFrame#headCard QLabel#headIcon { background: rgba(255,255,255,46); }
+QFrame#headCard QToolButton#iconBtn { background: rgba(255,255,255,38); }
+QFrame#headCard QToolButton#iconBtn:hover { background: rgba(255,255,255,80); }
+"""
+        for tone, (a, b) in GRADIENTS.items():
+            out += f"""
+QFrame#kpi[tone="{tone}"] {{ border: none;
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {a}, stop:1 {b}); }}
+QFrame#kpi[tone="{tone}"] QLabel#kpiVal {{ color: #ffffff; }}
+QFrame#kpi[tone="{tone}"] QLabel#kpiLbl {{ color: rgba(255,255,255,215); }}
+"""
+    return out

@@ -17,6 +17,7 @@ DEFAULTS = {
     "minimize_to_tray": True,
     "language":         "ru",
     "theme":            "system",   # system | light | dark
+    "ui_style":         "soft",     # muted (gray, like the site) | soft | vivid
     "show_add_dialog":  True,
     "stop_ratio":       0.0,        # pause seeding at this ratio, 0 = off
     "stop_hours":       0,          # pause after N hours of seeding, 0 = off
