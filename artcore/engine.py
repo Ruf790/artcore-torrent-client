@@ -680,6 +680,14 @@ class Engine:
                         self._cur_key = _key(a.handle)
                 except Exception:
                     pass
+            if isinstance(a, lt.file_renamed_alert) and self._cur_key:
+                # torrent_file() keeps the original names; remember the current ones ourselves
+                try:
+                    new = a.new_name() if callable(getattr(a, "new_name", None)) else str(a.new_name)
+                    self.opts.setdefault(self._cur_key, {}).setdefault("renamed", {})[str(a.index)] = new
+                    self._save_opts()
+                except Exception:
+                    pass
             if self._cur_key and isinstance(a, TASK_ONLY_ALERTS):
                 self._task(self._cur_key, "tracker" if isinstance(a, lt.tracker_announce_alert)
                            else "error" if isinstance(a, lt.hash_failed_alert) else "torrent", a.message())
@@ -946,7 +954,7 @@ class Engine:
             fs = ti.files()
             prog = h.file_progress()
             prios = h.get_file_priorities()
-            d["files"] = [(i, fs.file_path(i), fs.file_size(i),
+            d["files"] = [(i, self.file_path(key, fs, i), fs.file_size(i),
                            prog[i] / fs.file_size(i) if fs.file_size(i) else 1.0, prios[i])
                           for i in range(fs.num_files()) if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
         return d
@@ -1162,12 +1170,54 @@ class Engine:
             size = fs.file_size(i)
             out.append({
                 "index": i,
-                "path": fs.file_path(i),
+                "path": self.file_path(key, fs, i),
                 "size": size,
                 "progress": (done[i] / size) if size else 1.0,
                 "priority": prios[i] if i < len(prios) else PRIO_NORMAL,
             })
         return out
+
+    def file_path(self, key: str, fs, i: int) -> str:
+        """Current path of a file — renamed ones included (torrent_file() has the original names)."""
+        return self.opts.get(key, {}).get("renamed", {}).get(str(i)) or fs.file_path(i)
+
+    def current_info(self, key: str):
+        """A copy of the torrent's metadata with the current (renamed) file paths."""
+        h = self.handles.get(key)
+        if not h or not h.status().has_metadata:
+            return None
+        ti = lt.torrent_info(h.torrent_file())
+        for idx, path in self.opts.get(key, {}).get("renamed", {}).items():
+            try:
+                ti.rename_file(int(idx), path)
+            except Exception:
+                pass
+        return ti
+
+    def apply_files(self, key: str, f: dict) -> None:
+        """Task properties, Basic tab: wanted files, renamed files, new folder."""
+        h = self.handles.get(key)
+        if not h:
+            return
+        wanted = f.get("wanted")
+        if wanted is not None:
+            prios = list(h.get_file_priorities())
+            fs = h.torrent_file().files()
+            new = []
+            for i, pr in enumerate(prios):
+                if fs.file_flags(i) & lt.file_storage.flag_pad_file:
+                    new.append(pr)
+                elif i in wanted:
+                    new.append(pr if pr else 4)
+                else:
+                    new.append(0)
+            if new != prios:
+                h.prioritize_files(new)
+        for idx, path in (f.get("renames") or {}).items():
+            h.rename_file(idx, path)
+        if f.get("save_path"):
+            self.move(key, f["save_path"])
+        h.save_resume_data(lt.torrent_handle.save_info_dict)
 
     def set_file_priority(self, key: str, indices: list[int], prio: int) -> None:
         h = self.handles.get(key)

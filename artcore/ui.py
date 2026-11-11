@@ -1574,8 +1574,12 @@ class AddTorrentDialog(QDialog):
     KIND_BOXES = (("video", "ad_k_video"), ("audio", "ad_k_audio"), ("image", "ad_k_image"), ("other", "ad_k_other"))
 
     def __init__(self, cfg: dict, name: str, ti=None, parent=None, cross: dict | None = None,
-                 scrape_src: tuple[list[str], bytes] | None = None, meta: dict | None = None):
+                 scrape_src: tuple[list[str], bytes] | None = None, meta: dict | None = None,
+                 existing: dict | None = None):
+        """existing: Task properties reuse the 'Basic settings' tab for a torrent already in the
+        client — {"save_path", "progress": {index: 0..1}, "prios": [...]}."""
         super().__init__(parent)
+        self.existing = existing
         _theme_title_bar(self)
         self.setWindowTitle(t("ad_title"))
         self.setWindowIcon(app_icon())
@@ -1587,7 +1591,12 @@ class AddTorrentDialog(QDialog):
         self.leaves: list[tuple[QTreeWidgetItem, int, int]] = []
         self.files = torrent_files(ti) if ti is not None else []
         self.single = ti is not None and len(self.files) == 1 and "/" not in self.files[0][1].replace("\\", "/")
-        self.orig_name = (os.path.basename(self.files[0][1]) if self.single else (ti.name() if ti is not None else name))
+        if self.single:
+            self.orig_name = os.path.basename(self.files[0][1])
+        elif self.files:               # the folder as it is now (it may have been renamed)
+            self.orig_name = self.files[0][1].replace("\\", "/").split("/")[0]
+        else:
+            self.orig_name = ti.name() if ti is not None else name
         self.resize(940, 820)
         self.setMinimumSize(760, 600)
 
@@ -1608,7 +1617,7 @@ class AddTorrentDialog(QDialog):
         grid.setVerticalSpacing(8)
         grid.addWidget(QLabel(t("ad_path")), 0, 0)
         used = sorted({r.save_path for r in getattr(getattr(parent, "model", None), "rows", [])})
-        self.path = PathCombo(cfg, cfg.get("save_path", ""), used)
+        self.path = PathCombo(cfg, existing["save_path"] if existing else cfg.get("save_path", ""), used)
         self.path.textChanged.connect(self._update)
         grid.addWidget(self.path, 0, 1)
         b = QPushButton("…")
@@ -1622,6 +1631,7 @@ class AddTorrentDialog(QDialog):
             self.cat.addItem(icon("fa6s.tag", "purple"), c["name"], c["name"])
         self.cat.currentIndexChanged.connect(self._cat_changed)
         self.cat.setToolTip(t("cat_menu"))
+        self.cat.setVisible(existing is None)         # Task properties: category is set from the list
         grid.addWidget(self.cat, 0, 3)
         grid.addWidget(QLabel(t("ad_fname" if self.single or ti is None else "ad_folder")), 1, 0)
         self.name_edit = QLineEdit(self.orig_name)
@@ -1629,7 +1639,7 @@ class AddTorrentDialog(QDialog):
         self.name_edit.textChanged.connect(self._update)
         grid.addWidget(self.name_edit, 1, 1, 1, 3)
         self.subfolder = QCheckBox(t("ad_subfolder"))
-        self.subfolder.setChecked(bool(cfg.get("add_subfolder")))
+        self.subfolder.setChecked(bool(cfg.get("add_subfolder")) and existing is None)
         self.subfolder.setVisible(self.single)
         self.subfolder.toggled.connect(self._update)
         grid.addWidget(self.subfolder, 2, 1, 1, 3)
@@ -1678,13 +1688,15 @@ class AddTorrentDialog(QDialog):
         self.kind_cbs: dict[str, QCheckBox] = {}
         if ti is not None:
             self.tree = QTreeWidget()
-            self.tree.setHeaderLabels([t("file_name"), t("col_size")])
+            self.tree.setHeaderLabels([t("file_name"), t("col_size")] + (["%"] if existing else []))
             self.tree.setRootIsDecorated(True)
             self.tree.setUniformRowHeights(True)
             hh = self.tree.header()
             hh.setStretchLastSection(False)
             hh.setSectionResizeMode(0, QHeaderView.Stretch)
             hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            if existing:
+                hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
             self._fill(self.files)
             self.tree.itemChanged.connect(lambda *_: self._update())
             bl.addWidget(self.tree, 1)
@@ -1712,6 +1724,7 @@ class AddTorrentDialog(QDialog):
             bl.addWidget(note)
             bl.addStretch()
         tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
+        self.tabs, self.basic_tab = tabs, basic
 
         # ── Advanced · Publisher · Download order (same tabs as Task properties) ──
         if cross:
@@ -1834,9 +1847,14 @@ class AddTorrentDialog(QDialog):
                     it.setIcon(0, ic_dir)
                     folders[key] = it
                 parent = it
-            leaf = QTreeWidgetItem(parent, [parts[-1], fmt_size(size)])
+            ex = self.existing
+            leaf = QTreeWidgetItem(parent, [parts[-1], fmt_size(size)]
+                                   + ([f"{ex['progress'].get(idx, 0) * 100:.1f}%"] if ex else []))
             leaf.setFlags(leaf.flags() | Qt.ItemIsUserCheckable)
-            leaf.setCheckState(0, Qt.Checked)
+            wanted = not ex or idx >= len(ex.get("prios", [])) or ex["prios"][idx] != 0
+            leaf.setCheckState(0, Qt.Checked if wanted else Qt.Unchecked)
+            if ex:
+                leaf.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
             leaf.setIcon(0, widgets.file_icon(parts[-1]))
             leaf.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
             self.leaves.append((leaf, idx, size))
@@ -1980,28 +1998,51 @@ class AddTorrentDialog(QDialog):
 
 
 class PropertiesDialog(QDialog):
-    """'Task properties' like BitComet's: Basic settings · Advanced · Publisher · Download order."""
-    def __init__(self, name: str, props: dict, parent=None, task: dict | None = None, save_path: str = ""):
+    """'Task properties' like BitComet's: Basic settings (folder, name, files) · Advanced ·
+    Publisher · Download order."""
+    def __init__(self, name: str, props: dict, parent=None, task: dict | None = None, save_path: str = "",
+                 basic: dict | None = None):
         super().__init__(parent)
         from . import taskprops
         _theme_title_bar(self)
         self.setWindowTitle(t("tp_title"))
         self.setWindowIcon(app_icon())
-        self.resize(900, 720)
+        self.resize(940, 820)
         task = task or {}
+        self.orig_path = save_path
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 14)
         tabs = QTabWidget()
         lay.addWidget(tabs, 1)
 
-        basic = QWidget()
-        form = QFormLayout(basic)
-        form.setContentsMargins(10, 10, 10, 10)
-        head = _section(name); head.setWordWrap(True)
-        form.addRow(head)
-        if save_path:
+        # Basic settings: the add dialog's first tab, filled with this torrent
+        self.files_ui = None
+        if basic and basic.get("ti") is not None:
+            self.files_ui = AddTorrentDialog(basic["cfg"], name, basic["ti"], parent, meta=basic.get("meta"),
+                                             existing={"save_path": save_path, "progress": basic["progress"],
+                                                       "prios": basic["prios"]})
+            self.files_ui.hide()
+            page = self.files_ui.basic_tab
+            self.files_ui.tabs.removeTab(0)
+            tabs.addTab(page, icon("fa6s.sliders"), t("ad_tab_basic"))
+        elif save_path:
+            page = QWidget()
+            f = QFormLayout(page)
+            head = _section(name); head.setWordWrap(True)
+            f.addRow(head)
             sp = QLabel(save_path); sp.setObjectName("rowVal"); sp.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            form.addRow(t("ad_path"), sp)
+            f.addRow(t("ad_path"), sp)
+            f.addRow(QLabel(t("ad_magnet_note")))
+            tabs.addTab(page, icon("fa6s.sliders"), t("ad_tab_basic"))
+
+        adv_src = dict(task)
+        adv_src.update(super_seed=props["super_seed"], own_limits=bool(props["dl_limit"] or props["ul_limit"]),
+                       dl_limit=props["dl_limit"], ul_limit=props["ul_limit"])
+        self.adv = taskprops.AdvancedTab(adv_src)
+        # stop-seeding rule lives under Advanced (BitComet keeps its seeding rules there too)
+        stop = QWidget()
+        form = QFormLayout(stop)
+        form.setContentsMargins(0, 0, 0, 0)
         form.addRow(_section(t("pr_stop"), "fa6s.hand", "danger"))
         self.mode = QComboBox()
         for k in ("pr_mode_global", "pr_mode_custom", "pr_mode_never"):
@@ -2017,12 +2058,7 @@ class PropertiesDialog(QDialog):
         form.addRow(hint)
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self._mode_changed()
-        tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
-
-        adv_src = dict(task)
-        adv_src.update(super_seed=props["super_seed"], own_limits=bool(props["dl_limit"] or props["ul_limit"]),
-                       dl_limit=props["dl_limit"], ul_limit=props["ul_limit"])
-        self.adv = taskprops.AdvancedTab(adv_src)
+        self.adv.layout().addWidget(stop)
         self.pub = taskprops.PublisherTab(task)
         self.order = taskprops.OrderTab(task)
         tabs.addTab(self.adv, icon("fa6s.gears"), t("ad_tab_adv"))
@@ -2035,6 +2071,16 @@ class PropertiesDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+
+    def result_files(self) -> dict:
+        """Changes on the Basic tab: new folder, renamed files, files (not) to download."""
+        if self.files_ui is None:
+            return {}
+        ui = self.files_ui
+        path = ui.path.text().strip()
+        return {"save_path": path if path and path != self.orig_path else "",
+                "renames": ui.renames(),
+                "wanted": {idx for lf, idx, _ in ui.leaves if lf.checkState(0) == Qt.Checked}}
 
     def _mode_changed(self):
         custom = self.mode.currentIndex() == 1
@@ -3604,11 +3650,20 @@ class MainWindow(QMainWindow):
             return
         key = keys[0]
         row = next((r for r in self.model.rows if r.key == key), None)
+        task0 = self.engine.task_props(key)
+        h = self.engine.handles.get(key)
+        basic = None
+        if h is not None and h.status().has_metadata:
+            basic = {"cfg": self.cfg, "ti": self.engine.current_info(key), "prios": list(h.get_file_priorities()), "progress": {f[0]: f[3] for f in task0["files"]},
+                     "meta": {"publisher": task0.get("publisher", ""), "publisher-url": task0.get("publisher_url", "")}}
         d = PropertiesDialog(row.name if row else key, self.engine.props(key), self,
-                             task=self.engine.task_props(key), save_path=row.save_path if row else "")
+                             task=task0, save_path=row.save_path if row else "", basic=basic)
         if d.exec():
             p = d.result_props()
             task = d.result_task()
+            files = d.result_files()
+            if files:
+                self.engine.apply_files(key, files)
             for k in keys:                       # same settings for every selected torrent
                 self.engine.set_props(k, p)
                 if k == key:                     # trackers, web seeds and file order belong to this one
