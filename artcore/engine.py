@@ -500,10 +500,41 @@ class Engine:
             try:
                 with open(path, "rb") as f:
                     atp = lt.read_resume_data(f.read())
+                if atp.ti is not None and not (atp.comment or atp.created_by or atp.creation_date):
+                    self._restore_meta(atp)
                 h = self.ses.add_torrent(atp)
                 self.handles[_key(h)] = h
             except Exception as e:  # corrupt resume file — skip it, keep the rest
                 self._log("error", f"{fn}: {e}")
+        self._save_opts()
+
+    def _restore_meta(self, atp) -> None:
+        """Torrents saved by older versions lost comment / creator / creation date (and publisher).
+        Take them back from the same torrent in qBittorrent's BT_backup, if it is there."""
+        try:
+            from .importers import qbittorrent_dirs
+            ih = atp.ti.info_hashes()
+            name = (str(ih.v1) if ih.has_v1() else str(ih.v2)) + ".torrent"
+            for d in qbittorrent_dirs():
+                src = os.path.join(d, name)
+                if not os.path.isfile(src):
+                    continue
+                with open(src, "rb") as f:
+                    raw = f.read()
+                t = lt.torrent_info(raw)
+                if _key_of(t.info_hashes()) != _key_of(ih):
+                    continue
+                atp.ti = t                     # same info dict, plus the root fields
+                atp.comment, atp.created_by, atp.creation_date = t.comment(), t.creator(), t.creation_date()
+                root = lt.bdecode(raw) or {}
+                o = self.opts.setdefault(name[:-8] if ih.has_v1() else _key_of(ih), {})
+                for k, ok in ((b"publisher", "publisher"), (b"publisher-url", "publisher_url")):
+                    v = root.get(k)
+                    if v and not o.get(ok):
+                        o[ok] = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+                return
+        except Exception:
+            pass
 
     def save_all(self, wait: float = 5.0) -> None:
         """Request resume data for every torrent and write it (used on exit)."""
@@ -524,9 +555,23 @@ class Engine:
 
     def _write_resume(self, a: lt.save_resume_data_alert) -> None:
         key = _key(a.handle)
+        p = a.params
+        # libtorrent's resume data keeps only the info dict: comment, "created by" and the creation
+        # date would be gone after a restart unless we put them into the resume params ourselves
+        try:
+            ti = a.handle.torrent_file()
+            if ti is not None:
+                if not p.comment and ti.comment():
+                    p.comment = ti.comment()
+                if not p.created_by and ti.creator():
+                    p.created_by = ti.creator()
+                if not p.creation_date and ti.creation_date():
+                    p.creation_date = ti.creation_date()
+        except Exception:
+            pass
         tmp = self._resume_path(key) + ".tmp"
         with open(tmp, "wb") as f:
-            f.write(lt.write_resume_data_buf(a.params))
+            f.write(lt.write_resume_data_buf(p))
         os.replace(tmp, self._resume_path(key))
 
     # ── adding / removing ──────────────────────────────────────
@@ -1555,6 +1600,10 @@ def _finished_now(st, started: float) -> bool:
     """True when the torrent completed during this run, not in an earlier one."""
     done = int(getattr(st, "completed_time", 0) or 0)
     return done > 0 and done >= started - 5
+
+
+def _key_of(ih) -> str:
+    return str(ih.v1) if ih.has_v1() else str(ih.v2)
 
 def _left(t, now: float) -> int:
     """Seconds until a posix time from an announce entry, 0 when it's due / unknown."""
