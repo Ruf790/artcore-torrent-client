@@ -678,20 +678,39 @@ def _mask_passkey(text: str) -> str:
     return _PASSKEY_PATH.sub(lambda m: m.group(1) + "•" * 8, text)
 
 
-def create_torrent(src: str, announce: str, out_path: str, private: bool = True, comment: str = "") -> str:
-    """Make a .torrent for uploading to the tracker."""
+PIECE_SIZES = [0] + [1 << n for n in range(14, 26)]     # 0 = auto, 16 KiB … 32 MiB
+
+
+def create_torrent(src: str, announce: str, out_path: str, private: bool = True, comment: str = "",
+                   piece_size: int = 0, fmt: str = "v1", web_seeds: list[str] | None = None,
+                   source: str = "", progress=None) -> str:
+    """Make a .torrent for uploading to a tracker.
+    announce: one URL per line, each line its own tier. fmt: v1 | hybrid | v2.
+    source: info['source'] tag (private trackers use it for cross-seeding).
+    progress(done, total) is called while hashing."""
     fs = lt.file_storage()
     lt.add_files(fs, src)
     if fs.num_files() == 0:
         raise ValueError("Нет файлов для торрента")
-    t = lt.create_torrent(fs)
-    if announce:
-        t.add_tracker(announce, 0)
+    flags = {"v1": lt.create_torrent.v1_only, "v2": lt.create_torrent.v2_only, "hybrid": 0}[fmt]
+    t = lt.create_torrent(fs, int(piece_size), flags=flags)
+    for tier, url in enumerate(u.strip() for u in announce.splitlines() if u.strip()):
+        t.add_tracker(url, tier)
+    for ws in web_seeds or []:
+        if ws.strip():
+            t.add_url_seed(ws.strip())
     t.set_priv(private)
     t.set_creator(f"{APP_NAME} {VERSION}")
     if comment:
         t.set_comment(comment)
-    lt.set_piece_hashes(t, os.path.dirname(os.path.abspath(src)))
+    total = t.num_pieces()
+    if progress:
+        lt.set_piece_hashes(t, os.path.dirname(os.path.abspath(src)), lambda i: progress(i + 1, total))
+    else:
+        lt.set_piece_hashes(t, os.path.dirname(os.path.abspath(src)))
+    d = t.generate()
+    if source:
+        d[b"info"][b"source"] = source.encode("utf-8")
     with open(out_path, "wb") as f:
-        f.write(lt.bencode(t.generate()))
+        f.write(lt.bencode(d))
     return out_path

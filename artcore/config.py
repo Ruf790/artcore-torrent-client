@@ -34,6 +34,8 @@ DEFAULTS = {
     "encryption":       "prefer",   # prefer | require | disable
     "ip_filter":        "",         # file path or URL, "" = off
     "geoip":            True,
+    "check_updates":    True,
+    "last_update_check": 0,
 }
 
 

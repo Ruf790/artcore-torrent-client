@@ -754,6 +754,13 @@ class SettingsDialog(QDialog):
         form.addRow(self.tray)
         self.show_add = QCheckBox(t("set_show_add")); self.show_add.setChecked(cfg.get("show_add_dialog", True))
         form.addRow(self.show_add)
+        urow = QHBoxLayout()
+        self.upd = QCheckBox(t("set_updates")); self.upd.setChecked(cfg.get("check_updates", True))
+        urow.addWidget(self.upd, 1)
+        ub = QPushButton(t("upd_check_now"))
+        ub.clicked.connect(lambda: parent.check_updates(manual=True) if parent is not None else None)
+        urow.addWidget(ub)
+        form.addRow(urow)
 
         # ── connection
         form.addRow(_section(t("set_grp_conn")))
@@ -900,7 +907,7 @@ class SettingsDialog(QDialog):
                  active_seeds=self.act_seed.value(), dht=self.dht.isChecked(),
                  lsd=self.dht.isChecked(), upnp=self.upnp.isChecked(),
                  minimize_to_tray=self.tray.isChecked(),
-                 show_add_dialog=self.show_add.isChecked(),
+                 show_add_dialog=self.show_add.isChecked(), check_updates=self.upd.isChecked(),
                  stop_ratio=self.stop_ratio.value(), stop_hours=self.stop_hours.value(),
                  sched_enabled=self.sch_on.isChecked(),
                  sched_from=self.sch_from.time().toString("HH:mm"),
@@ -1157,15 +1164,16 @@ class PropertiesDialog(QDialog):
 
 
 class HashThread(QThread):
-    done = Signal(str, str)   # out_path, error
+    done = Signal(str, str)          # out_path, error
+    progress = Signal(int, int)      # pieces hashed, total
 
-    def __init__(self, src, announce, out, private, comment):
+    def __init__(self, **kw):
         super().__init__()
-        self.args = (src, announce, out, private, comment)
+        self.kw = kw
 
     def run(self):
         try:
-            self.done.emit(create_torrent(*self.args), "")
+            self.done.emit(create_torrent(progress=lambda d, n: self.progress.emit(d, n), **self.kw), "")
         except Exception as e:
             self.done.emit("", str(e))
 
@@ -1173,14 +1181,18 @@ class HashThread(QThread):
 class CreateTorrentDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
+        from PySide6.QtWidgets import QPlainTextEdit, QProgressBar
+        from .engine import PIECE_SIZES
         _theme_title_bar(self)
         self.setWindowTitle(t("ct_title"))
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(640)
         self.cfg = cfg
         self.out_path = ""
         self.src_path = ""
         form = QFormLayout(self)
         form.setContentsMargins(20, 12, 20, 16)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)      # labels above the fields: more room for paths
+        form.setVerticalSpacing(6)
         form.addRow(_section(t("ct_title")))
 
         self.src = QLineEdit()
@@ -1189,15 +1201,43 @@ class CreateTorrentDialog(QDialog):
         row = QHBoxLayout(); row.addWidget(self.src); row.addWidget(bf); row.addWidget(bd)
         form.addRow(t("ct_source"), row)
 
-        self.announce = QLineEdit(cfg.get("announce_url", ""))
-        self.announce.setPlaceholderText("https://tracker.example/announce.php?passkey=…")
-        form.addRow(t("ct_announce"), self.announce)
+        def text_box(value, ph, h=58):
+            e = QPlainTextEdit(value)
+            e.setPlaceholderText(ph)
+            e.setFixedHeight(h)
+            e.setLineWrapMode(QPlainTextEdit.NoWrap)
+            return e
+
+        self.announce = text_box(cfg.get("announce_url", ""), "https://tracker.example/announce.php?passkey=…")
+        form.addRow(t("ct_announce_n"), self.announce)
+
+        opts = QHBoxLayout()
+        self.piece = QComboBox()
+        for size in PIECE_SIZES:
+            self.piece.addItem(t("ct_piece_auto") if size == 0 else fmt_size(size).replace(".00", ""), size)
+        self.piece.setCurrentIndex(max(0, self.piece.findData(cfg.get("ct_piece", 0))))
+        self.fmt = QComboBox()
+        for k in ("v1", "hybrid", "v2"):
+            self.fmt.addItem(t("ct_fmt_" + k), k)
+        self.fmt.setCurrentIndex(max(0, self.fmt.findData(cfg.get("ct_format", "v1"))))
+        opts.addWidget(self.piece)
+        opts.addWidget(QLabel(t("ct_format")))
+        opts.addWidget(self.fmt, 1)
+        form.addRow(t("ct_piece"), opts)
+
+        self.webseeds = text_box("", "https://mirror.example/files/", 46)
+        form.addRow(t("ct_webseeds"), self.webseeds)
+        self.source = QLineEdit(cfg.get("ct_source", ""))
+        self.source.setToolTip(t("ct_source_hint"))
+        form.addRow(t("ct_src_tag"), self.source)
         self.comment = QLineEdit()
         form.addRow(t("ct_comment"), self.comment)
         self.private = QCheckBox(t("ct_private")); self.private.setChecked(True)
         form.addRow(self.private)
         self.seed = QCheckBox(t("ct_seed")); self.seed.setChecked(True)
         form.addRow(self.seed)
+        self.bar = QProgressBar(); self.bar.setTextVisible(True); self.bar.hide()
+        form.addRow(self.bar)
 
         self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.bb.button(QDialogButtonBox.Ok).setObjectName("primary")
@@ -1223,23 +1263,107 @@ class CreateTorrentDialog(QDialog):
         out, _ = QFileDialog.getSaveFileName(self, t("ct_title"), name + ".torrent", t("torrent_filter"))
         if not out:
             return
-        self.cfg["announce_url"] = self.announce.text().strip()
+        announce = self.announce.toPlainText().strip()
+        self.cfg.update(announce_url=announce, ct_piece=self.piece.currentData(),
+                        ct_format=self.fmt.currentData(), ct_source=self.source.text().strip())
         self.bb.setEnabled(False)
         self.setWindowTitle(t("ct_working"))
+        self.bar.setRange(0, 0)
+        self.bar.show()
         self.src_path = src
-        self.th = HashThread(src, self.announce.text().strip(), out, self.private.isChecked(),
-                             self.comment.text().strip())
+        self.th = HashThread(src=src, announce=announce, out_path=out, private=self.private.isChecked(),
+                             comment=self.comment.text().strip(), piece_size=self.piece.currentData(),
+                             fmt=self.fmt.currentData(), web_seeds=self.webseeds.toPlainText().splitlines(),
+                             source=self.source.text().strip())
+        self.th.progress.connect(self._progress)
         self.th.done.connect(self._finished)
         self.th.start()
 
+    def _progress(self, done, total):
+        self.bar.setRange(0, total)
+        self.bar.setValue(done)
+
     def _finished(self, out, err):
         self.bb.setEnabled(True)
+        self.bar.hide()
         self.setWindowTitle(t("ct_title"))
         if err:
             QMessageBox.warning(self, t("ct_title"), err)
             return
         self.out_path = out
         QMessageBox.information(self, t("ct_title"), t("ct_done", out))
+        self.accept()
+
+
+class UpdateDialog(QDialog):
+    """Release notes + download & silent install of the new Setup.exe."""
+    progress = Signal(int, int)
+    finished_dl = Signal(str, str)        # path, error
+
+    def __init__(self, info: dict, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QProgressBar, QTextBrowser
+        from . import updater
+        _theme_title_bar(self)
+        self.info, self.updater, self.path = info, updater, ""
+        self.setWindowTitle(t("upd_title"))
+        self.resize(620, 460)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 12, 20, 16)
+        lay.addWidget(_section(t("upd_available", info["version"])))
+        lab = QLabel(t("upd_text", info["version"], VERSION)); lab.setObjectName("meta")
+        lay.addWidget(lab)
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        notes.setMarkdown(info.get("notes") or "")
+        lay.addWidget(notes, 1)
+        self.bar = QProgressBar(); self.bar.hide()
+        lay.addWidget(self.bar)
+        self.note = QLabel(t("upd_restart")); self.note.setObjectName("meta"); self.note.setWordWrap(True)
+        lay.addWidget(self.note)
+        self.bb = QDialogButtonBox()
+        self.can_install = updater.can_self_update() and bool(info.get("url"))
+        self.go = self.bb.addButton(t("upd_install" if self.can_install else "upd_page"), QDialogButtonBox.AcceptRole)
+        self.go.setObjectName("primary")
+        self.bb.addButton(t("upd_later"), QDialogButtonBox.RejectRole)
+        self.bb.accepted.connect(self._go)
+        self.bb.rejected.connect(self.reject)
+        self.note.setVisible(self.can_install)
+        lay.addWidget(self.bb)
+        self.progress.connect(self._on_progress)
+        self.finished_dl.connect(self._on_done)
+
+    def _go(self):
+        if not self.can_install:
+            QDesktopServices.openUrl(QUrl(self.info["page"]))
+            self.reject()
+            return
+        import threading
+        self.go.setEnabled(False)
+        self.bar.setRange(0, max(1, self.info.get("size", 0)))
+        self.bar.show()
+
+        def work():
+            try:
+                p = self.updater.download(self.info["url"], self.info.get("size", 0),
+                                          lambda d, n: self.progress.emit(d, n))
+                self.finished_dl.emit(p, "")
+            except Exception as e:
+                self.finished_dl.emit("", str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_progress(self, done, total):
+        if total:
+            self.bar.setMaximum(total)
+        self.bar.setValue(min(done, self.bar.maximum()))
+        self.bar.setFormat(t("upd_downloading", fmt_size(done), fmt_size(total or done)))
+
+    def _on_done(self, path, err):
+        if err:
+            self.go.setEnabled(True)
+            QMessageBox.warning(self, t("upd_title"), err)
+            return
+        self.path = path
         self.accept()
 
 
@@ -1288,6 +1412,12 @@ class MainWindow(QMainWindow):
         self.retheme()
         self._log_startup()
         self._ticks = 0
+        self._update_result = None
+        import time as _time
+        from . import updater as _upd
+        if self.cfg.get("check_updates", True) and _upd.can_self_update() \
+                and _time.time() - self.cfg.get("last_update_check", 0) > 20 * 3600:
+            self.check_updates()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -1327,6 +1457,13 @@ class MainWindow(QMainWindow):
             lay.addWidget(b)
             return b
 
+        self.update_pill = QPushButton()
+        self.update_pill.setObjectName("primary")
+        self.update_pill.setCursor(Qt.PointingHandCursor)
+        self.update_pill.clicked.connect(self.show_update)
+        self.update_pill.hide()
+        self._themed_icon(self.update_pill.setIcon, "fa6s.circle-arrow-up", "#ffffff")
+        lay.addWidget(self.update_pill)
         ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
@@ -1556,16 +1693,88 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(stretch, QHeaderView.Stretch)
         return w
 
+    TRAY_LIMITS = (0, 100, 500, 1024, 2048, 5120, 10240)      # KiB/s
+
     def _build_tray(self):
         self.tray = QSystemTrayIcon(app_icon(), self)
-        menu = QMenu()
-        menu.addAction(t("show"), self.show_normal)
-        menu.addAction(t("add_torrent"), self.add_torrent_dialog)
-        menu.addSeparator()
-        menu.addAction(t("quit"), self.quit)
-        self.tray.setContextMenu(menu)
+        self.tray_menu = QMenu()
+        self.tray_menu.aboutToShow.connect(self._fill_tray_menu)
+        self._fill_tray_menu()
+        self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(lambda r: self.show_normal() if r == QSystemTrayIcon.Trigger else None)
         self.tray.show()
+
+    def _fill_tray_menu(self):
+        """Rebuilt on every open so the check marks show the current limits."""
+        m = self.tray_menu
+        m.clear()
+        m.addAction(icon("fa6s.window-maximize"), t("show"), self.show_normal)
+        m.addAction(icon("fa6s.plus"), t("add_torrent"), self.add_torrent_dialog)
+        m.addSeparator()
+        for key, cfg_key, ico in (("tray_dl", "dl_limit", "fa6s.arrow-down"), ("tray_ul", "ul_limit", "fa6s.arrow-up")):
+            sub = m.addMenu(icon(ico), t(key))
+            cur = int(self.cfg.get(cfg_key, 0))
+            for kib in self.TRAY_LIMITS:
+                a = sub.addAction(t("tray_unlimited") if kib == 0 else fmt_size(kib * 1024).replace(".00", "") + "/s")
+                a.setCheckable(True)
+                a.setChecked(kib == cur)
+                a.triggered.connect(lambda _=False, k=cfg_key, v=kib: self.set_limit(k, v))
+        m.addSeparator()
+        m.addAction(icon("fa6s.pause"), t("tray_pause_all"), lambda: self._all(self.engine.pause))
+        m.addAction(icon("fa6s.play", "success"), t("tray_resume_all"), lambda: self._all(self.engine.resume))
+        m.addSeparator()
+        m.addAction(icon("fa6s.power-off", "danger"), t("quit"), self.quit)
+
+    def set_limit(self, cfg_key: str, kib: int):
+        self.cfg[cfg_key] = kib
+        config.save(self.cfg)
+        self.engine.apply_settings(self.cfg)
+        self._sched_state = None               # schedule re-applies its own limits if active
+
+    def _all(self, fn):
+        for k in list(self.engine.handles):
+            fn(k)
+        self.tick()
+
+    # ── updates ────────────────────────────────────────────────
+    def check_updates(self, manual: bool = False):
+        import threading
+        import time as _time
+        from . import updater
+
+        def work():
+            try:
+                self._update_result = ("ok", updater.check(), manual)
+            except Exception as e:
+                self._update_result = ("error", str(e), manual)
+        self.cfg["last_update_check"] = int(_time.time())
+        config.save(self.cfg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _handle_update_result(self):
+        kind, val, manual = self._update_result
+        self._update_result = None
+        if kind == "error":
+            self.log_event("error", t("upd_error", val))
+            if manual:
+                QMessageBox.warning(self, t("upd_title"), t("upd_error", val))
+        elif val:
+            self.update_info = val
+            self.update_pill.setText(t("upd_available", val["version"]))
+            self.update_pill.show()
+            self.log_event("system", t("upd_available", val["version"]))
+            if manual:
+                self.show_update()
+        elif manual:
+            QMessageBox.information(self, t("upd_title"), t("upd_none", VERSION))
+
+    def show_update(self):
+        info = getattr(self, "update_info", None)
+        if not info:
+            return
+        d = UpdateDialog(info, self)
+        if d.exec() and d.path:
+            self.quit(installer=d.path)
 
     # ── theme ──────────────────────────────────────────────────
     def retheme(self):
@@ -1863,6 +2072,8 @@ class MainWindow(QMainWindow):
             if ok is not None and self.tray.isVisible():
                 bind = self.cfg.get("bind_interface", "")
                 self.tray.showMessage(APP_TITLE, t("meta_vpn_ok" if ok else "meta_vpn_down", bind), app_icon(), 5000)
+        if self._update_result is not None:
+            self._handle_update_result()
         if self._ipf_result is not None:
             kind, val = self._ipf_result
             self._ipf_result = None
@@ -2066,11 +2277,15 @@ class MainWindow(QMainWindow):
         self.quit()
         e.accept()
 
-    def quit(self):
+    def quit(self, installer: str = ""):
         if self._quitting:
             return
         self._quitting = True
         self.timer.stop()
         self.tray.hide()
         self.engine.shutdown()
+        if installer:                            # self-update: session saved, let the installer in
+            from . import updater
+            winint.release_mutex()
+            updater.run_installer(installer)
         QApplication.quit()

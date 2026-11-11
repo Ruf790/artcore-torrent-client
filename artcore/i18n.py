@@ -327,6 +327,38 @@ STRINGS = {
                         "DB-IP database loaded (IP Geolocation by DB-IP, CC BY 4.0)"),
     "geo_loading":     ("загрузка базы DB-IP…",              "loading DB-IP database…"),
     "geo_error":       ("ошибка: {0}",                       "error: {0}"),
+    # create torrent extras
+    "ct_announce_n":   ("Трекеры (по одному на строку, каждый — свой уровень)", "Trackers (one per line, each its own tier)"),
+    "ct_piece":        ("Размер куска",                      "Piece size"),
+    "ct_piece_auto":   ("Авто",                              "Auto"),
+    "ct_format":       ("Формат",                            "Format"),
+    "ct_fmt_v1":       ("v1 — совместим со всеми трекерами", "v1 — works with every tracker"),
+    "ct_fmt_hybrid":   ("Гибрид v1 + v2",                    "Hybrid v1 + v2"),
+    "ct_fmt_v2":       ("Только v2 (BEP 52)",                "v2 only (BEP 52)"),
+    "ct_webseeds":     ("Веб-сиды (HTTP-зеркала, по одному на строку)", "Web seeds (HTTP mirrors, one per line)"),
+    "ct_src_tag":      ("Source (метка трекера, по желанию)", "Source (tracker tag, optional)"),
+    "ct_source_hint":  ("Некоторые приватные трекеры требуют source — тогда info-hash отличается от раздачи на другом трекере.",
+                        "Some private trackers require a source tag — it makes the info-hash differ from other trackers."),
+    # tray
+    "tray_dl":         ("Лимит загрузки",                    "Download limit"),
+    "tray_ul":         ("Лимит отдачи",                      "Upload limit"),
+    "tray_unlimited":  ("Без ограничений",                   "Unlimited"),
+    "tray_pause_all":  ("Остановить все",                    "Pause all"),
+    "tray_resume_all": ("Запустить все",                     "Resume all"),
+    # updates
+    "set_updates":     ("Проверять обновления при запуске",  "Check for updates on start"),
+    "upd_check_now":   ("Проверить сейчас",                  "Check now"),
+    "upd_none":        ("У вас последняя версия ({0}).",     "You have the latest version ({0})."),
+    "upd_available":   ("Доступна версия {0}",               "Version {0} available"),
+    "upd_title":       ("Обновление ArtCore Client",         "ArtCore Client update"),
+    "upd_text":        ("Новая версия {0} (у вас {1}).",     "New version {0} (you have {1})."),
+    "upd_install":     ("Скачать и установить",              "Download and install"),
+    "upd_page":        ("Открыть страницу релиза",           "Open release page"),
+    "upd_later":       ("Позже",                             "Later"),
+    "upd_downloading": ("Загрузка {0} из {1}…",              "Downloading {0} of {1}…"),
+    "upd_restart":     ("Клиент закроется, установит обновление и запустится снова.",
+                        "The client will close, install the update and start again."),
+    "upd_error":       ("Не удалось проверить обновления: {0}", "Update check failed: {0}"),
 }
 
 
