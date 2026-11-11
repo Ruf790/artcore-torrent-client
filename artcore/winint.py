@@ -148,3 +148,25 @@ def register_associations() -> None:
     setkey(r"magnet\shell\open\command", {"": f'{cmd} "%1"'})
     # tell Explorer the associations changed
     ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+
+
+# ── firewall (for the Statistics tab) ───────────────────────────
+def firewall_allowed() -> bool | None:
+    """True if an inbound allow rule exists for our .exe (made by the installer
+    or by the Windows "Allow access" prompt). None = unknown / not Windows."""
+    if not IS_WIN:
+        return None
+    import subprocess
+    exe = exe_path()
+    try:
+        out = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in", "verbose"],
+            capture_output=True, text=True, timeout=8, creationflags=0x08000000,   # CREATE_NO_WINDOW
+            encoding="oem", errors="replace").stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    needle = (exe or "ArtCoreClient").lower()
+    blocks = out.lower().split("\n\n")
+    found = [b for b in blocks if needle in b]
+    # netsh output is localized: "Action: Allow" (en) / "Действие: Разрешить" (ru)
+    return any(("allow" in b or "разреш" in b) for b in found)

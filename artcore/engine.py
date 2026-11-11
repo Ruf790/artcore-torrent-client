@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 
 import libtorrent as lt
@@ -68,7 +69,17 @@ class Engine:
 
         self.cfg      = cfg
         self.handles: dict[str, lt.torrent_handle] = {}
-        self.messages: list[str] = []          # log lines for the UI
+        self.messages: list[tuple[str, str]] = []   # (kind, text) log events for the UI
+        self.started = time.time()
+        self.wan_ip = ""
+        self.portmap: dict[str, str] = {}     # "UPnP" / "NAT-PMP" → status text
+        self.stats_path = os.path.join(data_dir, "stats.json")
+        try:
+            with open(self.stats_path, encoding="utf-8") as f:
+                self.stats_saved = json.load(f)
+        except (FileNotFoundError, ValueError):
+            self.stats_saved = {"all_down": 0, "all_up": 0}
+        self._stats_flushed = time.time()
         self.finished_names: list[str] = []    # for tray notifications
         self.stopped_names: list[str] = []     # paused by a stop-seeding rule
         self._hosts: dict[str, str] = {}
@@ -105,7 +116,8 @@ class Engine:
             "announce_to_all_trackers": True,
             "announce_to_all_tiers":    True,
             "alert_mask": (lt.alert_category.error | lt.alert_category.status
-                           | lt.alert_category.storage | lt.alert_category.tracker),
+                           | lt.alert_category.storage | lt.alert_category.tracker
+                           | lt.alert_category.port_mapping),
         }
 
     def apply_settings(self, cfg: dict) -> None:
@@ -127,7 +139,7 @@ class Engine:
                 h = self.ses.add_torrent(atp)
                 self.handles[_key(h)] = h
             except Exception as e:  # corrupt resume file — skip it, keep the rest
-                self.messages.append(f"Не удалось восстановить {fn}: {e}")
+                self._log("error", f"{fn}: {e}")
 
     def save_all(self, wait: float = 5.0) -> None:
         """Request resume data for every torrent and write it (used on exit)."""
@@ -228,10 +240,59 @@ class Engine:
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, lt.metadata_received_alert):
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
-            elif isinstance(a, (lt.tracker_error_alert, lt.torrent_error_alert,
+            elif isinstance(a, (lt.tracker_error_alert, lt.torrent_error_alert, lt.listen_failed_alert,
                                 lt.file_error_alert, lt.fastresume_rejected_alert)):
-                self.messages.append(a.message())
+                self._log("error", a.message())
+            elif isinstance(a, (lt.tracker_reply_alert, lt.tracker_warning_alert)):
+                self._log("tracker", a.message())
+            elif isinstance(a, lt.listen_succeeded_alert):
+                self._log("network", a.message())
+            elif isinstance(a, lt.external_ip_alert):
+                self.wan_ip = str(a.external_address)
+                self._log("network", a.message())
+            elif isinstance(a, (lt.portmap_alert, lt.portmap_error_alert)):
+                name = "UPnP" if a.map_transport == lt.portmap_transport.upnp else "NAT-PMP"
+                if isinstance(a, lt.portmap_alert):
+                    self.portmap[name] = f"ok:{a.external_port}"
+                    self._log("network", a.message())
+                else:
+                    self.portmap[name] = "error:" + a.message()
+                    self._log("error", a.message())
         self._apply_stop_rules()
+        if time.time() - self._stats_flushed > 300:     # survive a crash: flush totals every 5 min
+            self._flush_stats()
+
+    def _log(self, kind: str, text: str) -> None:
+        """kind: system | network | torrent | tracker | error. Passkeys are masked."""
+        self.messages.append((kind, _mask_passkey(text)))
+        del self.messages[:-2000]
+
+    # ── statistics ─────────────────────────────────────────────
+    def _flush_stats(self) -> None:
+        st = self.ses.status()
+        data = {"all_down": self.stats_saved["all_down"] + st.total_payload_download,
+                "all_up": self.stats_saved["all_up"] + st.total_payload_upload}
+        tmp = self.stats_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, self.stats_path)
+        self._stats_flushed = time.time()
+
+    def stats(self) -> dict:
+        st = self.ses.status()
+        return {
+            "uptime": int(time.time() - self.started),
+            "port": self.ses.listen_port(),
+            "incoming": bool(st.has_incoming_connections),
+            "peers": st.num_peers,
+            "dht_nodes": st.dht_nodes,
+            "wan_ip": self.wan_ip,
+            "portmap": dict(self.portmap),
+            "down_rate": st.payload_download_rate, "up_rate": st.payload_upload_rate,
+            "session_down": st.total_payload_download, "session_up": st.total_payload_upload,
+            "all_down": self.stats_saved["all_down"] + st.total_payload_download,
+            "all_up": self.stats_saved["all_up"] + st.total_payload_upload,
+        }
 
     def rows(self) -> list[TorrentRow]:
         out = []
@@ -428,6 +489,10 @@ class Engine:
     def shutdown(self) -> None:
         self.ses.pause()
         self.save_all()
+        try:
+            self._flush_stats()
+        except OSError:
+            pass
 
 
 def _ratio(uploaded: int, downloaded: int, done: int) -> float:
@@ -439,10 +504,20 @@ def _ratio(uploaded: int, downloaded: int, done: int) -> float:
     return float("inf") if uploaded > 0 else 0.0
 
 
-def _mask_passkey(url: str) -> str:
-    """Hide the passkey in announce URLs shown in the UI (screenshots!)."""
+_PASSKEY_PARAM = None
+_PASSKEY_PATH = None
+
+
+def _mask_passkey(text: str) -> str:
+    """Hide passkeys in announce URLs and tracker messages shown in the UI / log (screenshots!).
+    Covers ?passkey= / torrent_pass= / authkey= / pk= / uk= / key= and 32-hex path segments."""
     import re
-    return re.sub(r"(passkey=|/)([0-9a-fA-F]{32})(?=$|[/&?])", lambda m: m.group(1) + "•" * 8, url)
+    global _PASSKEY_PARAM, _PASSKEY_PATH
+    if _PASSKEY_PARAM is None:
+        _PASSKEY_PARAM = re.compile(r"([?&;](?:passkey|torrent_pass|authkey|pk|uk|key)=)[A-Za-z0-9_-]{8,}", re.I)
+        _PASSKEY_PATH = re.compile(r"(/)[0-9a-fA-F]{32}(?=[/?&\s\"']|$)")
+    text = _PASSKEY_PARAM.sub(lambda m: m.group(1) + "•" * 8, text)
+    return _PASSKEY_PATH.sub(lambda m: m.group(1) + "•" * 8, text)
 
 
 def create_torrent(src: str, announce: str, out_path: str, private: bool = True, comment: str = "") -> str:
