@@ -193,6 +193,16 @@ class Engine:
         h.save_resume_data(lt.torrent_handle.save_info_dict)
         return key
 
+    def add_params(self, atp: lt.add_torrent_params) -> str:
+        """Add prepared params (import from other clients); save_path is already set."""
+        h = self.ses.add_torrent(atp)
+        key = _key(h)
+        if key in self.handles:
+            raise ValueError("Этот торрент уже добавлен")
+        self.handles[key] = h
+        h.save_resume_data(lt.torrent_handle.save_info_dict)
+        return key
+
     def remove(self, key: str, delete_files: bool = False) -> None:
         h = self.handles.pop(key, None)
         if h is None:

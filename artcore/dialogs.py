@@ -1,6 +1,8 @@
-"""Extra dialogs and editors: trackers, replace in trackers, categories.
+"""Extra dialogs and editors: trackers, replace in trackers, categories, import.
 Shared helpers (colours, icons, section titles) come from ui.py at runtime."""
 from __future__ import annotations
+
+import os
 
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QPlainTextEdit,
@@ -162,3 +164,140 @@ def folder_row(parent: QWidget, value: str) -> tuple[QHBoxLayout, QLineEdit]:
     row.addWidget(edit, 1)
     row.addWidget(btn)
     return row, edit
+
+
+class ImportDialog(QDialog):
+    """Import torrents from qBittorrent / BitComet with a preview list."""
+    SOURCES = (("qBittorrent", ("qbittorrent.exe", "qbittorrent")), ("BitComet", ("bitcomet.exe",)))
+
+    def __init__(self, engine, cfg: dict, parent=None):
+        super().__init__(parent)
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QCheckBox, QComboBox
+        from . import importers
+        ui = _ui()
+        ui._theme_title_bar(self)
+        self.Qt, self.importers, self.engine, self.cfg = Qt, importers, engine, cfg
+        self.cands: list = []
+        self.imported = 0
+        self.setWindowTitle(t("imp_title"))
+        self.resize(900, 600)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 12, 20, 16)
+        lay.addWidget(ui._section(t("imp_title")))
+
+        form = QFormLayout()
+        self.source = QComboBox()
+        for name, _ in self.SOURCES:
+            self.source.addItem(name)
+        self.source.currentIndexChanged.connect(self._source_changed)
+        form.addRow(t("imp_source"), self.source)
+        frow, self.folder = folder_row(self, "")
+        scan = QPushButton(t("imp_scan")); scan.setObjectName("primary"); scan.clicked.connect(self.scan)
+        frow.addWidget(scan)
+        form.addRow(t("imp_folder"), frow)
+        lay.addLayout(form)
+
+        self.warn = QLabel(); self.warn.setWordWrap(True)
+        lay.addWidget(self.warn)
+
+        self.tbl = QTableWidget(0, 5)
+        self.tbl.setHorizontalHeaderLabels([t("file_name"), t("imp_col_size"), t("imp_col_path"),
+                                            t("cat_menu"), t("imp_col_note")])
+        self.tbl.verticalHeader().hide()
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        hh = self.tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        for c, w in ((1, 90), (2, 220), (3, 90), (4, 200)):
+            self.tbl.setColumnWidth(c, w)
+        lay.addWidget(self.tbl, 1)
+        self.count = QLabel(); self.count.setObjectName("meta")
+        lay.addWidget(self.count)
+
+        opts = QFormLayout()
+        self.recheck = QCheckBox(t("imp_recheck"))
+        self.paused = QCheckBox(t("imp_paused"))
+        opts.addRow(self.recheck)
+        opts.addRow(self.paused)
+        drow, self.default = folder_row(self, cfg.get("save_path", ""))
+        opts.addRow(t("imp_default"), drow)
+        lay.addLayout(opts)
+        lay.addWidget(_buttons(self, t("imp_btn")))
+        self._source_changed()
+
+    def _source_changed(self):
+        idx = self.source.currentIndex()
+        dirs = self.importers.qbittorrent_dirs() if idx == 0 else self.importers.bitcomet_dirs()
+        self.folder.setText(dirs[0] if dirs else "")
+        bc = idx == 1
+        self.recheck.setChecked(bc)
+        self.recheck.setEnabled(not bc)
+        self.recheck.setToolTip(t("imp_recheck_bc") if bc else "")
+        self.scan()
+
+    def scan(self):
+        ui = _ui()
+        Qt = self.Qt
+        name, procs = self.SOURCES[self.source.currentIndex()]
+        msgs = []
+        if self.importers.client_running(procs):
+            msgs.append(f'<span style="color:{ui.C["danger"]}">{t("imp_running", name)}</span>')
+        if self.source.currentIndex() == 1:
+            msgs.append(t("imp_recheck_bc"))
+        folder = self.folder.text().strip()
+        self.cands = []
+        if folder and os.path.isdir(folder):
+            self.cands = (self.importers.scan_qbittorrent(folder) if self.source.currentIndex() == 0
+                          else self.importers.scan_bitcomet(folder))
+        else:
+            msgs.append(t("imp_not_found"))
+        self.warn.setText("<br>".join(msgs))
+        self.warn.setVisible(bool(msgs))
+
+        self.tbl.setRowCount(len(self.cands))
+        for r, c in enumerate(self.cands):
+            dup = c.info_hash in self.engine.handles
+            broken = c.note.startswith("error:") or (not c.torrent_file and not c.resume_file)
+            if dup:
+                note = t("imp_already")
+            elif c.note.startswith("error:"):
+                note = t("imp_note_error", c.note[6:])
+            else:
+                note = t("imp_note_" + c.note) if c.note else ""
+            vals = (c.name, ui.fmt_size(c.size) if c.size else "", c.save_path, c.category, note)
+            for col, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if col == 0:
+                    it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                    it.setCheckState(Qt.Unchecked if (dup or broken) else Qt.Checked)
+                    if dup or broken:
+                        it.setFlags(it.flags() & ~Qt.ItemIsEnabled)
+                if col == 4 and note:
+                    it.setToolTip(note)
+                    it.setForeground(ui.QColor(ui.C["danger" if broken else "secondary"]))
+                self.tbl.setItem(r, col, it)
+        self.count.setText(t("imp_found", len(self.cands)))
+
+    def run_import(self) -> tuple[int, int]:
+        Qt = self.Qt
+        done = skipped = 0
+        default = self.default.text().strip() or self.cfg.get("save_path", "")
+        cats = {c["name"] for c in self.cfg.get("categories", [])}
+        for r, c in enumerate(self.cands):
+            it = self.tbl.item(r, 0)
+            if it is None or it.checkState() != Qt.Checked:
+                continue
+            try:
+                atp = self.importers.build_params(c, default, self.recheck.isChecked(), self.paused.isChecked())
+                key = self.engine.add_params(atp)
+                if c.category:
+                    self.engine.set_category(key, c.category)
+                    if c.category not in cats:
+                        self.cfg.setdefault("categories", []).append({"name": c.category, "path": ""})
+                        cats.add(c.category)
+                done += 1
+            except Exception as e:
+                skipped += 1
+                self.engine._log("error", f"import {c.name}: {e}")
+        return done, skipped

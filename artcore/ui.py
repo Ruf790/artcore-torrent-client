@@ -1271,6 +1271,7 @@ class MainWindow(QMainWindow):
             lay.addWidget(b)
             return b
 
+        ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
         return h
@@ -1671,6 +1672,17 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(icon("fa6s.trash-can", "danger"), t("remove"), self.remove_selected)
         m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def import_dialog(self):
+        from .dialogs import ImportDialog
+        d = ImportDialog(self.engine, self.cfg, self)
+        if d.exec():
+            done, skipped = d.run_import()
+            config.save(self.cfg)
+            self.refresh_category_combo()
+            self.log_event("torrent", t("imp_done", done, skipped))
+            QMessageBox.information(self, t("imp_title"), t("imp_done", done, skipped))
+            self.tick()
 
     def set_category_selected(self, name: str):
         for k in self.selected_keys():
