@@ -58,6 +58,9 @@ class TorrentRow:
     kind: str = "file"  # video | audio | … | folder | magnet — for the name icon
     tags: tuple = ()
     hnr: str = ""       # what is left of the tracker's seeding requirement, "" = done / no rule
+    done: int = 0       # bytes of the wanted files already here
+    sess_down: int = 0  # downloaded / uploaded since the client started
+    sess_up: int = 0
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -82,6 +85,9 @@ class Engine:
         # key → {(tracker url, v1/v2, local endpoint): last error, "" = ok}
         self.tr_status: dict[str, dict[tuple, str]] = {}
         self.tr_peers: dict[str, dict[tuple, int]] = {}     # same key → peers in the last tracker reply
+        self.task_logs: dict[str, list[tuple[str, str, str]]] = {}   # key → [(time, kind, text)] for "Task logs"
+        self._cur_key = ""                    # torrent of the alert being handled (for _log)
+        self._peer_seen: dict[tuple, float] = {}   # (key, ip:port) → when we first saw the connection
         self.stats_path = os.path.join(data_dir, "stats.json")
         try:
             with open(self.stats_path, encoding="utf-8") as f:
@@ -168,7 +174,7 @@ class Engine:
             "announce_to_all_tiers":    True,
             "alert_mask": (lt.alert_category.error | lt.alert_category.status
                            | lt.alert_category.storage | lt.alert_category.tracker
-                           | lt.alert_category.port_mapping),
+                           | lt.alert_category.port_mapping | lt.alert_category.performance_warning),
         }
 
     def apply_settings(self, cfg: dict) -> None:
@@ -225,6 +231,22 @@ class Engine:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.bans, f, indent=1)
         os.replace(tmp, self.bans_path)
+
+    def _track_peers(self) -> None:
+        """Remember when each connection was first seen ('Connected' column of the Peers tab)."""
+        now, seen = time.time(), set()
+        for key, h in self.handles.items():
+            try:
+                if not h.is_valid() or not h.status().num_peers:
+                    continue
+                for p in h.get_peer_info():
+                    sk = (key, f"{p.ip[0]}:{p.ip[1]}")
+                    seen.add(sk)
+                    self._peer_seen.setdefault(sk, now)
+            except Exception:
+                continue
+        for sk in [k for k in self._peer_seen if k not in seen]:
+            del self._peer_seen[sk]
 
     def _scan_peers(self) -> None:
         """Ban leech-only clients by peer-id / name, and peers that keep taking data while their
@@ -497,15 +519,21 @@ class Engine:
 
     # ── adding / removing ──────────────────────────────────────
     def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False,
-                         file_priorities: list[int] | None = None, seed_mode: bool = False) -> str:
+                         file_priorities: list[int] | None = None, seed_mode: bool = False,
+                         renames: dict[int, str] | None = None, task: dict | None = None) -> str:
         ti = lt.torrent_info(path)
+        for idx, new_path in (renames or {}).items():     # name edited in the add dialog
+            ti.rename_file(idx, new_path)
         atp = lt.add_torrent_params()
         atp.ti = ti
         if seed_mode:      # files known to be complete: skip the full check, pieces are verified when sent
             atp.flags |= lt.torrent_flags.seed_mode
         if file_priorities is not None:
             atp.file_priorities = file_priorities
-        return self._add(atp, save_path, paused)
+        key = self._add(atp, save_path, paused)
+        if task:
+            self.set_task_props(key, task)
+        return key
 
     def add_magnet(self, uri: str, save_path: str | None = None, paused: bool = False) -> str:
         atp = lt.parse_magnet_uri(uri)
@@ -581,6 +609,16 @@ class Engine:
     def poll(self) -> None:
         """Process alerts. Call from the UI timer (~1 s)."""
         for a in self.ses.pop_alerts():
+            self._cur_key = ""
+            if isinstance(a, lt.torrent_alert):
+                try:
+                    if a.handle.is_valid():
+                        self._cur_key = _key(a.handle)
+                except Exception:
+                    pass
+            if self._cur_key and isinstance(a, TASK_ONLY_ALERTS):
+                self._task(self._cur_key, "tracker" if isinstance(a, lt.tracker_announce_alert)
+                           else "error" if isinstance(a, lt.hash_failed_alert) else "torrent", a.message())
             if isinstance(a, lt.save_resume_data_alert):
                 self._write_resume(a)
             elif isinstance(a, lt.torrent_finished_alert):
@@ -632,6 +670,8 @@ class Engine:
         if self._polls % 15 == 0:
             self._count_trackers()
             self._check_space()
+        if self._polls % 5 == 0:
+            self._track_peers()
         if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
             try:
                 self._scan_peers()
@@ -648,6 +688,9 @@ class Engine:
             pass
         if not reason:
             reason = a.error.message() if a.error.value() else a.message()
+        code = int(getattr(a, "status_code", 0) or 0)
+        if code >= 300:                              # libtorrent puts the HTTP status text in failure_reason
+            reason = _http_reason(code, reason)
         self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = reason
 
     def tracker_error(self, key: str) -> str:
@@ -660,9 +703,20 @@ class Engine:
         return next(iter(st.values()))
 
     def _log(self, kind: str, text: str) -> None:
-        """kind: system | network | torrent | tracker | error."""
+        """kind: system | network | torrent | tracker | error.
+        Goes to the global log and, for an alert about a torrent, to that torrent's task log."""
         self.messages.append((kind, text))
         del self.messages[:-2000]
+        if self._cur_key:
+            self._task(self._cur_key, kind, text)
+
+    def _task(self, key: str, kind: str, text: str) -> None:
+        log = self.task_logs.setdefault(key, [])
+        log.append((time.strftime("%Y-%m-%d %H:%M:%S"), kind, text))
+        del log[:-500]
+
+    def task_log(self, key: str) -> list[tuple[str, str, str]]:
+        return self.task_logs.get(key, [])
 
     # ── statistics ─────────────────────────────────────────────
     def _flush_stats(self) -> None:
@@ -733,6 +787,7 @@ class Engine:
                 kind=self._kind(key, h, s),
                 tags=tuple(self.opts.get(key, {}).get("tags", ())),
                 hnr=self.hnr_left(key, h, s) if s.progress >= 1.0 else "",
+                done=s.total_wanted_done, sess_down=s.total_payload_download, sess_up=s.total_payload_upload,
             ))
         return out
 
@@ -797,6 +852,72 @@ class Engine:
         self.opts.setdefault(key, {}).update(
             stop_mode=p["stop_mode"], stop_ratio=float(p["stop_ratio"]), stop_hours=int(p["stop_hours"]),
             rule_done=False, own_limits=own, dl_limit=int(p["dl_limit"]), ul_limit=int(p["ul_limit"]))
+        self._save_opts()
+        h.save_resume_data(lt.torrent_handle.save_info_dict)
+
+    # ── task properties (BitComet's Advanced / Publisher / Download order tabs) ──
+    def task_props(self, key: str) -> dict:
+        h = self.handles[key]
+        o = self.opts.get(key, {})
+        fl = h.flags()
+        st = h.status()
+        d = {"trackers": self.trackers_raw(key),
+             "dht": not fl & lt.torrent_flags.disable_dht, "pex": not fl & lt.torrent_flags.disable_pex,
+             "lsd": not fl & lt.torrent_flags.disable_lsd,
+             "super_seed": bool(fl & lt.torrent_flags.super_seeding),
+             "own_limits": bool(o.get("own_limits")),
+             "dl_limit": int(o.get("dl_limit", 0)), "ul_limit": int(o.get("ul_limit", 0)),
+             "web_seeds": sorted(h.url_seeds()),
+             "publisher": o.get("publisher", ""), "publisher_url": o.get("publisher_url", ""),
+             "private": False, "creator": "", "created": 0, "comment": "",
+             "files": [], "order": o.get("order")}
+        if st.has_metadata:
+            ti = h.torrent_file()
+            d.update(private=bool(ti.priv()), creator=ti.creator(), created=ti.creation_date(), comment=ti.comment())
+            fs = ti.files()
+            prog = h.file_progress()
+            prios = h.get_file_priorities()
+            d["files"] = [(i, fs.file_path(i), fs.file_size(i),
+                           prog[i] / fs.file_size(i) if fs.file_size(i) else 1.0, prios[i])
+                          for i in range(fs.num_files()) if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
+        return d
+
+    def set_task_props(self, key: str, p: dict) -> None:
+        h = self.handles.get(key)
+        if not h:
+            return
+        o = self.opts.setdefault(key, {})
+        if "trackers" in p and p["trackers"] != self.trackers_raw(key):
+            self.set_trackers(key, p["trackers"])
+        for name, flag in (("dht", lt.torrent_flags.disable_dht), ("pex", lt.torrent_flags.disable_pex),
+                           ("lsd", lt.torrent_flags.disable_lsd)):
+            if name in p:
+                (h.unset_flags if p[name] else h.set_flags)(flag)
+        if "super_seed" in p:
+            (h.set_flags if p["super_seed"] else h.unset_flags)(lt.torrent_flags.super_seeding)
+        if "own_limits" in p:
+            own = bool(p["own_limits"])
+            dl, ul = (int(p.get("dl_limit", 0)), int(p.get("ul_limit", 0))) if own else (0, 0)
+            h.set_download_limit(dl * 1024 or -1)
+            h.set_upload_limit(ul * 1024 or -1)
+            self._limited.discard(key)
+            o.update(own_limits=own and bool(dl or ul), dl_limit=dl, ul_limit=ul)
+        if "web_seeds" in p:
+            have, want = set(h.url_seeds()), {u.strip() for u in p["web_seeds"] if u.strip()}
+            for u in have - want:
+                h.remove_url_seed(u)
+            for u in want - have:
+                h.add_url_seed(u)
+        for k in ("publisher", "publisher_url"):
+            if p.get(k):
+                o[k] = p[k]
+        if "order" in p:
+            prios = list(h.get_file_priorities())
+            if p["order"]:
+                h.prioritize_files(order_priorities(p["order"], prios))
+                o["order"] = list(p["order"])
+            elif o.pop("order", None) is not None:          # custom order switched off: back to normal
+                h.prioritize_files([0 if x == 0 else 4 for x in prios])
         self._save_opts()
         h.save_resume_data(lt.torrent_handle.save_info_dict)
 
@@ -994,17 +1115,81 @@ class Engine:
         h = self.handles.get(key)
         if not h:
             return []
-        res = []
+        res, now, seen = [], time.time(), set()
         for p in h.get_peer_info():
+            addr = f"{p.ip[0]}:{p.ip[1]}"
+            sk = (key, addr)
+            seen.add(sk)
+            first = self._peer_seen.setdefault(sk, now)
+            src = p.source
+            source = ("tracker" if src & lt.peer_info.tracker else "dht" if src & lt.peer_info.dht
+                      else "pex" if src & lt.peer_info.pex else "lsd" if src & lt.peer_info.lsd
+                      else "resume" if src & lt.peer_info.resume_data else "incoming")
+            fl = p.flags
             res.append({
-                "ip": f"{p.ip[0]}:{p.ip[1]}",
+                "ip": addr,
                 "host": p.ip[0],
                 "client": p.client.decode("utf-8", "replace") if isinstance(p.client, bytes) else str(p.client),
                 "progress": p.progress,
                 "down": p.payload_down_speed,
                 "up": p.payload_up_speed,
+                "downloaded": p.total_download,
+                "uploaded": p.total_upload,
+                "peer_rate": int(getattr(p, "remote_dl_rate", 0) or 0),   # how fast the peer itself downloads
+                "source": source,
+                "local": bool(fl & _OUTGOING),                     # we connected to them
+                "utp": bool(fl & _UTP),
+                "encrypted": bool(fl & (int(lt.peer_info.rc4_encrypted) | int(lt.peer_info.plaintext_encrypted))),
+                "seed": bool(fl & int(lt.peer_info.seed)),
+                "connected": int(now - first),
+                "pieces": _buckets(p.pieces, 60),
             })
+        for sk in [k for k in self._peer_seen if k[0] == key and k not in seen]:
+            del self._peer_seen[sk]
         return res
+
+    def piece_map(self, key: str) -> dict:
+        """Piece states for the Piece map tab and the Summary bars.
+        state per piece: 0 empty · 1 downloading · 2 done · 3 skipped (files not wanted)."""
+        h = self.handles.get(key)
+        if not h:
+            return {}
+        s = h.status(lt.torrent_handle.query_pieces)
+        have = list(s.pieces)
+        if not have:
+            return {}
+        states = [2 if x else 0 for x in have]
+        try:
+            for i, pr in enumerate(h.get_piece_priorities()):
+                if pr == 0 and not have[i]:
+                    states[i] = 3
+        except Exception:
+            pass
+        try:
+            for q in h.get_download_queue():
+                i = q["piece_index"] if isinstance(q, dict) else q.piece_index
+                if 0 <= i < len(states) and states[i] != 2:
+                    states[i] = 1
+        except Exception:
+            pass
+        try:
+            avail = list(h.piece_availability())
+        except Exception:
+            avail = []
+        if len(avail) != len(states):
+            avail = [0] * len(states)
+        # a piece we have counts as one copy too (BitComet shows our own as available)
+        avail = [a + (1 if have[i] else 0) for i, a in enumerate(avail)]
+        ti = h.torrent_file()
+        return {"states": states, "avail": avail, "piece_len": ti.piece_length() if ti else 0,
+                "have": sum(have), "total": len(have)}
+
+    def limits(self, key: str) -> tuple[int, int]:
+        """Per-torrent (download, upload) limit in bytes/s, 0 = unlimited."""
+        h = self.handles.get(key)
+        if not h:
+            return 0, 0
+        return max(0, h.download_limit()), max(0, h.upload_limit())
 
     def info(self, key: str) -> dict:
         """Static metadata + timing for the General tab (BitComet-style summary)."""
@@ -1067,7 +1252,10 @@ class Engine:
                         st = "working"
                     else:
                         st = "not_contacted"
-                    msg = ih.get("message") or (reason if st in ("not_working", "tracker_error") else "")
+                    http = st == "tracker_error" and reason.startswith("HTTP ")
+                    if http:
+                        st = "not_working"            # the web server answered, the tracker script didn't
+                    msg = reason if http else ih.get("message") or (reason if st in ("not_working", "tracker_error") else "")
                     children.append({
                         "proto": "v1" if i == 0 else "v2",
                         "endpoint": f"{addr[0]}:{addr[1]}" if addr[0] else "",
@@ -1168,6 +1356,57 @@ def _match_files(new: list[tuple[int, str, int]], old: list[tuple[str, int]]) ->
     return renamed
 
 
+
+
+def _http_reason(code: int, text: str) -> str:
+    """'Not Found' → 'HTTP 404 Not Found — the announce URL doesn't exist on the server (…)'.
+    An HTTP error means the request never reached the tracker script, so there is no tracker text."""
+    from .i18n import t
+    hint = {401: "http_auth", 403: "http_forbidden", 404: "http_not_found", 410: "http_not_found",
+            429: "http_too_many"}.get(code)
+    if hint is None and code >= 500:
+        hint = "http_down" if code in (502, 503, 504) else "http_server"
+    text = text if text and not text[0].isdigit() else ""
+    out = f"HTTP {code} {text}".rstrip()
+    return f"{out} — {t(hint)}" if hint else out
+
+
+_OUTGOING = int(getattr(lt.peer_info, "outgoing_connection", getattr(lt.peer_info, "local_connection", 0)))
+_UTP = int(getattr(lt.peer_info, "utp_socket", 1 << 17))     # not exported by the bindings; bit 17 in libtorrent
+
+TASK_ONLY_ALERTS = (lt.tracker_announce_alert, lt.state_changed_alert, lt.hash_failed_alert,
+                    lt.torrent_paused_alert, lt.torrent_resumed_alert, lt.torrent_checked_alert,
+                    lt.torrent_finished_alert, lt.metadata_received_alert, lt.add_torrent_alert,
+                    lt.file_renamed_alert, lt.performance_alert)
+
+
+
+def order_priorities(order: list[int], prios: list[int]) -> list[int]:
+    """BitComet-style download order on top of libtorrent priorities: the first files get 7,
+    the last 1 (libtorrent has 7 levels, so a long list shares levels in order). Skipped stay 0."""
+    out = list(prios)
+    wanted = [i for i in order if 0 <= i < len(out) and out[i] != 0]
+    n = len(wanted)
+    for pos, i in enumerate(wanted):
+        out[i] = 7 - (pos * 7) // n
+    return out
+
+def _buckets(bits, n: int) -> list[float]:
+    """A peer's piece bitfield squeezed to n fractions (0..1) for a small bar."""
+    try:
+        bits = list(bits)
+    except TypeError:
+        return []
+    total = len(bits)
+    if not total:
+        return []
+    n = min(n, total)
+    out = []
+    for b in range(n):
+        a, z = b * total // n, max((b + 1) * total // n, b * total // n + 1)
+        chunk = bits[a:z]
+        out.append(sum(1 for x in chunk if x) / len(chunk))
+    return out
 
 def _left(t, now: float) -> int:
     """Seconds until a posix time from an announce entry, 0 when it's due / unknown."""
