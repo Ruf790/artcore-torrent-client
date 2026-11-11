@@ -51,6 +51,7 @@ DEFAULTS = {
     "mini_widget":      False,      # floating speed window
     "mini_pos":         None,
     "speed_in_title":   True,       # speeds in the window title = taskbar button tooltip
+    "recent_paths":     [],         # save folders used lately (add dialog drop-down)
 }
 
 
