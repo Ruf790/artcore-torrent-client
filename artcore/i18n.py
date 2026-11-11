@@ -12,7 +12,6 @@ STRINGS = {
     "pause":           ("Пауза",                  "Pause"),
     "remove":          ("Удалить",                "Remove"),
     "settings":        ("Настройки",              "Settings"),
-    "open_site":       ("Сайт трекера",           "Tracker site"),
     "open_folder":     ("Открыть папку",          "Open folder"),
     "recheck":         ("Проверить файлы",        "Force recheck"),
     "reannounce":      ("Обновить трекер",        "Force reannounce"),

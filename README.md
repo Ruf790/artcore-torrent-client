@@ -1,6 +1,6 @@
 # ArtCore Client
 
-Торрент-клиент под Windows в стиле ArtCore Gangsta (artcore-gangsta.eu).
+Торрент-клиент под Windows в стиле ArtCore Gangsta.
 Python + libtorrent-rasterbar + Qt (PySide6). Качает с любых трекеров, не только с ArtCore.
 
 ## Возможности (1.0.0)

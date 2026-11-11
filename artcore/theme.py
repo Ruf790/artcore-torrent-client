@@ -1,4 +1,4 @@
-"""Light / dark theme in the colours of artcore-gangsta.eu (Bootstrap 5.3 palette, st-ui look)."""
+"""Light / dark theme in the ArtCore colours (Bootstrap 5.3 palette, st-ui look)."""
 from __future__ import annotations
 
 import os

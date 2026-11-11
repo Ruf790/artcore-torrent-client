@@ -1,4 +1,4 @@
-"""Qt (PySide6) user interface in the style of artcore-gangsta.eu."""
+"""Qt (PySide6) user interface in the ArtCore style."""
 from __future__ import annotations
 
 import os
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QStyledItemDelegate, QSystemTrayIcon, QTableView, QTableWidget,
                                QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
-from . import APP_TITLE, VERSION, TRACKER_URL, config, theme, winint
+from . import APP_TITLE, VERSION, config, theme, winint
 from .engine import Engine, TorrentRow, create_torrent
 from .i18n import t
 
@@ -458,7 +458,7 @@ class CreateTorrentDialog(QDialog):
         form.addRow(t("ct_source"), row)
 
         self.announce = QLineEdit(cfg.get("announce_url", ""))
-        self.announce.setPlaceholderText(TRACKER_URL + "/announce.php?passkey=…")
+        self.announce.setPlaceholderText("https://tracker.example/announce.php?passkey=…")
         form.addRow(t("ct_announce"), self.announce)
         self.comment = QLineEdit()
         form.addRow(t("ct_comment"), self.comment)
@@ -589,7 +589,6 @@ class MainWindow(QMainWindow):
             return b
 
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
-        ibtn("fa6s.globe", t("open_site"), lambda: QDesktopServices.openUrl(QUrl(TRACKER_URL)))
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
         return h
 
