@@ -61,6 +61,8 @@ class TorrentRow:
     done: int = 0       # bytes of the wanted files already here
     sess_down: int = 0  # downloaded / uploaded since the client started
     sess_up: int = 0
+    queue: int = -1     # place in the download queue (1-based), -1 = not queued (seeding / forced)
+    forced: bool = False   # "Force start": running outside the queue
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -127,6 +129,16 @@ class Engine:
         self._limited: set[str] = set()                # torrents whose limits come from a tracker rule
         self._cross_check: set[str] = set()            # cross-seeded, waiting for the hash check
         self.cross_results: list[tuple[str, str, float]] = []   # (name, key, progress) for the UI
+
+        # removed torrents (newest first) + a copy of their resume data in history/
+        self.history_dir = os.path.join(data_dir, "history")
+        self.history_path = os.path.join(data_dir, "history.json")
+        try:
+            with open(self.history_path, encoding="utf-8") as f:
+                self.history: list[dict] = json.load(f)
+        except (FileNotFoundError, ValueError):
+            self.history = []
+        self.port_check: dict = {}       # last result of check_port(): {"port", "open", "ip", "error", "at"}
 
         self.ses = lt.session(self._settings())
         self._load_state()
@@ -648,6 +660,7 @@ class Engine:
         h = self.handles.pop(key, None)
         if h is None:
             return
+        self._to_history(key, h, delete_files)
         self.ses.remove_torrent(h, lt.options_t.delete_files if delete_files else 0)
         if self.opts.pop(key, None) is not None:
             self._save_opts()
@@ -655,6 +668,177 @@ class Engine:
             os.remove(self._resume_path(key))
         except FileNotFoundError:
             pass
+
+    # ── history of removed torrents ────────────────────────────
+    HISTORY_MAX = 300
+
+    def _to_history(self, key: str, h: lt.torrent_handle, deleted: bool) -> None:
+        """Keep what is needed to bring a removed torrent back: its resume data and options."""
+        try:
+            s = h.status()
+            buf = None
+            try:
+                with open(self._resume_path(key), "rb") as f:
+                    buf = f.read()
+            except OSError:
+                pass
+            if not buf:
+                ti = h.torrent_file()
+                atp = lt.add_torrent_params()
+                if ti is not None:
+                    atp.ti = lt.torrent_info(ti)
+                else:
+                    atp = lt.parse_magnet_uri(lt.make_magnet_uri(h))
+                atp.save_path = s.save_path
+                buf = lt.write_resume_data_buf(atp)
+            os.makedirs(self.history_dir, exist_ok=True)
+            with open(os.path.join(self.history_dir, key + ".fastresume"), "wb") as f:
+                f.write(buf)
+            o = {k: v for k, v in self.opts.get(key, {}).items() if k not in ("soft_pause", "low_space")}
+            self.history = [e for e in self.history if e.get("key") != key]
+            self.history.insert(0, {
+                "key": key, "name": s.name or key, "size": s.total_wanted, "progress": s.progress,
+                "save_path": s.save_path, "removed": int(time.time()), "deleted_files": bool(deleted),
+                "tracker": self._host(key, h), "uploaded": max(s.all_time_upload, s.total_payload_upload),
+                "downloaded": max(s.all_time_download, s.total_payload_download), "opts": o,
+            })
+            for e in self.history[self.HISTORY_MAX:]:
+                self._drop_history_file(e.get("key", ""))
+            del self.history[self.HISTORY_MAX:]
+            self._save_history()
+        except Exception as e:
+            self._log("error", f"history: {e}")
+
+    def _drop_history_file(self, key: str) -> None:
+        try:
+            os.remove(os.path.join(self.history_dir, key + ".fastresume"))
+        except OSError:
+            pass
+
+    def _save_history(self) -> None:
+        tmp = self.history_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.history, f, ensure_ascii=False)
+        os.replace(tmp, self.history_path)
+
+    def restore_from_history(self, key: str, paused: bool = False) -> str:
+        """Add a removed torrent back. If its files were deleted it simply downloads again."""
+        if key in self.handles:
+            raise ValueError("Этот торрент уже добавлен")
+        e = next((e for e in self.history if e.get("key") == key), None)
+        if e is None:
+            raise ValueError("Нет в истории")
+        with open(os.path.join(self.history_dir, key + ".fastresume"), "rb") as f:
+            atp = lt.read_resume_data(f.read())
+        if e.get("deleted_files"):            # nothing is on disk any more: forget the pieces we had
+            atp.have_pieces = []
+            atp.verified_pieces = []
+            atp.unfinished_pieces = {}
+            atp.total_downloaded = atp.total_uploaded = 0
+        atp.flags &= ~lt.torrent_flags.paused
+        atp.flags |= lt.torrent_flags.auto_managed
+        if paused:
+            atp.flags |= lt.torrent_flags.paused
+            atp.flags &= ~lt.torrent_flags.auto_managed
+        if e.get("opts"):
+            self.opts[key] = dict(e["opts"])
+            self._save_opts()
+        new = self.add_params(atp)
+        self.forget_history([key])
+        return new
+
+    def forget_history(self, keys: list[str]) -> None:
+        keys = set(keys)
+        for k in keys:
+            self._drop_history_file(k)
+        self.history = [e for e in self.history if e.get("key") not in keys]
+        self._save_history()
+
+    def clear_history(self) -> None:
+        self.forget_history([e.get("key", "") for e in self.history])
+
+    # ── queue ──────────────────────────────────────────────────
+    def queue_move(self, keys: list[str], where: str) -> None:
+        """where: up | down | top | bottom. Several torrents keep their order among themselves."""
+        hs = [(self.handles[k].status().queue_position, self.handles[k]) for k in keys if k in self.handles]
+        hs = [(q, h) for q, h in hs if q >= 0]
+        # move the outer ones first so the selection shifts as a block
+        hs.sort(key=lambda x: x[0], reverse=where in ("down", "top"))
+        edge = -1 if where == "up" else max([h.status().queue_position for h in self.handles.values()] + [0]) + 1
+        for q, h in hs:
+            if where in ("up", "down"):     # already at the edge: stay, and stop the next one there
+                if q == edge + (1 if where == "up" else -1):
+                    edge = q
+                    continue
+            {"up": h.queue_position_up, "down": h.queue_position_down,
+             "top": h.queue_position_top, "bottom": h.queue_position_bottom}[where]()
+
+    def force_start(self, key: str) -> None:
+        """Start now, ignoring the limits on active downloads / seeds."""
+        h = self.handles.get(key)
+        if h:
+            self._unfreeze(key, h)
+            h.unset_flags(lt.torrent_flags.auto_managed)
+            h.resume()
+            h.save_resume_data(lt.torrent_handle.save_info_dict)
+
+    # ── port check ─────────────────────────────────────────────
+    PORT_CHECKERS = ("https://ifconfig.co/port/{}", "https://ipconfig.io/port/{}")
+
+    def check_port(self, timeout: float = 15.0) -> dict:
+        """Ask an outside service to connect to our listen port (blocking — run it in a thread)."""
+        import urllib.request
+        port = self.ses.listen_port()
+        res = {"port": port, "open": None, "ip": "", "error": "", "at": time.time()}
+        for url in self.PORT_CHECKERS:
+            try:
+                req = urllib.request.Request(url.format(port), headers={
+                    "Accept": "application/json", "User-Agent": "ArtCore-Client"})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    data = json.loads(r.read().decode("utf-8", "replace"))
+                res.update(open=bool(data.get("reachable")), ip=str(data.get("ip", "")), error="")
+                break
+            except Exception as e:
+                res["error"] = str(getattr(e, "reason", None) or e)
+        if res["ip"] and not self.wan_ip:
+            self.wan_ip = res["ip"]
+        self.port_check = res
+        return res
+
+    def port_state(self) -> str:
+        """open | closed | unknown — incoming connections prove the port is open."""
+        st = self.ses.status()
+        if st.has_incoming_connections:
+            return "open"
+        pc = self.port_check
+        if pc.get("port") == self.ses.listen_port() and pc.get("open") is not None:
+            return "open" if pc["open"] else "closed"
+        return "unknown"
+
+    # ── peers ──────────────────────────────────────────────────
+    def add_peer(self, key: str, text: str) -> int:
+        """Connect to peers typed as ip:port / [ipv6]:port (one per line or comma separated)."""
+        import ipaddress
+        h = self.handles.get(key)
+        if not h:
+            return 0
+        n = 0
+        for part in text.replace(",", "\n").replace(";", "\n").split():
+            part = part.strip()
+            if part.startswith("["):
+                host, _, port = part[1:].partition("]:")
+            else:
+                host, _, port = part.rpartition(":")
+            try:
+                ipaddress.ip_address(host)
+                p = int(port)
+                if not 0 < p < 65536:
+                    raise ValueError
+            except ValueError:
+                continue
+            h.connect_peer((host, p))
+            n += 1
+        return n
 
     # ── control ────────────────────────────────────────────────
     def stop(self, key: str) -> None:
@@ -910,6 +1094,8 @@ class Engine:
                 tags=tuple(self.opts.get(key, {}).get("tags", ())),
                 hnr=self.hnr_left(key, h, s) if s.progress >= 1.0 else "",
                 done=s.total_wanted_done, sess_down=s.total_payload_download, sess_up=s.total_payload_upload,
+                queue=s.queue_position + 1 if s.queue_position >= 0 else -1,
+                forced=not paused and not auto and not s.errc.value(),
             ))
         return out
 
@@ -1225,6 +1411,12 @@ class Engine:
     def file_path(self, key: str, fs, i: int) -> str:
         """Current path of a file — renamed ones included (torrent_file() has the original names)."""
         return self.opts.get(key, {}).get("renamed", {}).get(str(i)) or fs.file_path(i)
+
+    def abs_file_path(self, key: str, i: int) -> str:
+        h = self.handles.get(key)
+        if not h or not h.status().has_metadata:
+            return ""
+        return os.path.join(h.status().save_path, self.file_path(key, h.torrent_file().files(), i))
 
     def current_info(self, key: str):
         """A copy of the torrent's metadata with the current (renamed) file paths."""

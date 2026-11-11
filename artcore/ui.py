@@ -94,10 +94,10 @@ def icon(name: str, color_key: str = "secondary") -> QIcon:
 
 COLS = ["col_name", "col_size", "col_progress", "col_state", "col_down", "col_up",
         "col_seeds", "col_peers", "col_ratio", "col_eta", "col_tracker", "col_category", "col_tags",
-        "col_done", "col_left", "col_total_down", "col_total_up", "col_sess_down", "col_sess_up"]
+        "col_done", "col_left", "col_total_down", "col_total_up", "col_sess_down", "col_sess_up", "col_queue"]
 (C_NAME, C_SIZE, C_PROG, C_STATE, C_DOWN, C_UP, C_SEEDS, C_PEERS,
  C_RATIO, C_ETA, C_TRACKER, C_CAT, C_TAGS,
- C_DONE, C_LEFT, C_TDOWN, C_TUP, C_SDOWN, C_SUP) = range(len(COLS))
+ C_DONE, C_LEFT, C_TDOWN, C_TUP, C_SDOWN, C_SUP, C_QUEUE) = range(len(COLS))
 HIDDEN_COLS = (C_DONE, C_LEFT, C_TDOWN, C_TUP, C_SDOWN, C_SUP)   # off until switched on in the header menu
 NO_TAG = "\x00none"
 NO_CATEGORY = "\x00none"
@@ -152,7 +152,7 @@ class TorrentModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return {
                 C_NAME: r.name, C_SIZE: fmt_size(r.size), C_PROG: f"{r.progress * 100:.1f}%",
-                C_STATE: t("st_" + r.state),
+                C_STATE: t("forced_mark", t("st_" + r.state)) if r.forced else t("st_" + r.state),
                 C_DOWN: ("↓ " + fmt_speed(r.down_rate)) if r.down_rate > 0 else "",
                 C_UP: ("↑ " + fmt_speed(r.up_rate)) if r.up_rate > 0 else "",
                 C_SEEDS: str(r.seeds), C_PEERS: str(r.peers), C_RATIO: fmt_ratio(r.ratio),
@@ -161,6 +161,7 @@ class TorrentModel(QAbstractTableModel):
                 C_DONE: fmt_size(r.done), C_LEFT: fmt_size(max(0, r.size - r.done)) if r.size > r.done else "",
                 C_TDOWN: fmt_size(r.downloaded), C_TUP: fmt_size(r.uploaded),
                 C_SDOWN: fmt_size(r.sess_down) if r.sess_down else "", C_SUP: fmt_size(r.sess_up) if r.sess_up else "",
+                C_QUEUE: str(r.queue) if r.queue > 0 else ("⚡" if r.forced else ""),
             }[c]
         if role == Qt.UserRole:  # sort key
             return {
@@ -171,6 +172,7 @@ class TorrentModel(QAbstractTableModel):
                 C_CAT: r.category.lower(), C_TAGS: ", ".join(r.tags).lower(),
                 C_DONE: r.done, C_LEFT: max(0, r.size - r.done), C_TDOWN: r.downloaded, C_TUP: r.uploaded,
                 C_SDOWN: r.sess_down, C_SUP: r.sess_up,
+                C_QUEUE: r.queue if r.queue > 0 else 1e9,
             }[c]
         if role == Qt.ForegroundRole:
             dark = theme.current_name == "dark"
@@ -203,7 +205,11 @@ class TorrentModel(QAbstractTableModel):
         if role == Qt.ToolTipRole:
             if c == C_STATE and r.hnr and not r.error:
                 return t("hnr_tip", r.hnr)
+            if c in (C_STATE, C_QUEUE) and r.forced and not r.error:
+                return t("forced_tip")
             return r.error or (r.name if c == C_NAME else None)
+        if role == Qt.TextAlignmentRole and c == C_QUEUE:
+            return int(Qt.AlignCenter)
         if role == Qt.TextAlignmentRole and c not in (C_NAME, C_STATE, C_TRACKER, C_CAT, C_TAGS):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
@@ -385,6 +391,8 @@ class BadgeDelegate(QStyledItemDelegate):
         bg, fg = STATE_STYLE.get(r.state, ("muted_subtle", "secondary"))
         f = painter.font(); f.setPointSizeF(8.5); f.setWeight(QFont.DemiBold); painter.setFont(f)
         text = t("st_" + r.state)
+        if r.forced:
+            text = t("forced_mark", text)
         fm = QFontMetrics(f)
         room = option.rect.width() - 12 - 36          # pill never spills past the cell
         if fm.horizontalAdvance(text) > room:
@@ -983,7 +991,8 @@ class StatsView(QTableWidget):
             t("sg_network"),
             (t("st_lan"), _local_ip()),
             (t("st_wan"), st["wan_ip"] or t("st_wan_wait")),
-            (t("st_port"), t("st_port_open" if st["incoming"] else "st_port_wait", st["port"])),
+            (t("st_port"), {"open": t("port_open", st["port"]), "closed": t("port_closed", st["port"])}
+                           .get(eng.port_state(), t("st_port_wait", st["port"]))),
             (t("st_upnp"), pm_text),
             (t("st_firewall"), fw),
             (t("st_iface"), (cfg.get("bind_interface") + (f" ({eng.bound_ip})" if eng.bind_ok else " — " + t("meta_vpn_down", "").strip(" —")))
@@ -1129,6 +1138,26 @@ class SettingsDialog(QDialog):
         form.addRow(t("set_port"), prow)
         self.random_port = QCheckBox(t("sp_random_start")); self.random_port.setChecked(cfg.get("random_port", False))
         form.addRow(self.random_port)
+        if parent is not None and hasattr(parent, "check_port"):
+            crow = QHBoxLayout()
+            cb = QPushButton(icon("fa6s.tower-broadcast", "primary"), t("port_check"))
+            self.port_res = note("")
+            self.port_res.setTextFormat(Qt.RichText)
+            crow.addWidget(cb)
+            crow.addWidget(self.port_res, 1)
+            form.addRow(crow)
+
+            def show(res, lab=self.port_res):
+                ok = res.get("open")
+                col = C["success"] if ok else C["danger"] if ok is False else C["warning"]
+                lab.setText(f'<span style="color:{col}">{html.escape(parent.port_text(res))}</span>')
+                cb.setEnabled(True)
+
+            def check():
+                cb.setEnabled(False)
+                self.port_res.setText(t("port_checking", parent.engine.ses.listen_port()))
+                parent.check_port(show)
+            cb.clicked.connect(check)
         form.addRow(_section(t("sp_forward"), None))
         self.upnp = QCheckBox(t("set_upnp")); self.upnp.setChecked(cfg["upnp"])
         form.addRow(self.upnp)
@@ -2479,6 +2508,10 @@ class MainWindow(QMainWindow):
         self._had_dl = False
         self._countdown = None
         self._session_up0 = engine.ses.status().total_payload_upload
+        self._session_down0 = engine.ses.status().total_payload_download
+        self._port_busy = False
+        self._port_result = None
+        self._port_cbs: list = []
         self._sched_state: bool | None = None   # None = not applied yet
 
         self.setWindowTitle(APP_TITLE)
@@ -2504,6 +2537,7 @@ class MainWindow(QMainWindow):
         split.addWidget(self._build_details())
         split.setSizes([470, 210])
         root.addWidget(split, 1)
+        self._build_statusbar()
 
         self._build_tray()
         from .notify import Notifier
@@ -2581,16 +2615,117 @@ class MainWindow(QMainWindow):
         self.power_pill.hide()
         self._themed_icon(self.power_pill.setIcon, "fa6s.power-off", "danger")
         lay.addWidget(self.power_pill)
+        ibtn("fa6s.clock-rotate-left", t("hist_tip"), self.history_dialog)
         ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
         ibtn("fa6s.circle-info", t("about") + " (F1)", self.about_dialog)
         a = QAction(self); a.setShortcut(QKeySequence("F1")); a.triggered.connect(self.about_dialog)
         self.addAction(a)
+        for seq, where in (("Ctrl+Shift+Up", "up"), ("Ctrl+Shift+Down", "down"),
+                           ("Ctrl+Shift+Home", "top"), ("Ctrl+Shift+End", "bottom")):
+            a = QAction(self); a.setShortcut(QKeySequence(seq))
+            a.triggered.connect(lambda _=False, w=where: self.queue_move(w))
+            self.addAction(a)
         return h
 
     def about_dialog(self):
         AboutDialog(self).exec()
+
+    def history_dialog(self):
+        from .history import HistoryDialog
+
+        def restored(names):
+            for n in names:
+                self.log_event("torrent", t("hist_restored", n))
+            self.tick()
+        HistoryDialog(self.engine, self, on_restored=restored).exec()
+
+    # ── status bar ─────────────────────────────────────────────
+    def _build_statusbar(self):
+        sb = self.statusBar()
+        sb.setSizeGripEnabled(False)
+
+        def item(name, colour, tip, slot=None):
+            b = QToolButton()
+            b.setObjectName("sbItem")
+            b.setAutoRaise(True)
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            b.setIconSize(QSize(12, 12))
+            b.setToolTip(tip)
+            if slot:
+                b.setCursor(Qt.PointingHandCursor)
+                b.clicked.connect(slot)
+            if name:
+                self._themed_icon(b.setIcon, name, colour)
+            sb.addPermanentWidget(b)
+            return b
+        self.sb_dht = item("fa6s.diagram-project", "info", t("sb_dht_tip"))
+        self.sb_port = item("", "", t("sb_port_tip"), lambda: self.check_port())
+        self.sb_ip = item("fa6s.earth-europe", "info", t("sb_ip_tip"))
+        self.sb_speed = item("fa6s.gauge-high", "primary", t("sb_speed_tip"))
+        self.sb_session = item("fa6s.right-left", "secondary", t("sb_session_tip"))
+        self._sb_port_state = None
+
+    def _tick_statusbar(self, st, down: int, up: int):
+        port = self.engine.ses.listen_port()
+        self.sb_dht.setText(t("sb_dht", st.dht_nodes) if self.cfg.get("dht") else t("sb_dht_off"))
+        ps = "checking" if self._port_busy else self.engine.port_state()
+        if (ps, port) != self._sb_port_state:
+            self._sb_port_state = (ps, port)
+            name, col = {"open": ("fa6s.circle-check", "success"), "closed": ("fa6s.circle-xmark", "danger"),
+                         "checking": ("fa6s.spinner", "secondary")}.get(ps, ("fa6s.circle-question", "warning"))
+            self.sb_port.setIcon(icon(name, col))
+            self.sb_port.setText(t("sb_port_" + (ps if ps in ("open", "closed") else "unknown"), port))
+            pc = self.engine.port_check
+            tip = (t("port_open", port) if ps == "open" else t("port_closed", port) if ps == "closed"
+                   else t("port_checking", port) if ps == "checking"
+                   else t("port_fail", pc["error"]) if pc.get("error") and pc.get("port") == port
+                   else t("port_unknown", port))
+            self.sb_port.setToolTip(tip + "\n\n" + t("sb_port_tip"))
+        ip = self.engine.wan_ip
+        self.sb_ip.setText(t("sb_ip", ip) if ip else t("sb_ip_wait"))
+        self.sb_speed.setText(f"↓ {fmt_size(down)}/s   ↑ {fmt_size(up)}/s")
+        self.sb_session.setText(t("sb_session", fmt_size(max(0, st.total_payload_download - self._session_down0)),
+                                  fmt_size(max(0, st.total_payload_upload - self._session_up0))))
+
+    # ── port check ─────────────────────────────────────────────
+    def check_port(self, done=None):
+        """Ask an outside service whether our port is reachable; done(result) runs on the UI thread."""
+        if done:
+            self._port_cbs.append(done)
+        if self._port_busy:
+            return
+        self._port_busy = True
+        self._sb_port_state = None
+        import threading
+
+        def work():
+            try:
+                self._port_result = self.engine.check_port()
+            except Exception as e:
+                self._port_result = {"port": 0, "open": None, "ip": "", "error": str(e)}
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def port_text(res: dict) -> str:
+        if res.get("open") is None:
+            return t("port_fail", res.get("error") or "?")
+        return t("port_open" if res["open"] else "port_closed", res.get("port"))
+
+    def _handle_port_result(self):
+        res, self._port_result = self._port_result, None
+        self._port_busy = False
+        self._sb_port_state = None
+        text = self.port_text(res)
+        self.log_event("network" if res.get("open") else "error", text)
+        self.statusBar().showMessage(text, 15000)
+        cbs, self._port_cbs = self._port_cbs, []
+        for cb in cbs:
+            try:
+                cb(res)
+            except RuntimeError:            # the dialog that asked is already closed
+                pass
 
     def _build_actions(self) -> QHBoxLayout:
         lay = QHBoxLayout()
@@ -2728,6 +2863,8 @@ class MainWindow(QMainWindow):
         for c in HIDDEN_COLS:
             self.table.setColumnWidth(c, 135)
             hh.setSectionHidden(c, True)
+        self.table.setColumnWidth(C_QUEUE, 38)
+        hh.moveSection(hh.visualIndex(C_QUEUE), 0)          # "#" first, like qBittorrent
         self._default_header = hh.saveState()
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.context_menu)
@@ -3384,6 +3521,12 @@ class MainWindow(QMainWindow):
                 self.engine.remove(k, delete_files=cb.isChecked())
             self.tick()
 
+    def queue_move(self, where: str):
+        keys = self.selected_keys()
+        if keys:
+            self.engine.queue_move(keys, where)
+            self.tick()
+
     def open_folder(self):
         for k in self.selected_keys()[:1]:
             row = next((r for r in self.model.rows if r.key == k), None)
@@ -3419,6 +3562,14 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.play", "success"), t("start"), lambda: self._each(self.engine.resume))
         m.addAction(icon("fa6s.pause", "warning"), t("pause"), lambda: self._each(self.engine.pause))
         m.addAction(icon("fa6s.stop", "danger"), t("stop"), lambda: self._each(self.engine.stop))
+        a = m.addAction(icon("fa6s.bolt", "orange"), t("force_start"), lambda: self._each(self.engine.force_start))
+        a.setToolTip(t("force_tip"))
+        qm = m.addMenu(icon("fa6s.list-ol", "primary"), t("queue_menu"))
+        for where, name in (("top", "fa6s.angles-up"), ("up", "fa6s.angle-up"),
+                            ("down", "fa6s.angle-down"), ("bottom", "fa6s.angles-down")):
+            qm.addAction(icon(name, "primary"), t("queue_" + where) + {"up": "\tCtrl+Shift+Up", "down": "\tCtrl+Shift+Down",
+                                                                "top": "\tCtrl+Shift+Home", "bottom": "\tCtrl+Shift+End"}[where],
+                         lambda w=where: self.queue_move(w))
         m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
         m.addSeparator()
         m.addAction(icon("fa6s.folder-open"), t("open_folder"), self.open_folder)
@@ -3610,18 +3761,47 @@ class MainWindow(QMainWindow):
         self.proxy.set_filter(tag=self.tag_combo.currentData() or "")
 
     def peers_menu(self, pos):
+        keys = self.selected_keys()
+        if not keys:
+            return
+        key = keys[0]
         it = self.peers_tbl.itemAt(pos)
-        if it is None:
-            return
-        cell = self.peers_tbl.item(it.row(), 0)
+        cell = self.peers_tbl.item(it.row(), 0) if it is not None else None
         ip = cell.data(Qt.UserRole) if cell else ""
-        if not ip:
-            return
         m = QMenu(self)
-        m.addAction(icon("fa6s.ban", "danger"), t("peer_ban", ip),
-                    lambda: (self.engine.ban(ip, t("peer_ban_manual")), self.tick()))
-        m.addAction(icon("fa6s.copy"), t("peer_copy_ip"), lambda: QGuiApplication.clipboard().setText(ip))
+        m.addAction(icon("fa6s.user-plus", "success"), t("peer_add"), lambda: self.add_peer_dialog(key))
+        if self.peers_tbl.rowCount():
+            m.addAction(icon("fa6s.list"), t("peer_copy_list"), self.copy_peer_list)
+        if ip:
+            m.addSeparator()
+            m.addAction(icon("fa6s.copy"), t("peer_copy_ip"), lambda: QGuiApplication.clipboard().setText(ip))
+            m.addAction(icon("fa6s.ban", "danger"), t("peer_ban", ip),
+                        lambda: (self.engine.ban(ip, t("peer_ban_manual")), self.tick()))
         m.exec(self.peers_tbl.viewport().mapToGlobal(pos))
+
+    def add_peer_dialog(self, key: str):
+        from PySide6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getMultiLineText(self, t("peer_add_title"), t("peer_add_text"),
+                                                 QGuiApplication.clipboard().text().strip()[:500]
+                                                 if ":" in QGuiApplication.clipboard().text()[:500] else "")
+        if not ok or not text.strip():
+            return
+        n = self.engine.add_peer(key, text)
+        if n:
+            self.log_event("network", t("peer_added", n))
+            self.statusBar().showMessage(t("peer_added", n), 8000)
+        else:
+            QMessageBox.warning(self, t("peer_add_title"), t("peer_add_bad"))
+
+    def copy_peer_list(self):
+        """All peers of the shown torrent as tab-separated lines (header included)."""
+        tb = self.peers_tbl
+        cols = [c for c in range(tb.columnCount()) if c != 4 and not tb.isColumnHidden(c)]
+        lines = ["\t".join(tb.horizontalHeaderItem(c).text() for c in cols)]
+        for r in range(tb.rowCount()):
+            lines.append("\t".join((tb.item(r, c).text() if tb.item(r, c) else "") for c in cols))
+        QGuiApplication.clipboard().setText("\n".join(lines))
+        self.statusBar().showMessage(t("peer_copy_list") + f": {tb.rowCount()}", 5000)
 
     def set_category_selected(self, name: str):
         for k in self.selected_keys():
@@ -3749,6 +3929,8 @@ class MainWindow(QMainWindow):
                 self.tray.showMessage(APP_TITLE, t("meta_vpn_ok" if ok else "meta_vpn_down", bind), app_icon(), 5000)
         if self._update_result is not None:
             self._handle_update_result()
+        if self._port_result is not None:
+            self._handle_port_result()
         if self._ipf_result is not None:
             kind, val = self._ipf_result
             self._ipf_result = None
@@ -3827,6 +4009,7 @@ class MainWindow(QMainWindow):
         self.k_up.set(fmt_size(up) + "/s", t("kpi_up"))
         self.k_active.set(str(active), t("kpi_active", len(rows)))
         self.k_session.set(fmt_size(st.total_payload_upload - self._session_up0), t("kpi_session"))
+        self._tick_statusbar(st, down, up)
 
         dht = t("meta_dht", st.dht_nodes) if self.cfg.get("dht") else t("meta_dht_off")
         dot = f'<span style="color:{C["border"]}">&nbsp;•&nbsp;</span>'
@@ -4024,6 +4207,12 @@ class MainWindow(QMainWindow):
         if not key or not idxs:
             return
         m = QMenu(self)
+        if len(idxs) == 1:
+            m.addAction(icon("fa6s.file-arrow-up", "primary"), t("file_open"), lambda: self.open_file(key, idxs[0]))
+        m.addAction(icon("fa6s.folder-open", "warning"), t("file_show"), lambda: self.show_file(key, idxs[0]))
+        m.addSeparator()
+        if len(idxs) > 1:
+            m.addSection(t("file_prio_n", len(idxs)))
         for prio, name, col in ((PRIO_HIGH, "fa6s.angles-up", "primary"),
                                 (PRIO_NORMAL, "fa6s.minus", "secondary"),
                                 (PRIO_SKIP, "fa6s.ban", "danger")):
@@ -4032,6 +4221,28 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(icon("fa6s.folder-open", "warning"), t("open_folder"), self.open_folder)
         m.exec(self.files_tbl.viewport().mapToGlobal(pos))
+
+    def open_file(self, key: str, idx: int):
+        path = self.engine.abs_file_path(key, idx)
+        if path and os.path.isfile(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        else:
+            self.show_file(key, idx)
+
+    def show_file(self, key: str, idx: int):
+        """Explorer with the file selected; its folder if the file isn't there yet."""
+        path = self.engine.abs_file_path(key, idx)
+        if not path:
+            return
+        if os.name == "nt" and os.path.exists(path):
+            import subprocess
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            return
+        folder = os.path.dirname(path)
+        while folder and not os.path.isdir(folder):
+            folder = os.path.dirname(folder)
+        if folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     # ── window / quit ──────────────────────────────────────────
     def show_normal(self):

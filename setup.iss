@@ -3,7 +3,7 @@
 ; Expects the PyInstaller output in dist\ArtCoreClient\.
 
 #define AppName      "ArtCore Client"
-#define AppVersion   "1.0.18"
+#define AppVersion   "1.0.19"
 #define AppPublisher "ArtCore Client"
 #define AppURL       "https://github.com/Ruf790/artcore-torrent-client"
 #define AppExe       "ArtCoreClient.exe"
