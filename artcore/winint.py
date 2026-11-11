@@ -51,6 +51,15 @@ def _colorref(hex_color: str) -> int:
     return (b << 16) | (g << 8) | r
 
 
+def release_mutex() -> None:
+    """Let the installer run (it waits for AppMutex) — used by the self-updater before quitting."""
+    global _mutex
+    if IS_WIN and _mutex:
+        import ctypes
+        ctypes.windll.kernel32.CloseHandle(_mutex)
+        _mutex = None
+
+
 def set_title_bar(win_id: int, dark: bool, caption: str | None = None, text: str | None = None) -> None:
     """Dark/light title bar; on Windows 11 also paint it in the page colour,
     so it matches the window even with "Show accent color on title bars" on."""
