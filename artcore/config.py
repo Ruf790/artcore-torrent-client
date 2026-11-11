@@ -25,6 +25,11 @@ DEFAULTS = {
     "sched_to":         "23:00",
     "sched_dl":         0,          # KiB/s inside the window, 0 = unlimited
     "sched_ul":         0,
+    "categories":       [],         # [{"name": ..., "path": ...}]
+    "watch_dir":        "",
+    "watch_category":   "",
+    "move_done_dir":    "",
+    "move_done_by_category": True,
 }
 
 
@@ -46,7 +51,7 @@ def _installer_language() -> str | None:
 
 
 def load() -> dict:
-    cfg = dict(DEFAULTS)
+    cfg = json.loads(json.dumps(DEFAULTS))   # deep copy: lists inside must not be shared
     try:
         with open(os.path.join(data_dir(), "config.json"), encoding="utf-8") as f:
             cfg.update(json.load(f))

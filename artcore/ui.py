@@ -91,9 +91,10 @@ def icon(name: str, color_key: str = "secondary") -> QIcon:
 # ============================================================
 
 COLS = ["col_name", "col_size", "col_progress", "col_state", "col_down", "col_up",
-        "col_seeds", "col_peers", "col_ratio", "col_eta", "col_tracker"]
+        "col_seeds", "col_peers", "col_ratio", "col_eta", "col_tracker", "col_category"]
 (C_NAME, C_SIZE, C_PROG, C_STATE, C_DOWN, C_UP, C_SEEDS, C_PEERS,
- C_RATIO, C_ETA, C_TRACKER) = range(len(COLS))
+ C_RATIO, C_ETA, C_TRACKER, C_CAT) = range(len(COLS))
+NO_CATEGORY = "\x00none"
 
 # state → soft badge colours (.st-soft-*)
 STATE_STYLE = {
@@ -140,6 +141,7 @@ class TorrentModel(QAbstractTableModel):
                 C_STATE: t("st_" + r.state), C_DOWN: fmt_speed(r.down_rate), C_UP: fmt_speed(r.up_rate),
                 C_SEEDS: str(r.seeds), C_PEERS: str(r.peers), C_RATIO: fmt_ratio(r.ratio),
                 C_ETA: fmt_eta(r.eta) if r.state == "downloading" else "", C_TRACKER: r.tracker_host,
+                C_CAT: r.category,
             }[c]
         if role == Qt.UserRole:  # sort key
             return {
@@ -147,6 +149,7 @@ class TorrentModel(QAbstractTableModel):
                 C_DOWN: r.down_rate, C_UP: r.up_rate, C_SEEDS: r.seeds, C_PEERS: r.peers,
                 C_RATIO: r.ratio if r.ratio != float("inf") else 1e18,
                 C_ETA: r.eta if r.eta >= 0 else 1e18, C_TRACKER: r.tracker_host,
+                C_CAT: r.category.lower(),
             }[c]
         if role == Qt.ForegroundRole:
             dark = theme.current_name == "dark"
@@ -154,7 +157,7 @@ class TorrentModel(QAbstractTableModel):
                 return QColor(C["primary_text"] if dark else C["primary"])
             if c == C_UP and r.up_rate > 0:
                 return QColor(C["success_text"] if dark else C["success"])
-            if c in (C_TRACKER, C_ETA, C_SIZE):
+            if c in (C_TRACKER, C_ETA, C_SIZE, C_CAT):
                 return QColor(C["secondary"])
         if role == Qt.FontRole and c == C_NAME:
             f = QFont()
@@ -162,7 +165,7 @@ class TorrentModel(QAbstractTableModel):
             return f
         if role == Qt.ToolTipRole:
             return r.error or (r.name if c == C_NAME else None)
-        if role == Qt.TextAlignmentRole and c not in (C_NAME, C_STATE, C_TRACKER):
+        if role == Qt.TextAlignmentRole and c not in (C_NAME, C_STATE, C_TRACKER, C_CAT):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
@@ -192,10 +195,13 @@ class FilterProxy(QSortFilterProxyModel):
         super().__init__()
         self.state = "all"
         self.tracker = ""
+        self.category = ""
         self.text = ""
         self.setSortRole(Qt.UserRole)
 
-    def set_filter(self, state=None, tracker=None, text=None):
+    def set_filter(self, state=None, tracker=None, text=None, category=None):
+        if category is not None:
+            self.category = category
         if state is not None:
             self.state = state
         if tracker is not None:
@@ -209,6 +215,7 @@ class FilterProxy(QSortFilterProxyModel):
         states = FILTER_STATES[self.state]
         return ((states is None or r.state in states)
                 and (not self.tracker or r.tracker_host == self.tracker)
+                and (not self.category or r.category == ("" if self.category == NO_CATEGORY else self.category))
                 and (not self.text or self.text in r.name.lower()))
 
 
@@ -774,6 +781,26 @@ class SettingsDialog(QDialog):
         form.addRow(t("sch_dl"), self.sch_dl)
         form.addRow(t("sch_ul"), self.sch_ul)
 
+        from .dialogs import CategoriesEditor, folder_row
+        form.addRow(_section(t("set_grp_cats")))
+        self.cats = CategoriesEditor(cfg.get("categories", []))
+        form.addRow(self.cats)
+
+        form.addRow(_section(t("set_grp_folders")))
+        wrow, self.watch = folder_row(self, cfg.get("watch_dir", ""))
+        form.addRow(t("set_watch"), wrow)
+        self.watch_cat = QComboBox()
+        self.watch_cat.addItem(t("cat_none"), "")
+        for c in cfg.get("categories", []):
+            self.watch_cat.addItem(c["name"], c["name"])
+        self.watch_cat.setCurrentIndex(max(0, self.watch_cat.findData(cfg.get("watch_category", ""))))
+        form.addRow(t("set_watch_cat"), self.watch_cat)
+        mrow, self.move_done = folder_row(self, cfg.get("move_done_dir", ""))
+        form.addRow(t("set_move_done"), mrow)
+        self.move_bycat = QCheckBox(t("set_move_bycat"))
+        self.move_bycat.setChecked(cfg.get("move_done_by_category", True))
+        form.addRow(self.move_bycat)
+
         # ── windows
         self.autostart = None
         if winint.IS_WIN:
@@ -828,6 +855,9 @@ class SettingsDialog(QDialog):
                  sched_from=self.sch_from.time().toString("HH:mm"),
                  sched_to=self.sch_to.time().toString("HH:mm"),
                  sched_dl=self.sch_dl.value(), sched_ul=self.sch_ul.value(),
+                 categories=self.cats.categories(),
+                 watch_dir=self.watch.text().strip(), watch_category=self.watch_cat.currentData() or "",
+                 move_done_dir=self.move_done.text().strip(), move_done_by_category=self.move_bycat.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
@@ -862,6 +892,18 @@ class AddTorrentDialog(QDialog):
         head = _section(name)
         head.setWordWrap(True)
         lay.addWidget(head)
+
+        self.cfg = cfg
+        crow = QHBoxLayout()
+        crow.addWidget(QLabel(t("cat_menu")))
+        self.cat = QComboBox()
+        self.cat.addItem(t("cat_none"), "")
+        for c in cfg.get("categories", []):
+            self.cat.addItem(icon("fa6s.tag"), c["name"], c["name"])
+        self.cat.currentIndexChanged.connect(self._cat_changed)
+        crow.addWidget(self.cat, 1)
+        if len(cfg.get("categories", [])):
+            lay.addLayout(crow)
 
         row = QHBoxLayout()
         row.addWidget(QLabel(t("ad_save_to")))
@@ -916,6 +958,11 @@ class AddTorrentDialog(QDialog):
         self.bb.rejected.connect(self.reject)
         lay.addWidget(self.bb)
         self._update()
+
+    def _cat_changed(self):
+        name = self.cat.currentData() or ""
+        path = next((c.get("path", "") for c in self.cfg.get("categories", []) if c["name"] == name), "")
+        self.path.setText(path or self.cfg.get("save_path", ""))
 
     def _fill(self, files):
         folders: dict[tuple, QTreeWidgetItem] = {}
@@ -1181,8 +1228,10 @@ class MainWindow(QMainWindow):
         root.addWidget(split, 1)
 
         self._build_tray()
+        self.refresh_category_combo()
         self.retheme()
         self._log_startup()
+        self._ticks = 0
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -1304,6 +1353,13 @@ class MainWindow(QMainWindow):
             lambda _: self.proxy.set_filter(tracker=self.tracker_combo.currentData() or ""))
         self._themed_icon(lambda ic: [self.tracker_combo.setItemIcon(i, ic) for i in range(self.tracker_combo.count())],
                           "fa6s.server")
+        self.cat_combo = QComboBox()
+        self.cat_combo.setMinimumWidth(170)
+        self.cat_combo.currentIndexChanged.connect(
+            lambda _: self.proxy.set_filter(category=self.cat_combo.currentData() or ""))
+        self._themed_icon(lambda ic: [self.cat_combo.setItemIcon(i, ic) for i in range(self.cat_combo.count())],
+                          "fa6s.tag")
+        pills.addWidget(self.cat_combo)
         pills.addWidget(self.tracker_combo)
         lay.addLayout(pills)
 
@@ -1328,7 +1384,7 @@ class MainWindow(QMainWindow):
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hh.setSectionResizeMode(C_NAME, QHeaderView.Stretch)
         for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 120), (C_DOWN, 95), (C_UP, 95),
-                     (C_SEEDS, 55), (C_PEERS, 55), (C_RATIO, 65), (C_ETA, 80), (C_TRACKER, 150)):
+                     (C_SEEDS, 55), (C_PEERS, 55), (C_RATIO, 65), (C_ETA, 80), (C_TRACKER, 150), (C_CAT, 110)):
             self.table.setColumnWidth(c, w)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.context_menu)
@@ -1501,7 +1557,7 @@ class MainWindow(QMainWindow):
         import libtorrent as lt
         is_magnet = item.startswith("magnet:")
         try:
-            save_path, paused, prios = None, False, None
+            save_path, paused, prios, category = None, False, None, ""
             if self.cfg.get("show_add_dialog", True):
                 if is_magnet:
                     name = lt.parse_magnet_uri(item).name or item[:80]
@@ -1513,10 +1569,15 @@ class MainWindow(QMainWindow):
                 if not d.exec():
                     return
                 save_path, paused, prios = d.path.text().strip() or None, d.paused.isChecked(), d.priorities()
-            if is_magnet:
-                self.engine.add_magnet(item, save_path=save_path, paused=paused)
+                category = d.cat.currentData() or ""
             else:
-                self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios)
+                category = ""
+            if is_magnet:
+                key = self.engine.add_magnet(item, save_path=save_path, paused=paused)
+            else:
+                key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios)
+            if category:
+                self.engine.set_category(key, category)
             self.log_event("torrent", t("log_added", item[:120] if is_magnet else os.path.basename(item)))
         except Exception as e:
             QMessageBox.warning(self, APP_TITLE, t("add_error", e))
@@ -1598,8 +1659,79 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.link"), t("copy_magnet"), self.copy_magnet)
         m.addAction(icon("fa6s.sliders"), t("properties"), self.properties_dialog)
         m.addSeparator()
+        cm = m.addMenu(icon("fa6s.tag"), t("cat_menu"))
+        cm.addAction(t("cat_none"), lambda: self.set_category_selected(""))
+        for c in self.cfg.get("categories", []):
+            cm.addAction(c["name"], lambda n=c["name"]: self.set_category_selected(n))
+        cm.addSeparator()
+        cm.addAction(icon("fa6s.plus"), t("cat_new"), self.new_category_for_selected)
+        m.addAction(icon("fa6s.folder-tree"), t("move_to"), self.move_selected)
+        m.addAction(icon("fa6s.server"), t("edit_trackers"), self.edit_trackers)
+        m.addAction(icon("fa6s.right-left"), t("replace_trackers"), self.replace_trackers)
+        m.addSeparator()
         m.addAction(icon("fa6s.trash-can", "danger"), t("remove"), self.remove_selected)
         m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def set_category_selected(self, name: str):
+        for k in self.selected_keys():
+            self.engine.set_category(k, name)
+        self.tick()
+
+    def new_category_for_selected(self):
+        name, ok = QInputDialog.getText(self, t("set_grp_cats"), t("cat_prompt"))
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name not in [c["name"] for c in self.cfg.get("categories", [])]:
+            self.cfg.setdefault("categories", []).append({"name": name, "path": ""})
+            config.save(self.cfg)
+            self.refresh_category_combo()
+        self.set_category_selected(name)
+
+    def move_selected(self):
+        keys = self.selected_keys()
+        if not keys:
+            return
+        row = next((r for r in self.model.rows if r.key == keys[0]), None)
+        d = QFileDialog.getExistingDirectory(self, t("move_to"), row.save_path if row else "")
+        if d:
+            for k in keys:
+                self.engine.move(k, d)
+
+    def edit_trackers(self):
+        from .dialogs import TrackersDialog
+        keys = self.selected_keys()
+        if not keys:
+            return
+        row = next((r for r in self.model.rows if r.key == keys[0]), None)
+        d = TrackersDialog(row.name if row else keys[0], self.engine.trackers_raw(keys[0]), self)
+        if d.exec():
+            self.engine.set_trackers(keys[0], d.result_trackers())
+            self.tick()
+
+    def replace_trackers(self):
+        from .dialogs import ReplaceTrackersDialog
+        sel = self.selected_keys()
+        d = ReplaceTrackersDialog(len(sel), len(self.engine.handles), self)
+        if d.exec() and d.find.text():
+            keys = sel if d.sel.isChecked() else list(self.engine.handles)
+            n = self.engine.replace_in_trackers(keys, d.find.text(), d.repl.text())
+            self.log_event("tracker", t("rep_done", n))
+            QMessageBox.information(self, t("rep_title"), t("rep_done", n))
+            self.tick()
+
+    def refresh_category_combo(self):
+        cur = self.cat_combo.currentData()
+        self.cat_combo.blockSignals(True)
+        self.cat_combo.clear()
+        tag = icon("fa6s.tag")
+        self.cat_combo.addItem(tag, t("cat_all"), "")
+        for c in self.cfg.get("categories", []):
+            self.cat_combo.addItem(tag, c["name"], c["name"])
+        self.cat_combo.addItem(tag, t("cat_none"), NO_CATEGORY)
+        self.cat_combo.setCurrentIndex(max(0, self.cat_combo.findData(cur)))
+        self.cat_combo.blockSignals(False)
+        self.proxy.set_filter(category=self.cat_combo.currentData() or "")
 
     def properties_dialog(self):
         keys = self.selected_keys()
@@ -1621,12 +1753,16 @@ class MainWindow(QMainWindow):
             config.save(self.cfg)
             self.engine.apply_settings(self.cfg)
             self._sched_state = None             # re-apply schedule limits on next tick
+            self.refresh_category_combo()
             if self.cfg.get("theme") != old_theme:
                 theme.apply(QApplication.instance(), self.cfg["theme"])
                 self.retheme()
 
     # ── refresh ────────────────────────────────────────────────
     def tick(self):
+        self._ticks = getattr(self, "_ticks", 0) + 1
+        if self._ticks % 5 == 0:                 # watch folder every 5 s
+            self.engine.scan_watch_dir()
         self.engine.poll()
         rows = self.engine.rows()
         self.model.update(rows)
