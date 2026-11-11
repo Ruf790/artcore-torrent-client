@@ -368,7 +368,7 @@ STRINGS = {
     "tray_pause_all":  ("Остановить все",                    "Pause all"),
     "tray_resume_all": ("Запустить все",                     "Resume all"),
     # updates
-    "set_updates":     ("Проверять обновления при запуске",  "Check for updates on start"),
+    "set_updates":     ("Проверять обновления автоматически", "Check for updates automatically"),
     "upd_check_now":   ("Проверить сейчас",                  "Check now"),
     "upd_none":        ("У вас последняя версия ({0}).",     "You have the latest version ({0})."),
     "upd_available":   ("Доступна версия {0}",               "Version {0} available"),
