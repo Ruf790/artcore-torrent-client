@@ -28,7 +28,7 @@ if not exist "%ISCC%" (
   goto :done
 )
 "%ISCC%" setup.iss || goto :err
-echo Installer: installer\ArtCoreClient-Setup-1.0.0.exe
+echo Installer: installer\ArtCoreClient-Setup-*.exe
 
 :done
 pause

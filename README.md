@@ -79,13 +79,13 @@ python run.py
 **Releases → Draft a new release → тег `v1.1.0` → Publish release** —
 GitHub Actions сам соберёт установщик и прикрепит его к релизу (≈3 мин),
 а установленные клиенты предложат обновиться:
-- `artcore/__init__.py`: `VERSION`, `VERSION_TUPLE` (из него собирается peer_id: 1.1.0 → `-Ag1100-`)
+- `artcore/__init__.py`: `VERSION`, `VERSION_TUPLE` (peer_id берёт только мажор и минор: 1.0.x → `-Ag1000-`, 1.1.x → `-Ag1100-`)
 - `setup.iss`: `#define AppVersion`
 - `version_info.txt`: filevers / prodvers / FileVersion / ProductVersion
 
 ## Настройка трекера
 - `admin/allagents.php`: добавить `-Ag1000-` в allowed_clients (если включён bannedclientdetect);
-  у каждой новой версии свой префикс.
+  новый префикс нужен только при смене минорной версии (1.1.0 → `-Ag1100-`), исправления 1.0.x его не меняют.
 - `include/functions_getagent.php`: клиент уже в базе.
 
 ## Другие трекеры
