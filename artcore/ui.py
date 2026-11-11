@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
+import socket
 from collections import deque
 from datetime import datetime
 
@@ -15,7 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QTimeEdit,
                                QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+                               QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QTableView, QTableWidget,
                                QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
@@ -422,6 +424,252 @@ class PieceBar(QWidget):
                     c = QColor(base); c.setAlphaF(0.25 + 0.75 * frac)
                     p.fillRect(QRectF(r.left() + x, r.top(), 1.2, r.height()), c)
         p.end()
+
+
+LOG_KINDS = ("system", "network", "torrent", "tracker", "error")
+LOG_STYLE = {   # soft badge colours per event type, like the site's .st-soft-*
+    "system":  ("muted_subtle",   "secondary"),
+    "network": ("info_subtle",    "info_text"),
+    "torrent": ("success_subtle", "success_text"),
+    "tracker": ("primary_subtle", "primary_text"),
+    "error":   ("danger_subtle",  "danger_text"),
+}
+
+
+class LogView(QWidget):
+    """Global log like BitComet's: No. / Time / Type / Message, coloured rows, filter."""
+    MAX = 3000
+
+    def __init__(self):
+        super().__init__()
+        self.entries: list[tuple[int, str, str, str]] = []   # (no, time, kind, text)
+        self.counter = 0
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 4)
+        bar = QHBoxLayout()
+        self.filter = QComboBox()
+        self.filter.addItem(t("log_all"), "")
+        for k in LOG_KINDS:
+            self.filter.addItem(t("lk_" + k), k)
+        self.filter.currentIndexChanged.connect(lambda _: self.rebuild())
+        bar.addWidget(self.filter)
+        bar.addStretch()
+        clear = QPushButton(t("log_clear"))
+        clear.clicked.connect(self.clear)
+        bar.addWidget(clear)
+        lay.addLayout(bar)
+
+        self.tbl = QTableWidget(0, 4)
+        self.tbl.setHorizontalHeaderLabels([t("log_no"), t("log_time"), t("log_type"), t("log_msg")])
+        self.tbl.verticalHeader().hide()
+        self.tbl.verticalHeader().setDefaultSectionSize(26)
+        self.tbl.setShowGrid(False)
+        self.tbl.setWordWrap(False)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        hh = self.tbl.horizontalHeader()
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hh.setHighlightSections(False)
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        for c, w in ((0, 50), (1, 150), (2, 90)):
+            self.tbl.setColumnWidth(c, w)
+        self.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.customContextMenuRequested.connect(self._menu)
+        lay.addWidget(self.tbl, 1)
+
+    def add(self, kind: str, text: str):
+        self.counter += 1
+        e = (self.counter, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), kind, text)
+        self.entries.append(e)
+        if len(self.entries) > self.MAX:
+            del self.entries[: len(self.entries) - self.MAX]
+            if self.tbl.rowCount() > self.MAX:
+                self.tbl.removeRow(0)
+        want = self.filter.currentData()
+        if not want or want == kind:
+            self._append_row(e)
+
+    def _append_row(self, e):
+        no, ts, kind, text = e
+        r = self.tbl.rowCount()
+        self.tbl.insertRow(r)
+        bg, fg = LOG_STYLE.get(kind, LOG_STYLE["system"])
+        for c, v in enumerate((str(no), ts, t("lk_" + kind), text)):
+            it = QTableWidgetItem(v)
+            if c == 2:
+                it.setForeground(QColor(C[fg]))
+                it.setFont(QFont(it.font().family(), -1, QFont.DemiBold))
+            if kind == "error":
+                it.setBackground(QColor(C["danger_subtle"]))
+            if c == 3:
+                it.setToolTip(text)
+            self.tbl.setItem(r, c, it)
+        sb = self.tbl.verticalScrollBar()
+        if sb.value() >= sb.maximum() - 30:      # follow the tail unless the user scrolled up
+            self.tbl.scrollToBottom()
+
+    def rebuild(self):
+        want = self.filter.currentData()
+        self.tbl.setRowCount(0)
+        for e in self.entries:
+            if not want or want == e[2]:
+                self._append_row(e)
+
+    def clear(self):
+        self.entries.clear()
+        self.tbl.setRowCount(0)
+
+    def _menu(self, pos):
+        rows = sorted({i.row() for i in self.tbl.selectedItems()})
+        if not rows:
+            return
+        m = QMenu(self)
+
+        def copy():
+            lines = ["\t".join(self.tbl.item(r, c).text() for c in range(4)) for r in rows]
+            QGuiApplication.clipboard().setText("\n".join(lines))
+        m.addAction(icon("fa6s.copy"), t("log_copy"), copy)
+        m.exec(self.tbl.viewport().mapToGlobal(pos))
+
+
+def _local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))          # no packet is sent; just picks the outgoing interface
+            return s.getsockname()[0]
+    except OSError:
+        return "—"
+
+
+def _fmt_uptime(sec: int) -> str:
+    d, rem = divmod(sec, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    return (f"{d}d " if d else "") + f"{h}:{m:02d}:{s:02d}"
+
+
+class StatsView(QTableWidget):
+    """Global statistics like BitComet's Statistics tab, grouped Item / Value rows."""
+    def __init__(self):
+        super().__init__(0, 2)
+        self.setHorizontalHeaderLabels([t("stat_item"), t("stat_value")])
+        self.verticalHeader().hide()
+        self.verticalHeader().setDefaultSectionSize(28)
+        self.setShowGrid(False)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.NoSelection)
+        hh = self.horizontalHeader()
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hh.setHighlightSections(False)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        self.setColumnWidth(0, 300)
+        self.firewall: bool | None = None
+        self._fw_checked = False
+        try:
+            import psutil
+            self.proc = psutil.Process()
+            self.proc.cpu_percent(None)          # prime the CPU counter
+        except Exception:
+            self.proc = None
+
+    def set_rows(self, rows: list[tuple[str, str] | str]):
+        """str = section header, (label, value) = item row."""
+        if self.rowCount() != len(rows):
+            self.setRowCount(len(rows))
+            self.clearSpans()
+        for i, r in enumerate(rows):
+            if isinstance(r, str):
+                if self.columnSpan(i, 0) != 2:
+                    self.setSpan(i, 0, 1, 2)
+                it = self._cell(i, 0)
+                it.setText(r)
+                f = QFont(theme.TITLE_FONT, 11); f.setWeight(QFont.DemiBold)
+                it.setFont(f)
+                it.setForeground(QColor(C["emphasis"]))
+                it.setBackground(QColor(C["tertiary_bg"]))
+            else:
+                for c, v in enumerate(r):
+                    it = self._cell(i, c)
+                    it.setText("    " + v if c == 0 else v)
+                    it.setForeground(QColor(C["secondary"] if c == 0 else C["body"]))
+
+    def _cell(self, r: int, c: int) -> QTableWidgetItem:
+        it = self.item(r, c)
+        if it is None:
+            it = QTableWidgetItem()
+            self.setItem(r, c, it)
+        return it
+
+    def refresh(self, win: "MainWindow"):
+        eng, cfg = win.engine, win.cfg
+        st = eng.stats()
+        rows = win.model.rows
+        active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking"))
+        if not self._fw_checked and winint.IS_WIN:
+            self._fw_checked = True
+            self.firewall = winint.firewall_allowed()
+
+        def limit(kib):
+            return t("st_limit", fmt_size(kib * 1024) + "/s") if kib else t("st_nolimit")
+
+        pm = st["portmap"]
+        if not cfg.get("upnp", True):
+            pm_text = t("pm_off")
+        elif not pm:
+            pm_text = t("pm_wait")
+        else:
+            pm_text = ", ".join(t("pm_ok", k, v.split(":", 1)[1]) if v.startswith("ok:") else t("pm_err", k)
+                                for k, v in sorted(pm.items()))
+        fw = {True: t("fw_ok"), False: t("fw_no"), None: t("fw_unknown")}[self.firewall]
+        sched_on = win._sched_state
+        if cfg.get("sched_enabled"):
+            sched = t("st_sched_on" if sched_on else "st_sched_idle", cfg.get("sched_from"), cfg.get("sched_to"))
+        else:
+            sched = t("pm_off")
+        dl_lim = cfg.get("sched_dl", 0) if sched_on else cfg.get("dl_limit", 0)
+        ul_lim = cfg.get("sched_ul", 0) if sched_on else cfg.get("ul_limit", 0)
+
+        cpu = mem = "—"
+        if self.proc is not None:
+            try:
+                cpu = t("st_cpu_v", f"{self.proc.cpu_percent(None) / max(1, os.cpu_count() or 1):.1f}", os.cpu_count())
+                mem = fmt_size(self.proc.memory_info().rss)
+            except Exception:
+                pass
+        free = free_space(cfg.get("save_path", ""))
+        all_dl, all_ul = st["all_down"], st["all_up"]
+        ratio = (all_ul / all_dl) if all_dl else 0.0
+        import libtorrent as lt
+
+        self.set_rows([
+            t("sg_general"),
+            (t("st_version"), f"{APP_TITLE} {VERSION} · libtorrent {lt.__version__} · Python {platform.python_version()}"),
+            (t("st_uptime"), _fmt_uptime(st["uptime"])),
+            (t("st_tasks"), t("st_tasks_v", len(rows), active)),
+            (t("st_cfg"), config.data_dir()),
+            t("sg_network"),
+            (t("st_lan"), _local_ip()),
+            (t("st_wan"), st["wan_ip"] or t("st_wan_wait")),
+            (t("st_port"), t("st_port_open" if st["incoming"] else "st_port_wait", st["port"])),
+            (t("st_upnp"), pm_text),
+            (t("st_firewall"), fw),
+            (t("st_dht"), str(st["dht_nodes"]) if cfg.get("dht") else t("meta_dht_off")),
+            (t("st_conns"), str(st["peers"])),
+            t("sg_speed"),
+            (t("st_down"), f"{fmt_size(st['down_rate'])}/s  ·  {limit(dl_lim)}"),
+            (t("st_up"), f"{fmt_size(st['up_rate'])}/s  ·  {limit(ul_lim)}"),
+            (t("st_sched"), sched),
+            t("sg_system"),
+            (t("st_os"), f"{platform.system()} {platform.release()} ({platform.version()}, {platform.machine()})"),
+            (t("st_cpu"), cpu),
+            (t("st_mem"), mem),
+            (t("st_disk"), fmt_size(free) if free is not None else "—"),
+            t("sg_totals"),
+            (t("st_all_down"), f"{fmt_size(all_dl)}  {t('st_session', fmt_size(st['session_down']))}"),
+            (t("st_all_up"), f"{fmt_size(all_ul)}  {t('st_session', fmt_size(st['session_up']))}"),
+            (t("st_ratio"), f"{ratio:.3f}"),
+        ])
 
 
 # ============================================================
@@ -934,6 +1182,7 @@ class MainWindow(QMainWindow):
 
         self._build_tray()
         self.retheme()
+        self._log_startup()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -1166,11 +1415,12 @@ class MainWindow(QMainWindow):
         self.graph = SpeedGraph()
         sl.addWidget(self.graph, 1)
         self.tabs.addTab(speed, t("tab_speed"))
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
+        self.stats_view = StatsView()
+        self.tabs.addTab(self.stats_view, t("tab_stats"))
+        self.log = LogView()
         self.tabs.addTab(self.log, t("tab_log"))
         for i, name in enumerate(("fa6s.circle-info", "fa6s.folder-tree", "fa6s.users", "fa6s.server",
-                                  "fa6s.chart-area", "fa6s.list")):
+                                  "fa6s.chart-area", "fa6s.chart-simple", "fa6s.list")):
             self._themed_icon(lambda ic, i=i: self.tabs.setTabIcon(i, ic), name)
         self.tabs.currentChanged.connect(lambda _: self.refresh_details())
         lay.addWidget(self.tabs)
@@ -1229,8 +1479,21 @@ class MainWindow(QMainWindow):
             fn(k)
         self.tick()
 
-    def log_line(self, s: str):
-        self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {s}")
+    def _log_startup(self):
+        import libtorrent as lt
+        self.log_event("system", t("log_started", APP_TITLE, VERSION))
+        self.log_event("system", f"libtorrent {lt.__version__}, Python {platform.python_version()}, "
+                                 f"{platform.system()} {platform.release()} ({platform.version()})")
+        try:
+            import psutil
+            ram = fmt_size(psutil.virtual_memory().total)
+        except Exception:
+            ram = "—"
+        self.log_event("system", f"CPU: {platform.processor() or platform.machine()}, {os.cpu_count()} threads, RAM: {ram}")
+        self.log_event("system", f"{t('st_cfg')}: {config.data_dir()}")
+
+    def log_event(self, kind: str, text: str):
+        self.log.add(kind, text)
 
     # ── adding ─────────────────────────────────────────────────
     def add_item(self, item: str):
@@ -1254,7 +1517,7 @@ class MainWindow(QMainWindow):
                 self.engine.add_magnet(item, save_path=save_path, paused=paused)
             else:
                 self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios)
-            self.log_line(item if is_magnet else os.path.basename(item))
+            self.log_event("torrent", t("log_added", item[:120] if is_magnet else os.path.basename(item)))
         except Exception as e:
             QMessageBox.warning(self, APP_TITLE, t("add_error", e))
         self.tick()
@@ -1389,16 +1652,16 @@ class MainWindow(QMainWindow):
             self.proxy.set_filter(tracker=self.tracker_combo.currentData() or "")
 
         while self.engine.messages:
-            self.log_line(self.engine.messages.pop(0))
+            self.log_event(*self.engine.messages.pop(0))
         while self.engine.finished_names:
             name = self.engine.finished_names.pop(0)
-            self.log_line(t("finished_note", name))
+            self.log_event("torrent", t("finished_note", name))
             if self.tray.isVisible():
                 self.tray.showMessage(APP_TITLE, t("finished_note", name), app_icon(), 5000)
 
         while self.engine.stopped_names:
             name = self.engine.stopped_names.pop(0)
-            self.log_line(t("stopped_note", name))
+            self.log_event("torrent", t("stopped_note", name))
             if self.tray.isVisible():
                 self.tray.showMessage(APP_TITLE, t("stopped_note", name), app_icon(), 5000)
 
@@ -1423,6 +1686,8 @@ class MainWindow(QMainWindow):
         self.refresh_details()
 
     def refresh_details(self):
+        if self.tabs.currentIndex() == 5:        # global, works without a selected torrent
+            self.stats_view.refresh(self)
         keys = self.selected_keys()
         row = next((r for r in self.model.rows if keys and r.key == keys[0]), None)
         if row is None:
@@ -1476,7 +1741,7 @@ class MainWindow(QMainWindow):
             else:
                 self.engine.set_global_limits(cfg.get("dl_limit", 0), cfg.get("ul_limit", 0))
             if self._sched_state is not None or active:
-                self.log_line(t("sch_on" if active else "sch_off"))
+                self.log_event("system", t("sch_on" if active else "sch_off"))
             self._sched_state = active
         return active
 
