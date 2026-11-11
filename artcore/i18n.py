@@ -38,6 +38,10 @@ STRINGS = {
     "st_paused":       ("Пауза",          "Paused"),
     "st_queued":       ("В очереди",      "Queued"),
     "st_error":        ("Ошибка",         "Error"),
+    "st_tracker_error": ("Ошибка трекера", "Tracker error"),
+    "tr_error_prefix": ("Трекер: {0}",    "Tracker: {0}"),
+    "tr_ok":           ("Работает",       "Working"),
+    "toast_tr_error":  ("Трекер отклонил торрент", "Tracker rejected the torrent"),
     "st_unknown":      ("—",              "—"),
     # tabs
     "tab_general":     ("Общее",      "General"),

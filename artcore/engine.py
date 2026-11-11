@@ -77,6 +77,7 @@ class Engine:
         self.ip_filter_rules = 0
         self.wan_ip = ""
         self.portmap: dict[str, str] = {}     # "UPnP" / "NAT-PMP" → status text
+        self.tr_status: dict[str, dict[str, str]] = {}   # key → {tracker url: last error, "" = ok}
         self.stats_path = os.path.join(data_dir, "stats.json")
         try:
             with open(self.stats_path, encoding="utf-8") as f:
@@ -250,6 +251,7 @@ class Engine:
         return key
 
     def remove(self, key: str, delete_files: bool = False) -> None:
+        self.tr_status.pop(key, None)
         h = self.handles.pop(key, None)
         if h is None:
             return
@@ -306,7 +308,13 @@ class Engine:
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, lt.tracker_error_alert) and _is_skip_notice(a):
                 pass   # libtorrent skipped a local endpoint (127.0.0.1, ::1, fe80::) that can't reach the tracker
-            elif isinstance(a, (lt.tracker_error_alert, lt.torrent_error_alert, lt.listen_failed_alert,
+            elif isinstance(a, lt.tracker_error_alert):
+                self._tracker_failed(a)
+                self._log("error", a.message())
+            elif isinstance(a, lt.tracker_reply_alert):
+                self.tr_status.setdefault(_key(a.handle), {})[_alert_url(a)] = ""
+                self._log("tracker", a.message())
+            elif isinstance(a, (lt.torrent_error_alert, lt.listen_failed_alert,
                                 lt.file_error_alert, lt.fastresume_rejected_alert)):
                 self._log("error", a.message())
             elif isinstance(a, (lt.tracker_reply_alert, lt.tracker_warning_alert)):
@@ -327,6 +335,23 @@ class Engine:
         self._apply_stop_rules()
         if time.time() - self._stats_flushed > 300:     # survive a crash: flush totals every 5 min
             self._flush_stats()
+
+    def _tracker_failed(self, a) -> None:
+        reason = ""
+        try:
+            reason = a.failure_reason() or ""        # text the tracker sent ("Invalid Torrent …")
+        except Exception:
+            pass
+        if not reason:
+            reason = a.error.message() if a.error.value() else a.message()
+        self.tr_status.setdefault(_key(a.handle), {})[_alert_url(a)] = _mask_passkey(reason)
+
+    def tracker_error(self, key: str) -> str:
+        """Error text when every tracker that answered has failed; "" while any one works."""
+        st = self.tr_status.get(key)
+        if not st or any(v == "" for v in st.values()):
+            return ""
+        return next(iter(st.values()))
 
     def _log(self, kind: str, text: str) -> None:
         """kind: system | network | torrent | tracker | error. Passkeys are masked."""
@@ -368,6 +393,7 @@ class Engine:
             s = h.status()
             paused = bool(s.flags & lt.torrent_flags.paused)
             auto   = bool(s.flags & lt.torrent_flags.auto_managed)
+            tr_err = ""
             if s.errc.value():
                 state = "error"
             elif paused and auto:
@@ -376,6 +402,9 @@ class Engine:
                 state = "paused"
             else:
                 state = STATE_NAMES.get(s.state, "unknown")
+                tr_err = self.tracker_error(key)
+                if tr_err and state in ("downloading", "seeding", "finished"):
+                    state = "tracker_error"
 
             left = s.total_wanted - s.total_wanted_done
             eta  = int(left / s.download_payload_rate) if s.download_payload_rate > 0 and left > 0 else -1
@@ -389,7 +418,7 @@ class Engine:
                 uploaded=ul, downloaded=dl,
                 ratio=_ratio(ul, dl, s.total_wanted_done),
                 eta=eta, save_path=s.save_path,
-                error=s.errc.message() if s.errc.value() else "",
+                error=s.errc.message() if s.errc.value() else (t_prefix(tr_err) if tr_err else ""),
                 tracker=s.current_tracker,
                 tracker_host=self._host(key, h),
                 category=self.opts.get(key, {}).get("category", ""),
@@ -541,6 +570,7 @@ class Engine:
         return [(t["url"], t["tier"]) for t in h.trackers()] if h else []
 
     def set_trackers(self, key: str, trackers: list[tuple[str, int]]) -> None:
+        self.tr_status.pop(key, None)
         h = self.handles.get(key)
         if not h:
             return
@@ -671,6 +701,18 @@ class Engine:
             pass
 
 
+def _alert_url(a) -> str:
+    try:
+        return a.tracker_url()
+    except Exception:
+        return getattr(a, "url", "")
+
+
+def t_prefix(msg: str) -> str:
+    from .i18n import t
+    return t("tr_error_prefix", msg)
+
+
 def _is_skip_notice(a) -> bool:
     """'skipping tracker announce (unreachable)': not an error, the endpoint simply has no route."""
     msg = a.message()
@@ -697,7 +739,7 @@ def _mask_passkey(text: str) -> str:
     global _PASSKEY_PARAM, _PASSKEY_PATH
     if _PASSKEY_PARAM is None:
         _PASSKEY_PARAM = re.compile(r"([?&;](?:passkey|torrent_pass|authkey|pk|uk|key)=)[A-Za-z0-9_-]{8,}", re.I)
-        _PASSKEY_PATH = re.compile(r"(/)[0-9a-fA-F]{32}(?=[/?&\s\"']|$)")
+        _PASSKEY_PATH = re.compile(r"(?<![0-9A-Za-z])()[0-9a-fA-F]{32}(?![0-9A-Za-z])")
     text = _PASSKEY_PARAM.sub(lambda m: m.group(1) + "•" * 8, text)
     return _PASSKEY_PATH.sub(lambda m: m.group(1) + "•" * 8, text)
 

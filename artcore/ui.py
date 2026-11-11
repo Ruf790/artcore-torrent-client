@@ -107,18 +107,20 @@ STATE_STYLE = {
     "paused":      ("muted_subtle",   "secondary"),
     "queued":      ("muted_subtle",   "secondary"),
     "error":       ("danger_subtle",  "danger_text"),
+    "tracker_error": ("danger_subtle", "danger_text"),
 }
 STATE_ICON = {
     "downloading": "fa6s.arrow-down", "metadata": "fa6s.magnet", "checking": "fa6s.rotate",
     "seeding": "fa6s.arrow-up", "finished": "fa6s.check", "paused": "fa6s.pause",
     "queued": "fa6s.clock", "error": "fa6s.triangle-exclamation",
+    "tracker_error": "fa6s.server",
 }
 FILTER_STATES = {
     "all":         None,
     "downloading": {"downloading", "metadata", "checking"},
     "seeding":     {"seeding", "finished"},
     "paused":      {"paused", "queued"},
-    "error":       {"error"},
+    "error":       {"error", "tracker_error"},
 }
 
 
@@ -265,6 +267,7 @@ class ProgressDelegate(QStyledItemDelegate):
         if r.progress > 0:
             key = ("success" if r.state in ("seeding", "finished") else
                    "danger" if r.state == "error" else
+                   "warning" if r.state == "tracker_error" else
                    "secondary" if r.state in ("paused", "queued") else "primary")
             fill = QRectF(bar.left(), bar.top(), max(6.0, bar.width() * r.progress), 6)
             if theme.current_style != "muted" and key in ("primary", "success"):
@@ -289,7 +292,11 @@ class BadgeDelegate(QStyledItemDelegate):
         bg, fg = STATE_STYLE.get(r.state, ("muted_subtle", "secondary"))
         f = painter.font(); f.setPointSizeF(8.5); f.setWeight(QFont.DemiBold); painter.setFont(f)
         text = t("st_" + r.state)
-        w = QFontMetrics(f).horizontalAdvance(text) + 36
+        fm = QFontMetrics(f)
+        room = option.rect.width() - 12 - 36          # pill never spills past the cell
+        if fm.horizontalAdvance(text) > room:
+            text = fm.elidedText(text, Qt.ElideRight, max(room, 10))
+        w = fm.horizontalAdvance(text) + 36
         pill = QRectF(option.rect.left() + 6, option.rect.center().y() - 10, w, 20)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(C[bg]))
@@ -680,7 +687,7 @@ class StatsView(QTableWidget):
         eng, cfg = win.engine, win.cfg
         st = eng.stats()
         rows = win.model.rows
-        active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking"))
+        active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking", "tracker_error"))
         if not self._fw_checked and winint.IS_WIN:
             self._fw_checked = True
             self.firewall = winint.firewall_allowed()
@@ -1670,7 +1677,7 @@ class MainWindow(QMainWindow):
         hh.setSectionsMovable(True)
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
         hh.customContextMenuRequested.connect(self.columns_menu)
-        for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 120), (C_DOWN, 95), (C_UP, 95),
+        for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 145), (C_DOWN, 95), (C_UP, 95),
                      (C_SEEDS, 55), (C_PEERS, 55), (C_RATIO, 65), (C_ETA, 80), (C_TRACKER, 150), (C_CAT, 110)):
             self.table.setColumnWidth(c, w)
         self._default_header = hh.saveState()
@@ -1755,6 +1762,9 @@ class MainWindow(QMainWindow):
         self.peers_tbl.setColumnWidth(1, 170)
         self.tabs.addTab(self.peers_tbl, t("tab_peers"))
         self.tr_tbl = self._mk_table(["tr_url", "tr_tier", "tr_msg"], stretch=0)
+        self.tr_tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
+        self.tr_tbl.setColumnWidth(1, 80)
+        self.tr_tbl.setColumnWidth(2, 380)
         self.tabs.addTab(self.tr_tbl, t("tab_trackers"))
 
         speed = QWidget()
@@ -1835,6 +1845,7 @@ class MainWindow(QMainWindow):
         config.save(self.cfg)
         self.engine.apply_settings(self.cfg)
         self._sched_state = None               # schedule re-applies its own limits if active
+        self._tr_bad: set[str] = set()          # torrents already toasted for a tracker error
 
     def _all(self, fn):
         for k in list(self.engine.handles):
@@ -2297,6 +2308,12 @@ class MainWindow(QMainWindow):
             self.log_event("torrent", t("finished_note", name))
             self.notify(t("finished_note", name), key, folder=True)
 
+        bad = {r.key for r in rows if r.state == "tracker_error"}
+        for r in rows:
+            if r.key in bad and r.key not in self._tr_bad:
+                self.notify(f"{t('toast_tr_error')}: {r.name}\n{r.error}", r.key, folder=False)
+        self._tr_bad = bad
+
         while self.engine.stopped_names:
             name, key = self.engine.stopped_names.pop(0)
             self.log_event("torrent", t("stopped_note", name))
@@ -2307,7 +2324,7 @@ class MainWindow(QMainWindow):
         st = self.engine.ses.status()
         down, up = st.payload_download_rate, st.payload_upload_rate
         self.graph.push(down, up)
-        active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking"))
+        active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking", "tracker_error"))
         self.k_down.set(fmt_size(down) + "/s", t("kpi_down"))
         self.k_up.set(fmt_size(up) + "/s", t("kpi_up"))
         self.k_active.set(str(active), t("kpi_active", len(rows)))
@@ -2376,12 +2393,15 @@ class MainWindow(QMainWindow):
         elif tab == 3:
             self.tr_tbl.setRowCount(len(trs))
             for i, tr in enumerate(trs):
-                for j, v in enumerate((tr["url"], str(tr["tier"]), tr["message"])):
+                bad = bool(tr["message"])
+                for j, v in enumerate((tr["url"], str(tr["tier"]), tr["message"] or t("tr_ok"))):
                     it = QTableWidgetItem(v)
+                    it.setToolTip(v)
                     if j == 0:
-                        bad = bool(tr["message"])
                         it.setIcon(widgets.icon("fa6s.circle-exclamation" if bad else "fa6s.circle-check",
-                                                "warning" if bad else "success"))
+                                                "danger" if bad else "success"))
+                    elif j == 2:
+                        it.setForeground(QColor(C["danger" if bad else "success"]))
                     self.tr_tbl.setItem(i, j, it)
 
     # ── speed schedule ─────────────────────────────────────────
