@@ -77,7 +77,8 @@ class Engine:
         self.ip_filter_rules = 0
         self.wan_ip = ""
         self.portmap: dict[str, str] = {}     # "UPnP" / "NAT-PMP" → status text
-        self.tr_status: dict[str, dict[str, str]] = {}   # key → {tracker url: last error, "" = ok}
+        # key → {(tracker url, v1/v2, local endpoint): last error, "" = ok}
+        self.tr_status: dict[str, dict[tuple, str]] = {}
         self.stats_path = os.path.join(data_dir, "stats.json")
         try:
             with open(self.stats_path, encoding="utf-8") as f:
@@ -310,9 +311,10 @@ class Engine:
                 pass   # libtorrent skipped a local endpoint (127.0.0.1, ::1, fe80::) that can't reach the tracker
             elif isinstance(a, lt.tracker_error_alert):
                 self._tracker_failed(a)
-                self._log("error", a.message())
+                # a rejected v2 announce while v1 works (hybrid torrent) is just a tracker note
+                self._log("error" if self.tracker_error(_key(a.handle)) else "tracker", a.message())
             elif isinstance(a, lt.tracker_reply_alert):
-                self.tr_status.setdefault(_key(a.handle), {})[_alert_url(a)] = ""
+                self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = ""
                 self._log("tracker", a.message())
             elif isinstance(a, (lt.torrent_error_alert, lt.listen_failed_alert,
                                 lt.file_error_alert, lt.fastresume_rejected_alert)):
@@ -344,10 +346,12 @@ class Engine:
             pass
         if not reason:
             reason = a.error.message() if a.error.value() else a.message()
-        self.tr_status.setdefault(_key(a.handle), {})[_alert_url(a)] = _mask_passkey(reason)
+        self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = _mask_passkey(reason)
 
     def tracker_error(self, key: str) -> str:
-        """Error text when every tracker that answered has failed; "" while any one works."""
+        """Error text when every tracker that answered has failed; "" while any one works.
+        A hybrid torrent is announced twice (v1 and v2 info-hash) — trackers that only know the
+        v1 hash reject the v2 announce, which must not count as an error while v1 works."""
         st = self.tr_status.get(key)
         if not st or any(v == "" for v in st.values()):
             return ""
@@ -680,11 +684,15 @@ class Engine:
             return []
         out = []
         for t in h.trackers():
-            msg = ""
+            msg, ok = "", False
             for ep in t.get("endpoints", []):
-                for ih in ep.get("info_hashes", []):
+                for ih in ep.get("info_hashes", []):   # [v1, v2]
                     if ih.get("message"):
-                        msg = ih["message"]
+                        msg = msg or ih["message"]
+                    elif ih.get("start_sent") and not ih.get("fails"):
+                        ok = True                       # some announce (v1 or v2) is accepted
+            if ok:
+                msg = ""
             out.append({"url": _mask_passkey(t["url"]), "tier": t["tier"], "message": msg})
         return out
 
@@ -699,6 +707,11 @@ class Engine:
             self._flush_stats()
         except OSError:
             pass
+
+
+def _alert_id(a) -> tuple:
+    """One tracker announce stream: URL × protocol version (v1/v2 hash) × local endpoint."""
+    return (_alert_url(a), str(getattr(a, "version", "")), str(getattr(a, "local_endpoint", "")))
 
 
 def _alert_url(a) -> str:
