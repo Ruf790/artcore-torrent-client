@@ -346,7 +346,7 @@ class Engine:
                 continue
             if need and s.state == lt.torrent_status.downloading and not (s.flags & lt.torrent_flags.paused) \
                     and free(s.save_path) < need:
-                self.pause(key)
+                self.stop(key)
                 self._low_space.add(key)
                 self.opts.setdefault(key, {})["low_space"] = True    # survives a restart
                 self._save_opts()
@@ -410,7 +410,13 @@ class Engine:
         per-tracker limit). Torrents with their own limit (Properties) are left alone."""
         groups: dict[str, list] = {}
         for key, h in self.handles.items():
-            if not h.is_valid() or self.opts.get(key, {}).get("own_limits"):
+            if not h.is_valid():
+                continue
+            if self.opts.get(key, {}).get("soft_pause"):     # paused: keep transfers frozen
+                if h.download_limit() != 1 or h.upload_limit() != 1:
+                    self._freeze(h)
+                continue
+            if self.opts.get(key, {}).get("own_limits"):
                 continue
             host = self._host(key, h)
             r = self.tracker_rule(host)
@@ -606,16 +612,47 @@ class Engine:
             pass
 
     # ── control ────────────────────────────────────────────────
-    def pause(self, key: str) -> None:
+    def stop(self, key: str) -> None:
+        """Stop: disconnect every peer and tell the tracker 'stopped'."""
         h = self.handles.get(key)
         if h:
+            self._unfreeze(key, h)
             h.unset_flags(lt.torrent_flags.auto_managed)
             h.pause()
             h.save_resume_data(lt.torrent_handle.save_info_dict)
 
+    def pause(self, key: str) -> None:
+        """Pause (like µTorrent / BitComet): transfers freeze, but the torrent stays connected to
+        its peers and announced, so 'Start' picks up instantly. A stopped torrent stays stopped."""
+        h = self.handles.get(key)
+        if not h or h.flags() & lt.torrent_flags.paused:
+            return
+        self.opts.setdefault(key, {})["soft_pause"] = True
+        self._save_opts()
+        self._freeze(h)
+
+    @staticmethod
+    def _freeze(h: lt.torrent_handle) -> None:
+        h.set_download_limit(1)          # 1 B/s: libtorrent's 0 means unlimited
+        h.set_upload_limit(1)
+
+    def _unfreeze(self, key: str, h: lt.torrent_handle) -> None:
+        o = self.opts.get(key, {})
+        if not o.pop("soft_pause", None):
+            return
+        self._save_opts()
+        own = o.get("own_limits")
+        h.set_download_limit(int(o.get("dl_limit", 0)) * 1024 or -1 if own else -1)
+        h.set_upload_limit(int(o.get("ul_limit", 0)) * 1024 or -1 if own else -1)
+        self._limited.discard(key)          # a tracker rule re-applies its share on the next pass
+
+    def is_soft_paused(self, key: str) -> bool:
+        return bool(self.opts.get(key, {}).get("soft_pause"))
+
     def resume(self, key: str) -> None:
         h = self.handles.get(key)
         if h:
+            self._unfreeze(key, h)
             h.set_flags(lt.torrent_flags.auto_managed)
             h.resume()
             h.save_resume_data(lt.torrent_handle.save_info_dict)
@@ -789,6 +826,8 @@ class Engine:
             elif paused and auto:
                 state = "queued"
             elif paused:
+                state = "stopped"
+            elif self.opts.get(key, {}).get("soft_pause"):
                 state = "paused"
             else:
                 state = STATE_NAMES.get(s.state, "unknown")
@@ -975,7 +1014,7 @@ class Engine:
             hours = s.seeding_duration.total_seconds() / 3600
             hit = (ratio_lim and ratio >= ratio_lim) or (hours_lim and hours >= hours_lim)
             if hit and not self.hnr_left(key, h, s):    # never stop before the tracker's requirement
-                self.pause(key)
+                self.stop(key)
                 self.opts.setdefault(key, {})["rule_done"] = True
                 self._save_opts()
                 self.stopped_names.append((s.name, key))

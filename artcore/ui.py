@@ -109,14 +109,15 @@ STATE_STYLE = {
     "checking":    ("warning_subtle", "warning_text"),
     "seeding":     ("success_subtle", "success_text"),
     "finished":    ("success_subtle", "success_text"),
-    "paused":      ("muted_subtle",   "secondary"),
+    "paused":      ("warning_subtle", "warning_text"),
+    "stopped":     ("muted_subtle",   "secondary"),
     "queued":      ("muted_subtle",   "secondary"),
     "error":       ("danger_subtle",  "danger_text"),
     "tracker_error": ("danger_subtle", "danger_text"),
 }
 STATE_ICON = {
     "downloading": "fa6s.arrow-down", "metadata": "fa6s.magnet", "checking": "fa6s.rotate",
-    "seeding": "fa6s.arrow-up", "finished": "fa6s.check", "paused": "fa6s.pause",
+    "seeding": "fa6s.arrow-up", "finished": "fa6s.check", "paused": "fa6s.pause", "stopped": "fa6s.stop",
     "queued": "fa6s.clock", "error": "fa6s.triangle-exclamation",
     "tracker_error": "fa6s.server",
 }
@@ -124,7 +125,7 @@ FILTER_STATES = {
     "all":         None,
     "downloading": {"downloading", "metadata", "checking"},
     "seeding":     {"seeding", "finished"},
-    "paused":      {"paused", "queued"},
+    "paused":      {"paused", "stopped", "queued"},
     "error":       {"error", "tracker_error"},
 }
 
@@ -277,7 +278,7 @@ def _paint_cell_bg(painter, option):
 PROGRESS_COLORS = {   # state → (start, end) of the bar gradient
     "downloading": ("primary", "info"), "metadata": ("warning", "orange"), "checking": ("warning", "orange"),
     "seeding": ("success", "teal"), "finished": ("success", "teal"),
-    "paused": ("secondary", "secondary"), "queued": ("secondary", "secondary"),
+    "paused": ("warning", "warning"), "stopped": ("secondary", "secondary"), "queued": ("secondary", "secondary"),
     "error": ("danger", "pink"), "tracker_error": ("danger", "pink"),
 }
 
@@ -307,7 +308,7 @@ class ProgressDelegate(QStyledItemDelegate):
         if p > 0:
             g = QLinearGradient(fill.topLeft(), fill.topRight())
             ca, cb = QColor(C[a]), QColor(C[b])
-            if r.state in ("paused", "queued"):
+            if r.state in ("paused", "stopped", "queued"):
                 ca.setAlpha(150); cb.setAlpha(150)
             g.setColorAt(0, ca)
             g.setColorAt(1, cb)
@@ -2530,6 +2531,8 @@ class MainWindow(QMainWindow):
         b.setToolTip(t("start_tip"))
         b = btn("pause", "fa6s.pause", lambda: self._each(self.engine.pause, all_if_none=True), color="secondary")
         b.setToolTip(t("pause_tip"))
+        b = btn("stop", "fa6s.stop", lambda: self._each(self.engine.stop, all_if_none=True), color="danger")
+        b.setToolTip(t("stop_tip"))
         a = QAction(self); a.setShortcut(QKeySequence.SelectAll); a.triggered.connect(self.select_all)
         self.addAction(a)
         btn("remove", "fa6s.trash-can", self.remove_selected, "danger", color="danger", shortcut="Delete")
@@ -2891,7 +2894,7 @@ class MainWindow(QMainWindow):
             act.setChecked(self.after_done == kind)
             act.triggered.connect(lambda _=False, k=kind: self.set_after_done(k))
         m.addSeparator()
-        m.addAction(icon("fa6s.pause"), t("tray_pause_all"), lambda: self._all(self.engine.pause))
+        m.addAction(icon("fa6s.stop", "danger"), t("tray_pause_all"), lambda: self._all(self.engine.stop))
         m.addAction(icon("fa6s.play", "success"), t("tray_resume_all"), lambda: self._all(self.engine.resume))
         m.addSeparator()
         m.addAction(icon("fa6s.power-off", "danger"), t("quit"), self.quit)
@@ -3319,7 +3322,8 @@ class MainWindow(QMainWindow):
             m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
             m.addSeparator()
             m.addAction(icon("fa6s.play", "success"), t("start_all"), lambda: self._each(self.engine.resume, True))
-            m.addAction(icon("fa6s.pause"), t("pause_all"), lambda: self._each(self.engine.pause, True))
+            m.addAction(icon("fa6s.pause", "warning"), t("pause_all"), lambda: self._each(self.engine.pause, True))
+            m.addAction(icon("fa6s.stop", "danger"), t("stop_all"), lambda: self._each(self.engine.stop, True))
             m.exec(self.table.viewport().mapToGlobal(pos))
             return
         m = QMenu(self)
@@ -3327,7 +3331,8 @@ class MainWindow(QMainWindow):
         if n > 1:
             m.addSection(t("n_selected", n))
         m.addAction(icon("fa6s.play", "success"), t("start"), lambda: self._each(self.engine.resume))
-        m.addAction(icon("fa6s.pause"), t("pause"), lambda: self._each(self.engine.pause))
+        m.addAction(icon("fa6s.pause", "warning"), t("pause"), lambda: self._each(self.engine.pause))
+        m.addAction(icon("fa6s.stop", "danger"), t("stop"), lambda: self._each(self.engine.stop))
         m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
         m.addSeparator()
         m.addAction(icon("fa6s.folder-open"), t("open_folder"), self.open_folder)
