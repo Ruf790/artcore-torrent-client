@@ -1221,6 +1221,57 @@ def free_space(path: str) -> int | None:
         return None
 
 
+class PathCombo(QComboBox):
+    """Editable folder field with a drop-down of recent folders, the default folder and category
+    folders. Keeps the QLineEdit-like API (text / setText / textChanged) the dialog code uses."""
+    def __init__(self, cfg: dict, current: str, used: list[str] = ()):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setMaxVisibleItems(16)
+        self.textChanged = self.editTextChanged
+        seen: set[str] = set()
+        ic_recent = icon("fa6s.clock-rotate-left")
+        ic_def = icon("fa6s.house", "primary")
+        ic_cat = icon("fa6s.tag", "purple")
+
+        def add(path: str, ic, note: str = ""):
+            if not path:
+                return
+            key = os.path.normcase(os.path.normpath(path))
+            if key in seen:
+                return
+            seen.add(key)
+            self.addItem(ic, path, path)
+            if note:
+                self.setItemData(self.count() - 1, note, Qt.ToolTipRole)
+
+        add(cfg.get("save_path", ""), ic_def, t("path_default"))
+        for c in cfg.get("categories", []):
+            add(c.get("path", ""), ic_cat, t("path_category", c.get("name", "")))
+        for pth in cfg.get("recent_paths", []):
+            add(pth, ic_recent, t("path_recent"))
+        ic_used = icon("fa6s.folder", "warning")
+        for pth in used:                         # folders of torrents already in the client
+            add(pth, ic_used, t("path_used"))
+        self.setEditText(current)
+
+    def text(self) -> str:
+        return self.currentText()
+
+    def setText(self, value: str) -> None:
+        self.setEditText(value)
+
+
+def remember_path(cfg: dict, path: str, keep: int = 12) -> None:
+    """Put a used save folder on top of the drop-down history."""
+    if not path:
+        return
+    norm = os.path.normcase(os.path.normpath(path))
+    rest = [p for p in cfg.get("recent_paths", []) if os.path.normcase(os.path.normpath(p)) != norm]
+    cfg["recent_paths"] = [path] + rest[:keep - 1]
+
+
 class AddTorrentDialog(QDialog):
     """Choose folder and files before adding (.torrent), or just folder for a magnet."""
     def __init__(self, cfg: dict, name: str, ti=None, parent=None, cross: dict | None = None,
@@ -1278,7 +1329,8 @@ class AddTorrentDialog(QDialog):
 
         row = QHBoxLayout()
         row.addWidget(QLabel(t("ad_save_to")))
-        self.path = QLineEdit(cfg.get("save_path", ""))
+        used = sorted({r.save_path for r in getattr(getattr(parent, "model", None), "rows", [])})
+        self.path = PathCombo(cfg, cfg.get("save_path", ""), used)
         self.path.textChanged.connect(self._update)
         row.addWidget(self.path, 1)
         b = QPushButton(t("set_browse"))
@@ -2465,6 +2517,10 @@ class MainWindow(QMainWindow):
                                                    seed_mode=seed_mode)
             if category:
                 self.engine.set_category(key, category)
+            if not cross:
+                used = save_path or self.cfg.get("save_path", "")
+                remember_path(self.cfg, used)
+                config.save(self.cfg)
             if is_magnet:
                 label = lt.parse_magnet_uri(item).name or item[:60] + "…"
             else:
