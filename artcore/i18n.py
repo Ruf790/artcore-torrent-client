@@ -65,7 +65,7 @@ STRINGS = {
     "trs_updating":    ("Обновляется", "Updating"),
     "trs_not_working": ("Не работает", "Not working"),
     "trs_tracker_error": ("Ошибка трекера", "Tracker error"),
-    "trs_not_contacted": ("Ещё не связывался", "Not contacted yet"),
+    "trs_not_contacted": ("Связи пока нет", "Not contacted yet"),
     "trs_disabled":    ("Отключено",  "Disabled"),
     "trs_private":     ("Отключено для этого торрента", "Disabled for this torrent"),
     "trs_private_msg": ("Это частный торрент", "This torrent is private"),
