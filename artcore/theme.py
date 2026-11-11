@@ -279,7 +279,11 @@ QMenu {{ background: {c['body_bg']}; color: {c['body']}; border: 1px solid {c['b
 QMenu::item {{ padding: 6px 18px 6px 10px; border-radius: 6px; }}
 QMenu::item:selected {{ background: {c['primary_subtle']}; color: {c['primary_text']}; }}
 QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 6px; }}
-QStatusBar {{ background: {c['page_bg']}; color: {c['secondary']}; }}
+QStatusBar {{ background: {c['page_bg']}; color: {c['secondary']}; border-top: 1px solid {c['border']}; }}
+QStatusBar::item {{ border: none; }}
+QToolButton#sbItem {{ color: {c['secondary']}; font-size: 8.5pt; padding: 2px 8px; border: none;
+    border-left: 1px solid {c['border']}; border-radius: 0; background: transparent; }}
+QToolButton#sbItem:hover {{ background: {c['primary_subtle']}; color: {c['primary_text']}; }}
 QMessageBox QLabel {{ color: {c['body']}; }}
 """
 
