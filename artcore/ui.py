@@ -608,6 +608,17 @@ class StatsView(QTableWidget):
             self.setItem(r, c, it)
         return it
 
+    @staticmethod
+    def _geo_text(win) -> str:
+        g = win.geo
+        if g is None:
+            return t("pm_off")
+        if g.status == "ready":
+            return t("geo_ready")
+        if g.status.startswith("error:"):
+            return t("geo_error", g.status[6:][:80])
+        return t("geo_loading")
+
     def refresh(self, win: "MainWindow"):
         eng, cfg = win.engine, win.cfg
         st = eng.stats()
@@ -661,6 +672,11 @@ class StatsView(QTableWidget):
             (t("st_port"), t("st_port_open" if st["incoming"] else "st_port_wait", st["port"])),
             (t("st_upnp"), pm_text),
             (t("st_firewall"), fw),
+            (t("st_iface"), (cfg.get("bind_interface") + (f" ({eng.bound_ip})" if eng.bind_ok else " — " + t("meta_vpn_down", "").strip(" —")))
+                            if cfg.get("bind_interface") else t("iface_any")),
+            (t("st_enc"), t("enc_" + cfg.get("encryption", "prefer"))),
+            (t("st_ipf"), t("st_ipf_v", eng.ip_filter_rules) if cfg.get("ip_filter") else t("pm_off")),
+            (t("st_geo"), self._geo_text(win)),
             (t("st_dht"), str(st["dht_nodes"]) if cfg.get("dht") else t("meta_dht_off")),
             (t("st_conns"), str(st["peers"])),
             t("sg_speed"),
@@ -757,6 +773,35 @@ class SettingsDialog(QDialog):
         form.addRow(self.dht)
         form.addRow(self.upnp)
 
+        from .netx import interfaces
+        from .dialogs import folder_row
+        form.addRow(_section(t("set_grp_net")))
+        self.iface = QComboBox()
+        self.iface.addItem(t("iface_any"), "")
+        names = [n for n, _ in interfaces()]
+        for n, ip in interfaces():
+            self.iface.addItem(f"{n}  ({ip})", n)
+        cur = cfg.get("bind_interface", "")
+        if cur and cur not in names:
+            self.iface.addItem(t("iface_missing", cur), cur)
+        self.iface.setCurrentIndex(max(0, self.iface.findData(cur)))
+        form.addRow(t("set_iface"), self.iface)
+        ih = QLabel(t("iface_hint")); ih.setObjectName("meta"); ih.setWordWrap(True)
+        form.addRow(ih)
+        self.enc = QComboBox()
+        for k in ("prefer", "require", "disable"):
+            self.enc.addItem(t("enc_" + k), k)
+        self.enc.setCurrentIndex(max(0, self.enc.findData(cfg.get("encryption", "prefer"))))
+        form.addRow(t("set_enc"), self.enc)
+        irow, self.ipf = folder_row(self, cfg.get("ip_filter", ""))
+        # the browse button of folder_row picks folders — swap it for a file picker
+        irow.itemAt(1).widget().clicked.disconnect()
+        irow.itemAt(1).widget().clicked.connect(self._pick_ipf)
+        self.ipf.setPlaceholderText("https://… / C:\\ipfilter.dat")
+        form.addRow(t("set_ipfilter"), irow)
+        self.geoip = QCheckBox(t("set_geoip")); self.geoip.setChecked(cfg.get("geoip", True))
+        form.addRow(self.geoip)
+
         form.addRow(_section(t("set_grp_seed")))
         self.stop_ratio = QDoubleSpinBox(); self.stop_ratio.setRange(0, 1000); self.stop_ratio.setSingleStep(0.1)
         self.stop_ratio.setValue(float(cfg.get("stop_ratio", 0)))
@@ -829,6 +874,12 @@ class SettingsDialog(QDialog):
         if d:
             self.path.setText(d)
 
+    def _pick_ipf(self):
+        f, _ = QFileDialog.getOpenFileName(self, t("set_ipfilter"), "",
+                                           "IP filter (*.dat *.p2p *.txt *.gz *.zip);;* (*)")
+        if f:
+            self.ipf.setText(f)
+
     def _assoc(self):
         try:
             winint.register_associations()
@@ -858,6 +909,8 @@ class SettingsDialog(QDialog):
                  categories=self.cats.categories(),
                  watch_dir=self.watch.text().strip(), watch_category=self.watch_cat.currentData() or "",
                  move_done_dir=self.move_done.text().strip(), move_done_by_category=self.move_bycat.isChecked(),
+                 bind_interface=self.iface.currentData() or "", encryption=self.enc.currentData(),
+                 ip_filter=self.ipf.text().strip(), geoip=self.geoip.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
@@ -1228,6 +1281,9 @@ class MainWindow(QMainWindow):
         root.addWidget(split, 1)
 
         self._build_tray()
+        self.geo = None
+        self._ipf_result = None
+        self.start_network_extras()
         self.refresh_category_combo()
         self.retheme()
         self._log_startup()
@@ -1452,7 +1508,9 @@ class MainWindow(QMainWindow):
             self.files_tbl.setColumnWidth(c, w)
         self.tabs.addTab(self.files_tbl, t("tab_files"))
 
-        self.peers_tbl = self._mk_table(["peer_ip", "peer_client", "col_progress", "col_down", "col_up"], stretch=1)
+        self.peers_tbl = self._mk_table(["peer_ip", "peer_country", "peer_client", "col_progress", "col_down", "col_up"], stretch=2)
+        self.peers_tbl.setColumnWidth(0, 170)
+        self.peers_tbl.setColumnWidth(1, 170)
         self.tabs.addTab(self.peers_tbl, t("tab_peers"))
         self.tr_tbl = self._mk_table(["tr_url", "tr_tier", "tr_msg"], stretch=0)
         self.tabs.addTab(self.tr_tbl, t("tab_trackers"))
@@ -1673,6 +1731,29 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.trash-can", "danger"), t("remove"), self.remove_selected)
         m.exec(self.table.viewport().mapToGlobal(pos))
 
+    def start_network_extras(self):
+        """GeoIP database and IP filter list load in background threads."""
+        import threading
+        from .netx import GeoIP, load_ip_filter
+        if self.cfg.get("geoip", True):
+            if self.geo is None:
+                self.geo = GeoIP(config.data_dir(), self.cfg.get("language", "ru"))
+            self.geo.start()
+        else:
+            self.geo = None
+        src = self.cfg.get("ip_filter", "").strip()
+        if not src:
+            if self.engine.ip_filter_rules:
+                self.engine.set_ip_filter([])
+            return
+
+        def work():
+            try:
+                self._ipf_result = ("ok", load_ip_filter(src, config.data_dir()))
+            except Exception as e:
+                self._ipf_result = ("error", str(e))
+        threading.Thread(target=work, daemon=True).start()
+
     def import_dialog(self):
         from .dialogs import ImportDialog
         d = ImportDialog(self.engine, self.cfg, self)
@@ -1761,11 +1842,14 @@ class MainWindow(QMainWindow):
         d = SettingsDialog(self.cfg, self)
         if d.exec():
             old_theme = self.cfg.get("theme")
+            old_net = (self.cfg.get("ip_filter"), self.cfg.get("geoip"))
             self.cfg.update(d.result_cfg())
             config.save(self.cfg)
             self.engine.apply_settings(self.cfg)
             self._sched_state = None             # re-apply schedule limits on next tick
             self.refresh_category_combo()
+            if (self.cfg.get("ip_filter"), self.cfg.get("geoip")) != old_net:
+                self.start_network_extras()
             if self.cfg.get("theme") != old_theme:
                 theme.apply(QApplication.instance(), self.cfg["theme"])
                 self.retheme()
@@ -1773,8 +1857,20 @@ class MainWindow(QMainWindow):
     # ── refresh ────────────────────────────────────────────────
     def tick(self):
         self._ticks = getattr(self, "_ticks", 0) + 1
-        if self._ticks % 5 == 0:                 # watch folder every 5 s
+        if self._ticks % 5 == 0:                 # watch folder + VPN binding every 5 s
             self.engine.scan_watch_dir()
+            ok = self.engine.check_binding()
+            if ok is not None and self.tray.isVisible():
+                bind = self.cfg.get("bind_interface", "")
+                self.tray.showMessage(APP_TITLE, t("meta_vpn_ok" if ok else "meta_vpn_down", bind), app_icon(), 5000)
+        if self._ipf_result is not None:
+            kind, val = self._ipf_result
+            self._ipf_result = None
+            if kind == "ok":
+                self.engine.set_ip_filter(val)
+                self.log_event("network", t("ipf_loaded", len(val)))
+            else:
+                self.log_event("error", t("ipf_error", val))
         self.engine.poll()
         rows = self.engine.rows()
         self.model.update(rows)
@@ -1829,6 +1925,13 @@ class MainWindow(QMainWindow):
         parts = [t("subtitle"), t("meta_version", VERSION), t("meta_port", self.engine.ses.listen_port()), dht]
         if sched:
             parts.append(f'<span style="color:{C["warning_text"]}">&#9200; {t("meta_sched")}</span>')
+        bind = self.cfg.get("bind_interface", "")
+        if bind:
+            if self.engine.bind_ok:
+                parts.append(f'<span style="color:{C["success_text"] if theme.current_name == "dark" else C["success"]}">'
+                             f'&#128274; {t("meta_vpn_ok", bind)}</span>')
+            else:
+                parts.append(f'<span style="color:{C["danger"]}">&#9888; {t("meta_vpn_down", bind)}</span>')
         self.meta.setText(dot.join(parts))
         self.tray.setToolTip(f"{APP_TITLE}\n↓ {fmt_size(down)}/s  ↑ {fmt_size(up)}/s")
         self.refresh_details()
@@ -1865,7 +1968,9 @@ class MainWindow(QMainWindow):
             peers = self.engine.peers(row.key)
             self.peers_tbl.setRowCount(len(peers))
             for i, p in enumerate(peers):
-                for j, v in enumerate((p["ip"], p["client"], f"{p['progress'] * 100:.1f}%",
+                code, cname = self.geo.lookup(p["host"]) if self.geo else ("", "")
+                country = f"{code}  {cname}" if code else ""
+                for j, v in enumerate((p["ip"], country, p["client"], f"{p['progress'] * 100:.1f}%",
                                        fmt_speed(p["down"]), fmt_speed(p["up"]))):
                     self.peers_tbl.setItem(i, j, QTableWidgetItem(v))
         elif tab == 3:

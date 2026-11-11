@@ -72,6 +72,8 @@ class Engine:
         self.handles: dict[str, lt.torrent_handle] = {}
         self.messages: list[tuple[str, str]] = []   # (kind, text) log events for the UI
         self.started = time.time()
+        self.bound_ip, self.bind_ok = "", True
+        self.ip_filter_rules = 0
         self.wan_ip = ""
         self.portmap: dict[str, str] = {}     # "UPnP" / "NAT-PMP" → status text
         self.stats_path = os.path.join(data_dir, "stats.json")
@@ -99,11 +101,31 @@ class Engine:
     def _settings(self) -> dict:
         c = self.cfg
         port = int(c.get("port", 51413))
+        enc = {"prefer": (lt.enc_policy.pe_enabled, lt.enc_level.pe_both),
+               "require": (lt.enc_policy.pe_forced, lt.enc_level.pe_rc4),
+               "disable": (lt.enc_policy.pe_disabled, lt.enc_level.pe_both)}[c.get("encryption", "prefer")]
+        # Interface binding (VPN kill-switch): when the chosen adapter is gone, bind to loopback,
+        # so nothing leaks through the normal connection.
+        bind = c.get("bind_interface", "")
+        if bind:
+            from .netx import interface_ip
+            ip = interface_ip(bind)
+            self.bound_ip = ip or "127.0.0.1"
+            self.bind_ok = ip is not None
+            listen = f"{self.bound_ip}:{port}"
+            outgoing = self.bound_ip
+        else:
+            self.bound_ip, self.bind_ok = "", True
+            listen = f"0.0.0.0:{port},[::]:{port}"
+            outgoing = ""
         return {
             # Client identity: what the tracker sees in peer_id / User-Agent
             "peer_fingerprint": lt.generate_fingerprint(PEER_ID_CODE, *VERSION_TUPLE),
             "user_agent":       f"{APP_NAME}/{VERSION} libtorrent/{lt.__version__}",
-            "listen_interfaces": f"0.0.0.0:{port},[::]:{port}",
+            "listen_interfaces": listen,
+            "outgoing_interfaces": outgoing,
+            "out_enc_policy": int(enc[0]), "in_enc_policy": int(enc[0]),
+            "allowed_enc_level": int(enc[1]),
             "enable_dht":   bool(c.get("dht", True)),
             "enable_lsd":   bool(c.get("lsd", True)),
             "enable_upnp":  bool(c.get("upnp", True)),
@@ -124,6 +146,28 @@ class Engine:
     def apply_settings(self, cfg: dict) -> None:
         self.cfg = cfg
         self.ses.apply_settings(self._settings())
+
+    def check_binding(self) -> bool | None:
+        """Re-resolve the bound interface (VPN reconnects change its IP, a drop removes it).
+        Returns None if nothing changed, else the new "ok" state."""
+        bind = self.cfg.get("bind_interface", "")
+        if not bind:
+            return None
+        from .netx import interface_ip
+        ip = interface_ip(bind) or "127.0.0.1"
+        if ip == self.bound_ip:
+            return None
+        self.ses.apply_settings(self._settings())
+        self._log("network" if self.bind_ok else "error",
+                  f"{bind}: {ip}" if self.bind_ok else f"{bind}: interface down — traffic blocked (kill-switch)")
+        return self.bind_ok
+
+    def set_ip_filter(self, ranges: list[tuple[str, str]]) -> None:
+        f = lt.ip_filter()
+        for a, b in ranges:
+            f.add_rule(a, b, 1)
+        self.ses.set_ip_filter(f)
+        self.ip_filter_rules = len(ranges)
 
     # ── persistence ────────────────────────────────────────────
     def _resume_path(self, key: str) -> str:
@@ -574,6 +618,7 @@ class Engine:
         for p in h.get_peer_info():
             res.append({
                 "ip": f"{p.ip[0]}:{p.ip[1]}",
+                "host": p.ip[0],
                 "client": p.client.decode("utf-8", "replace") if isinstance(p.client, bytes) else str(p.client),
                 "progress": p.progress,
                 "down": p.payload_down_speed,
