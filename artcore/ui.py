@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections import deque
 from datetime import datetime
 
 import qtawesome as qta
 from PySide6.QtCore import (Qt, QAbstractTableModel, QModelIndex, QTimer, QUrl, QThread,
-                            Signal, QRectF, QSortFilterProxyModel, QSize)
+                            Signal, QRectF, QSortFilterProxyModel, QSize, QTime, QPointF)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap,
-                           QPainterPath, QKeySequence, QGuiApplication, QFontMetrics)
+                           QPainterPath, QKeySequence, QGuiApplication, QFontMetrics, QPen)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox,
-                               QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+                               QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+                               QFormLayout, QTimeEdit,
                                QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle,
@@ -314,6 +316,114 @@ class Kpi(QFrame):
         self.lbl.setText(lbl)
 
 
+class SpeedGraph(QWidget):
+    """Download / upload history, drawn like the site's charts: soft areas, thin lines."""
+    def __init__(self):
+        super().__init__()
+        self.down: deque[int] = deque(maxlen=3600)
+        self.up: deque[int] = deque(maxlen=3600)
+        self.span = 300          # seconds shown
+        self.setMinimumHeight(140)
+
+    def push(self, down: int, up: int):
+        self.down.append(down)
+        self.up.append(up)
+        if self.isVisible():
+            self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        f = p.font(); f.setPointSizeF(8.5); p.setFont(f)
+        fm = QFontMetrics(f)
+        down = list(self.down)[-self.span:]
+        up = list(self.up)[-self.span:]
+        top = max(down + up + [10 * 1024]) * 1.15
+        left, right, tp, bottom = 74, self.width() - 14, 30, self.height() - 22
+        w, h = right - left, bottom - tp
+
+        # grid + y labels
+        p.setPen(QPen(QColor(C["border_soft"]), 1))
+        for i in range(5):
+            y = tp + h * i / 4
+            p.drawLine(QPointF(left, y), QPointF(right, y))
+            p.setPen(QColor(C["secondary"]))
+            p.drawText(QRectF(0, y - 8, left - 8, 16), Qt.AlignRight | Qt.AlignVCenter,
+                       fmt_size(top * (4 - i) / 4) + "/s")
+            p.setPen(QPen(QColor(C["border_soft"]), 1))
+        # x labels
+        p.setPen(QColor(C["secondary"]))
+        mins = self.span // 60
+        p.drawText(QRectF(left, bottom + 4, 80, 16), Qt.AlignLeft, f"-{mins} min")
+        p.drawText(QRectF(right - 80, bottom + 4, 80, 16), Qt.AlignRight, "0")
+
+        def series(vals, color_key):
+            if len(vals) < 2:
+                return
+            step = w / (self.span - 1)
+            x0 = right - step * (len(vals) - 1)
+            pts = [QPointF(x0 + i * step, bottom - h * v / top) for i, v in enumerate(vals)]
+            area = QPainterPath(QPointF(pts[0].x(), bottom))
+            for pt in pts:
+                area.lineTo(pt)
+            area.lineTo(QPointF(pts[-1].x(), bottom))
+            fill = QColor(C[color_key]); fill.setAlpha(40)
+            p.fillPath(area, fill)
+            line = QPainterPath(pts[0])
+            for pt in pts[1:]:
+                line.lineTo(pt)
+            p.setPen(QPen(QColor(C[color_key]), 1.6))
+            p.drawPath(line)
+
+        series(down, "primary")
+        series(up, "success")
+
+        # legend with current values
+        x = left
+        for key, vals, label in (("primary", down, t("kpi_down")), ("success", up, t("kpi_up"))):
+            p.setPen(Qt.NoPen); p.setBrush(QColor(C[key]))
+            p.drawEllipse(QPointF(x + 5, 14), 4, 4)
+            txt = f"{label}  {fmt_size(vals[-1] if vals else 0)}/s"
+            p.setPen(QColor(C["body"]))
+            p.drawText(QPointF(x + 14, 18), txt)
+            x += 14 + fm.horizontalAdvance(txt) + 24
+        p.end()
+
+
+class PieceBar(QWidget):
+    """Which pieces are already here — one thin rounded bar."""
+    def __init__(self):
+        super().__init__()
+        self.pieces: list[bool] = []
+        self.done = False
+        self.setFixedHeight(14)
+
+    def set_pieces(self, pieces: list[bool], done: bool):
+        self.pieces, self.done = pieces, done
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(0, 2, self.width(), self.height() - 4)
+        clip = QPainterPath(); clip.addRoundedRect(r, 5, 5)
+        p.setClipPath(clip)
+        p.fillRect(r, QColor(C["secondary_bg"]))
+        n = len(self.pieces)
+        if n:
+            base = QColor(C["success" if self.done else "primary"])
+            cols = max(1, int(r.width()))
+            per = n / cols
+            for x in range(cols):
+                a, b = int(x * per), max(int((x + 1) * per), int(x * per) + 1)
+                chunk = self.pieces[a:b]
+                frac = sum(chunk) / len(chunk) if chunk else 0
+                if frac:
+                    c = QColor(base); c.setAlphaF(0.25 + 0.75 * frac)
+                    p.fillRect(QRectF(r.left() + x, r.top(), 1.2, r.height()), c)
+        p.end()
+
+
 # ============================================================
 #  Dialogs
 # ============================================================
@@ -336,9 +446,17 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(t("settings"))
         self.setMinimumWidth(560)
         self.cfg = dict(cfg)
-        form = QFormLayout(self)
-        form.setContentsMargins(20, 12, 20, 16)
+        from PySide6.QtWidgets import QScrollArea
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 14)
+        content = QWidget(); content.setObjectName("page")
+        form = QFormLayout(content)
+        form.setContentsMargins(20, 12, 20, 8)
         form.setVerticalSpacing(8)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+        self.resize(620, min(820, int(QGuiApplication.primaryScreen().availableGeometry().height() * 0.85)))
 
         def spin(val, lo, hi):
             s = QSpinBox()
@@ -378,10 +496,35 @@ class SettingsDialog(QDialog):
         form.addRow(t("set_ul_limit"), self.ul)
         form.addRow(t("set_active_dl"), self.act_dl)
         form.addRow(t("set_active_seed"), self.act_seed)
+        # ── seeding
         self.dht  = QCheckBox(t("set_dht"));  self.dht.setChecked(cfg["dht"])
         self.upnp = QCheckBox(t("set_upnp")); self.upnp.setChecked(cfg["upnp"])
         form.addRow(self.dht)
         form.addRow(self.upnp)
+
+        form.addRow(_section(t("set_grp_seed")))
+        self.stop_ratio = QDoubleSpinBox(); self.stop_ratio.setRange(0, 1000); self.stop_ratio.setSingleStep(0.1)
+        self.stop_ratio.setValue(float(cfg.get("stop_ratio", 0)))
+        self.stop_hours = spin(cfg.get("stop_hours", 0), 0, 100_000)
+        form.addRow(t("pr_ratio"), self.stop_ratio)
+        form.addRow(t("pr_hours"), self.stop_hours)
+        hint = QLabel(t("pr_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
+        form.addRow(hint)
+
+        form.addRow(_section(t("set_grp_sched")))
+        self.sch_on = QCheckBox(t("sch_enable")); self.sch_on.setChecked(cfg.get("sched_enabled", False))
+        form.addRow(self.sch_on)
+        self.sch_from = QTimeEdit(QTime.fromString(cfg.get("sched_from", "08:00"), "HH:mm"))
+        self.sch_to = QTimeEdit(QTime.fromString(cfg.get("sched_to", "23:00"), "HH:mm"))
+        for te in (self.sch_from, self.sch_to):
+            te.setDisplayFormat("HH:mm")
+        trow = QHBoxLayout()
+        trow.addWidget(self.sch_from); trow.addWidget(QLabel(t("sch_to"))); trow.addWidget(self.sch_to); trow.addStretch()
+        form.addRow(t("sch_from"), trow)
+        self.sch_dl = spin(cfg.get("sched_dl", 0), 0, 10_000_000)
+        self.sch_ul = spin(cfg.get("sched_ul", 0), 0, 10_000_000)
+        form.addRow(t("sch_dl"), self.sch_dl)
+        form.addRow(t("sch_ul"), self.sch_ul)
 
         # ── windows
         self.autostart = None
@@ -403,7 +546,8 @@ class SettingsDialog(QDialog):
         bb.button(QDialogButtonBox.Ok).setObjectName("primary")
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        form.addRow(bb)
+        bb.setContentsMargins(20, 0, 20, 0)
+        outer.addWidget(bb)
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, t("choose_folder"), self.path.text())
@@ -431,6 +575,11 @@ class SettingsDialog(QDialog):
                  lsd=self.dht.isChecked(), upnp=self.upnp.isChecked(),
                  minimize_to_tray=self.tray.isChecked(),
                  show_add_dialog=self.show_add.isChecked(),
+                 stop_ratio=self.stop_ratio.value(), stop_hours=self.stop_hours.value(),
+                 sched_enabled=self.sch_on.isChecked(),
+                 sched_from=self.sch_from.time().toString("HH:mm"),
+                 sched_to=self.sch_to.time().toString("HH:mm"),
+                 sched_dl=self.sch_dl.value(), sched_ul=self.sch_ul.value(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
@@ -607,6 +756,58 @@ class AddTorrentDialog(QDialog):
         return prios
 
 
+class PropertiesDialog(QDialog):
+    def __init__(self, name: str, props: dict, parent=None):
+        super().__init__(parent)
+        _theme_title_bar(self)
+        self.setWindowTitle(t("pr_title"))
+        self.setMinimumWidth(520)
+        form = QFormLayout(self)
+        form.setContentsMargins(20, 12, 20, 16)
+        head = _section(name); head.setWordWrap(True)
+        form.addRow(head)
+
+        form.addRow(_section(t("pr_speed")))
+        self.dl = QSpinBox(); self.dl.setRange(0, 10_000_000); self.dl.setValue(props["dl_limit"])
+        self.ul = QSpinBox(); self.ul.setRange(0, 10_000_000); self.ul.setValue(props["ul_limit"])
+        form.addRow(t("pr_dl"), self.dl)
+        form.addRow(t("pr_ul"), self.ul)
+        self.sup = QCheckBox(t("pr_super")); self.sup.setChecked(props["super_seed"])
+        form.addRow(self.sup)
+
+        form.addRow(_section(t("pr_stop")))
+        self.mode = QComboBox()
+        for k in ("pr_mode_global", "pr_mode_custom", "pr_mode_never"):
+            self.mode.addItem(t(k))
+        self.mode.setCurrentIndex(("global", "custom", "never").index(props["stop_mode"]))
+        form.addRow(t("pr_mode"), self.mode)
+        self.ratio = QDoubleSpinBox(); self.ratio.setRange(0, 1000); self.ratio.setSingleStep(0.1)
+        self.ratio.setDecimals(2); self.ratio.setValue(props["stop_ratio"])
+        self.hours = QSpinBox(); self.hours.setRange(0, 100_000); self.hours.setValue(props["stop_hours"])
+        form.addRow(t("pr_ratio"), self.ratio)
+        form.addRow(t("pr_hours"), self.hours)
+        hint = QLabel(t("pr_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
+        form.addRow(hint)
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self._mode_changed()
+
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setObjectName("primary")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    def _mode_changed(self):
+        custom = self.mode.currentIndex() == 1
+        self.ratio.setEnabled(custom)
+        self.hours.setEnabled(custom)
+
+    def result_props(self) -> dict:
+        return {"dl_limit": self.dl.value(), "ul_limit": self.ul.value(), "super_seed": self.sup.isChecked(),
+                "stop_mode": ("global", "custom", "never")[self.mode.currentIndex()],
+                "stop_ratio": self.ratio.value(), "stop_hours": self.hours.value()}
+
+
 class HashThread(QThread):
     done = Signal(str, str)   # out_path, error
 
@@ -706,6 +907,7 @@ class MainWindow(QMainWindow):
         self._quitting = False
         self._themed: list[tuple] = []        # (setter, icon name, colour key) for re-theming
         self._session_up0 = engine.ses.status().total_payload_upload
+        self._sched_state: bool | None = None   # None = not applied yet
 
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
@@ -927,9 +1129,13 @@ class MainWindow(QMainWindow):
             grid.addWidget(lab, r, c)
             grid.addWidget(val, r, c + 1)
             self.g[k] = val
+        plab = QLabel(t("gen_pieces")); plab.setObjectName("rowLbl")
+        self.piecebar = PieceBar()
+        grid.addWidget(plab, 4, 0)
+        grid.addWidget(self.piecebar, 4, 1, 1, 3)
         grid.setColumnStretch(1, 2)
         grid.setColumnStretch(3, 2)
-        grid.setRowStretch(4, 1)
+        grid.setRowStretch(5, 1)
         self.tabs.addTab(gen, t("tab_general"))
 
         self.files_tbl = self._mk_table(["file_name", "col_size", "col_progress", "file_prio"], stretch=0)
@@ -944,10 +1150,27 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.peers_tbl, t("tab_peers"))
         self.tr_tbl = self._mk_table(["tr_url", "tr_tier", "tr_msg"], stretch=0)
         self.tabs.addTab(self.tr_tbl, t("tab_trackers"))
+
+        speed = QWidget()
+        sl = QVBoxLayout(speed)
+        sl.setContentsMargins(12, 8, 12, 8)
+        top = QHBoxLayout()
+        top.addStretch()
+        self.range_combo = QComboBox()
+        for m in (5, 30, 60):
+            self.range_combo.addItem(t("gr_range", m), m * 60)
+        self.range_combo.currentIndexChanged.connect(
+            lambda _: (setattr(self.graph, "span", self.range_combo.currentData()), self.graph.update()))
+        top.addWidget(self.range_combo)
+        sl.addLayout(top)
+        self.graph = SpeedGraph()
+        sl.addWidget(self.graph, 1)
+        self.tabs.addTab(speed, t("tab_speed"))
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.tabs.addTab(self.log, t("tab_log"))
-        for i, name in enumerate(("fa6s.circle-info", "fa6s.folder-tree", "fa6s.users", "fa6s.server", "fa6s.list")):
+        for i, name in enumerate(("fa6s.circle-info", "fa6s.folder-tree", "fa6s.users", "fa6s.server",
+                                  "fa6s.chart-area", "fa6s.list")):
             self._themed_icon(lambda ic, i=i: self.tabs.setTabIcon(i, ic), name)
         self.tabs.currentChanged.connect(lambda _: self.refresh_details())
         lay.addWidget(self.tabs)
@@ -1110,9 +1333,22 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.rotate"), t("recheck"), lambda: self._each(self.engine.recheck))
         m.addAction(icon("fa6s.bullhorn"), t("reannounce"), lambda: self._each(self.engine.reannounce))
         m.addAction(icon("fa6s.link"), t("copy_magnet"), self.copy_magnet)
+        m.addAction(icon("fa6s.sliders"), t("properties"), self.properties_dialog)
         m.addSeparator()
         m.addAction(icon("fa6s.trash-can", "danger"), t("remove"), self.remove_selected)
         m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def properties_dialog(self):
+        keys = self.selected_keys()
+        if not keys:
+            return
+        key = keys[0]
+        row = next((r for r in self.model.rows if r.key == key), None)
+        d = PropertiesDialog(row.name if row else key, self.engine.props(key), self)
+        if d.exec():
+            p = d.result_props()
+            for k in keys:                       # same settings for every selected torrent
+                self.engine.set_props(k, p)
 
     def settings_dialog(self):
         d = SettingsDialog(self.cfg, self)
@@ -1121,6 +1357,7 @@ class MainWindow(QMainWindow):
             self.cfg.update(d.result_cfg())
             config.save(self.cfg)
             self.engine.apply_settings(self.cfg)
+            self._sched_state = None             # re-apply schedule limits on next tick
             if self.cfg.get("theme") != old_theme:
                 theme.apply(QApplication.instance(), self.cfg["theme"])
                 self.retheme()
@@ -1159,8 +1396,17 @@ class MainWindow(QMainWindow):
             if self.tray.isVisible():
                 self.tray.showMessage(APP_TITLE, t("finished_note", name), app_icon(), 5000)
 
+        while self.engine.stopped_names:
+            name = self.engine.stopped_names.pop(0)
+            self.log_line(t("stopped_note", name))
+            if self.tray.isVisible():
+                self.tray.showMessage(APP_TITLE, t("stopped_note", name), app_icon(), 5000)
+
+        sched = self.apply_schedule()
+
         st = self.engine.ses.status()
         down, up = st.payload_download_rate, st.payload_upload_rate
+        self.graph.push(down, up)
         active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking"))
         self.k_down.set(fmt_size(down) + "/s", t("kpi_down"))
         self.k_up.set(fmt_size(up) + "/s", t("kpi_up"))
@@ -1169,8 +1415,10 @@ class MainWindow(QMainWindow):
 
         dht = t("meta_dht", st.dht_nodes) if self.cfg.get("dht") else t("meta_dht_off")
         dot = f'<span style="color:{C["border"]}">&nbsp;•&nbsp;</span>'
-        self.meta.setText(dot.join([t("subtitle"), t("meta_version", VERSION),
-                                    t("meta_port", self.engine.ses.listen_port()), dht]))
+        parts = [t("subtitle"), t("meta_version", VERSION), t("meta_port", self.engine.ses.listen_port()), dht]
+        if sched:
+            parts.append(f'<span style="color:{C["warning_text"]}">&#9200; {t("meta_sched")}</span>')
+        self.meta.setText(dot.join(parts))
         self.tray.setToolTip(f"{APP_TITLE}\n↓ {fmt_size(down)}/s  ↑ {fmt_size(up)}/s")
         self.refresh_details()
 
@@ -1183,6 +1431,7 @@ class MainWindow(QMainWindow):
             self.peers_tbl.setRowCount(0)
             self.tr_tbl.setRowCount(0)
             self.files_tbl.setRowCount(0)
+            self.piecebar.set_pieces([], False)
             return
         trs = self.engine.trackers(row.key)
         self.g["gen_path"].setText(row.save_path)
@@ -1195,7 +1444,9 @@ class MainWindow(QMainWindow):
         self.g["gen_error"].setStyleSheet(f"color:{C['danger']};" if row.error else "")
 
         tab = self.tabs.currentIndex()
-        if tab == 1:
+        if tab == 0:
+            self.piecebar.set_pieces(self.engine.pieces(row.key), row.progress >= 1.0)
+        elif tab == 1:
             self.refresh_files(row.key)
         elif tab == 2:
             peers = self.engine.peers(row.key)
@@ -1209,6 +1460,25 @@ class MainWindow(QMainWindow):
             for i, tr in enumerate(trs):
                 for j, v in enumerate((tr["url"], str(tr["tier"]), tr["message"])):
                     self.tr_tbl.setItem(i, j, QTableWidgetItem(v))
+
+    # ── speed schedule ─────────────────────────────────────────
+    def apply_schedule(self) -> bool:
+        """Switch between normal and scheduled global limits; returns True inside the window."""
+        cfg = self.cfg
+        active = False
+        if cfg.get("sched_enabled"):
+            now = datetime.now().strftime("%H:%M")
+            a, b = cfg.get("sched_from", "08:00"), cfg.get("sched_to", "23:00")
+            active = (a <= now < b) if a <= b else (now >= a or now < b)   # window may cross midnight
+        if active != self._sched_state:
+            if active:
+                self.engine.set_global_limits(cfg.get("sched_dl", 0), cfg.get("sched_ul", 0))
+            else:
+                self.engine.set_global_limits(cfg.get("dl_limit", 0), cfg.get("ul_limit", 0))
+            if self._sched_state is not None or active:
+                self.log_line(t("sch_on" if active else "sch_off"))
+            self._sched_state = active
+        return active
 
     # ── files tab ──────────────────────────────────────────────
     PRIO_TEXT = {PRIO_SKIP: "prio_skip", PRIO_NORMAL: "prio_normal", PRIO_HIGH: "prio_high"}

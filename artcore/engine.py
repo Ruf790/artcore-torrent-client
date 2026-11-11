@@ -5,6 +5,7 @@ restart, and exposes a small API the UI calls from its timer.
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 
@@ -69,7 +70,15 @@ class Engine:
         self.handles: dict[str, lt.torrent_handle] = {}
         self.messages: list[str] = []          # log lines for the UI
         self.finished_names: list[str] = []    # for tray notifications
+        self.stopped_names: list[str] = []     # paused by a stop-seeding rule
         self._hosts: dict[str, str] = {}
+        # per-torrent options libtorrent doesn't keep in resume data (stop-seeding rules)
+        self.opts_path = os.path.join(data_dir, "torrent_opts.json")
+        try:
+            with open(self.opts_path, encoding="utf-8") as f:
+                self.opts: dict[str, dict] = json.load(f)
+        except (FileNotFoundError, ValueError):
+            self.opts = {}
 
         self.ses = lt.session(self._settings())
         self._load_state()
@@ -176,6 +185,8 @@ class Engine:
         if h is None:
             return
         self.ses.remove_torrent(h, lt.options_t.delete_files if delete_files else 0)
+        if self.opts.pop(key, None) is not None:
+            self._save_opts()
         try:
             os.remove(self._resume_path(key))
         except FileNotFoundError:
@@ -220,6 +231,7 @@ class Engine:
             elif isinstance(a, (lt.tracker_error_alert, lt.torrent_error_alert,
                                 lt.file_error_alert, lt.fastresume_rejected_alert)):
                 self.messages.append(a.message())
+        self._apply_stop_rules()
 
     def rows(self) -> list[TorrentRow]:
         out = []
@@ -248,7 +260,7 @@ class Engine:
                 state=state, down_rate=s.download_payload_rate, up_rate=s.upload_payload_rate,
                 seeds=s.num_seeds, peers=s.num_peers - s.num_seeds,
                 uploaded=ul, downloaded=dl,
-                ratio=(ul / dl) if dl > 0 else (float("inf") if ul > 0 else 0.0),
+                ratio=_ratio(ul, dl, s.total_wanted_done),
                 eta=eta, save_path=s.save_path,
                 error=s.errc.message() if s.errc.value() else "",
                 tracker=s.current_tracker,
@@ -268,6 +280,83 @@ class Engine:
         if host or h.status().has_metadata:   # magnet without metadata may get trackers later
             self._hosts[key] = host or "DHT"
         return host or "DHT"
+
+    # ── per-torrent properties ─────────────────────────────────
+    def _save_opts(self) -> None:
+        tmp = self.opts_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.opts, f, indent=1)
+        os.replace(tmp, self.opts_path)
+
+    def props(self, key: str) -> dict:
+        h = self.handles[key]
+        o = self.opts.get(key, {})
+        return {
+            "dl_limit": max(0, h.download_limit()) // 1024,     # KiB/s, 0 = unlimited
+            "ul_limit": max(0, h.upload_limit()) // 1024,
+            "super_seed": bool(h.flags() & lt.torrent_flags.super_seeding),
+            "stop_mode": o.get("stop_mode", "global"),          # global | custom | never
+            "stop_ratio": float(o.get("stop_ratio", 0.0)),       # 0 = off
+            "stop_hours": int(o.get("stop_hours", 0)),           # 0 = off
+        }
+
+    def set_props(self, key: str, p: dict) -> None:
+        h = self.handles.get(key)
+        if not h:
+            return
+        h.set_download_limit(int(p["dl_limit"]) * 1024 or -1)
+        h.set_upload_limit(int(p["ul_limit"]) * 1024 or -1)
+        if p["super_seed"]:
+            h.set_flags(lt.torrent_flags.super_seeding)
+        else:
+            h.unset_flags(lt.torrent_flags.super_seeding)
+        # new rule → may stop again even if it already fired once
+        self.opts[key] = {"stop_mode": p["stop_mode"], "stop_ratio": float(p["stop_ratio"]),
+                          "stop_hours": int(p["stop_hours"]), "rule_done": False}
+        self._save_opts()
+        h.save_resume_data(lt.torrent_handle.save_info_dict)
+
+    def _stop_limits(self, key: str) -> tuple[float, int]:
+        o = self.opts.get(key, {})
+        mode = o.get("stop_mode", "global")
+        if mode == "never":
+            return 0.0, 0
+        if mode == "custom":
+            return float(o.get("stop_ratio", 0)), int(o.get("stop_hours", 0))
+        return float(self.cfg.get("stop_ratio", 0)), int(self.cfg.get("stop_hours", 0))
+
+    def _apply_stop_rules(self) -> None:
+        """Pause seeding torrents that reached their ratio / seeding-time limit.
+        Fires once per torrent: after a manual Start it keeps seeding."""
+        for key, h in self.handles.items():
+            if not h.is_valid() or self.opts.get(key, {}).get("rule_done"):
+                continue
+            ratio_lim, hours_lim = self._stop_limits(key)
+            if not ratio_lim and not hours_lim:
+                continue
+            s = h.status()
+            if s.state not in (lt.torrent_status.seeding, lt.torrent_status.finished) \
+                    or s.flags & lt.torrent_flags.paused:
+                continue
+            ratio = _ratio(s.all_time_upload, s.all_time_download, s.total_wanted_done)
+            hours = s.seeding_duration.total_seconds() / 3600
+            hit = (ratio_lim and ratio >= ratio_lim) or (hours_lim and hours >= hours_lim)
+            if hit:
+                self.pause(key)
+                self.opts.setdefault(key, {})["rule_done"] = True
+                self._save_opts()
+                self.stopped_names.append(s.name)
+
+    def pieces(self, key: str) -> list[bool]:
+        h = self.handles.get(key)
+        if not h:
+            return []
+        return list(h.status(lt.torrent_handle.query_pieces).pieces)
+
+    def set_global_limits(self, dl_kib: int, ul_kib: int) -> None:
+        """Used by the speed schedule; 0 = unlimited."""
+        self.ses.apply_settings({"download_rate_limit": int(dl_kib) * 1024,
+                                 "upload_rate_limit": int(ul_kib) * 1024})
 
     # ── files ──────────────────────────────────────────────────
     def files(self, key: str) -> list[dict]:
@@ -339,6 +428,15 @@ class Engine:
     def shutdown(self) -> None:
         self.ses.pause()
         self.save_all()
+
+
+def _ratio(uploaded: int, downloaded: int, done: int) -> float:
+    """Uploaded / max(downloaded, have): a torrent seeded from your own disk
+    (downloaded = 0) still gets a real ratio instead of infinity."""
+    base = max(downloaded, done)
+    if base > 0:
+        return uploaded / base
+    return float("inf") if uploaded > 0 else 0.0
 
 
 def _mask_passkey(url: str) -> str:

@@ -97,11 +97,31 @@ def apply(app: QApplication, mode: str) -> str:
     pal.setColor(QPalette.PlaceholderText, QColor(c["secondary"]))
     pal.setColor(QPalette.Link, QColor(c["primary_text"] if current_name == "dark" else c["primary"]))
     app.setPalette(pal)
-    app.setStyleSheet(build_qss(c))
+    app.setStyleSheet(build_qss(c, _arrow_images(c)))
     return current_name
 
 
-def build_qss(c: dict) -> str:
+def _arrow_images(c: dict) -> dict:
+    """Chevron PNGs for spin box buttons and combo boxes (QSS needs image files)."""
+    import tempfile
+    import qtawesome as qta
+    folder = os.path.join(tempfile.gettempdir(), "ArtCoreClient-ui")
+    os.makedirs(folder, exist_ok=True)
+    out = {}
+    for name, icon_name in (("up", "fa6s.chevron-up"), ("down", "fa6s.chevron-down")):
+        for state, color in (("", c["secondary"]), ("_off", c["border"])):
+            path = os.path.join(folder, f"{name}{state}_{current_name}.png")
+            qta.icon(icon_name, color=color).pixmap(20, 20).save(path)
+            out[name + state] = path.replace("\\", "/")
+    for name, icon_name in (("check", "fa6s.check"), ("minus", "fa6s.minus")):
+        path = os.path.join(folder, f"{name}.png")
+        qta.icon(icon_name, color="#ffffff").pixmap(20, 20).save(path)
+        out[name] = path.replace("\\", "/")
+    return out
+
+
+def build_qss(c: dict, img: dict | None = None) -> str:
+    img = img or {}
     return f"""
 * {{ font-family: "Segoe UI", "Noto Sans", Arial; font-size: 10pt; }}
 QMainWindow, QDialog, QWidget#page {{ background: {c['page_bg']}; color: {c['body']}; }}
@@ -149,18 +169,45 @@ QPushButton#pill:checked {{ background: {c['primary_subtle']}; color: {c['primar
 QFrame#vsep {{ background: {c['border']}; min-width: 1px; max-width: 1px; margin: 5px 3px; }}
 
 /* inputs */
-QLineEdit, QSpinBox, QComboBox {{
+QLineEdit, QSpinBox, QDoubleSpinBox, QTimeEdit, QComboBox {{
   background: {c['body_bg']}; color: {c['body']}; border: 1px solid {c['border']};
   border-radius: 8px; padding: 5px 9px; selection-background-color: {c['primary']};
 }}
 QLineEdit#search {{ border-radius: 15px; padding-left: 12px; min-width: 200px; }}
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {c['primary']}; }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QComboBox:focus {{ border-color: {c['primary']}; }}
+QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox::down-arrow {{ image: url("{img.get('down', '')}"); width: 10px; height: 10px; }}
+QComboBox::down-arrow:disabled {{ image: url("{img.get('down_off', '')}"); }}
+QAbstractSpinBox {{ padding-right: 26px; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+  subcontrol-origin: border; width: 22px; border: none; border-left: 1px solid {c['border']};
+  background: {c['tertiary_bg']}; margin-right: 1px;
+}}
+QAbstractSpinBox::up-button {{ subcontrol-position: top right; margin-top: 1px; border-top-right-radius: 7px; }}
+QAbstractSpinBox::down-button {{ subcontrol-position: bottom right; margin-bottom: 1px; border-bottom-right-radius: 7px; }}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{ background: {c['primary_subtle']}; }}
+QAbstractSpinBox::up-arrow {{ image: url("{img.get('up', '')}"); width: 8px; height: 8px; }}
+QAbstractSpinBox::down-arrow {{ image: url("{img.get('down', '')}"); width: 8px; height: 8px; }}
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::up-arrow:off {{ image: url("{img.get('up_off', '')}"); }}
+QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {{ image: url("{img.get('down_off', '')}"); }}
+QAbstractSpinBox:disabled {{ color: {c['secondary']}; background: {c['tertiary_bg']}; }}
 QComboBox QAbstractItemView {{
   background: {c['body_bg']}; color: {c['body']}; border: 1px solid {c['border']};
   selection-background-color: {c['primary_subtle']}; selection-color: {c['primary_text']};
 }}
 QCheckBox {{ color: {c['body']}; spacing: 8px; }}
+/* checkboxes like Bootstrap .form-check-input */
+QCheckBox::indicator, QTreeView::indicator {{
+  width: 15px; height: 15px; border: 1px solid {c['secondary']}; border-radius: 4px; background: {c['body_bg']};
+}}
+QCheckBox::indicator:hover, QTreeView::indicator:hover {{ border-color: {c['primary']}; }}
+QCheckBox::indicator:checked, QTreeView::indicator:checked {{
+  background: {c['primary']}; border-color: {c['primary']}; image: url("{img.get('check', '')}");
+}}
+QTreeView::indicator:indeterminate {{
+  background: {c['primary']}; border-color: {c['primary']}; image: url("{img.get('minus', '')}");
+}}
+QCheckBox::indicator:disabled {{ background: {c['tertiary_bg']}; border-color: {c['border']}; }}
 
 /* table */
 QTableView, QTableWidget {{
