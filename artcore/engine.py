@@ -56,6 +56,8 @@ class TorrentRow:
     tracker_host: str   # domain of the first tracker, "DHT" when there is none
     category: str = ""
     kind: str = "file"  # video | audio | … | folder | magnet — for the name icon
+    tags: tuple = ()
+    hnr: str = ""       # what is left of the tracker's seeding requirement, "" = done / no rule
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -98,8 +100,23 @@ class Engine:
         except (FileNotFoundError, ValueError):
             self.opts = {}
 
+        # bans: ip → reason; user's IP-filter ranges are kept so both can be combined
+        self.bans_path = os.path.join(data_dir, "bans.json")
+        try:
+            with open(self.bans_path, encoding="utf-8") as f:
+                self.bans: dict[str, str] = json.load(f)
+        except (FileNotFoundError, ValueError):
+            self.bans = {}
+        self._user_ranges: list[tuple[str, str]] = []
+        self._peer_seen: dict[tuple, tuple] = {}      # (key, ip) → (uploaded to it, its progress) at first sight
+        self._limited: set[str] = set()                # torrents whose limits come from a tracker rule
+        self._cross_check: set[str] = set()            # cross-seeded, waiting for the hash check
+        self.cross_results: list[tuple[str, str, float]] = []   # (name, key, progress) for the UI
+
         self.ses = lt.session(self._settings())
         self._load_state()
+        if self.bans:
+            self._apply_filter()
 
     # ── settings ───────────────────────────────────────────────
     def _settings(self) -> dict:
@@ -167,11 +184,176 @@ class Engine:
         return self.bind_ok
 
     def set_ip_filter(self, ranges: list[tuple[str, str]]) -> None:
-        f = lt.ip_filter()
-        for a, b in ranges:
-            f.add_rule(a, b, 1)
-        self.ses.set_ip_filter(f)
+        self._user_ranges = list(ranges)
         self.ip_filter_rules = len(ranges)
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        f = lt.ip_filter()
+        for a, b in self._user_ranges:
+            f.add_rule(a, b, 1)
+        for ip in self.bans:
+            try:
+                f.add_rule(ip, ip, 1)
+            except Exception:
+                pass
+        self.ses.set_ip_filter(f)      # libtorrent drops connected peers that became blocked
+
+    # ── bans ───────────────────────────────────────────────────
+    def ban(self, ip: str, reason: str) -> None:
+        if ip in self.bans:
+            return
+        self.bans[ip] = reason
+        self._save_bans()
+        self._apply_filter()
+        self._log("network", f"ban {ip}: {reason}")
+
+    def clear_bans(self) -> None:
+        self.bans.clear()
+        self._save_bans()
+        self._apply_filter()
+
+    def _save_bans(self) -> None:
+        tmp = self.bans_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.bans, f, indent=1)
+        os.replace(tmp, self.bans_path)
+
+    def _scan_peers(self) -> None:
+        """Ban leech-only clients by peer-id / name, and peers that keep taking data while their
+        reported progress doesn't move (fake progress: they never share what they got)."""
+        for key, h in self.handles.items():
+            if not h.is_valid():
+                continue
+            s = h.status()
+            if s.flags & lt.torrent_flags.paused or not s.has_metadata:
+                continue
+            size = max(s.total_wanted, 1)
+            for p in h.get_peer_info():
+                ip = p.ip[0]
+                if ip in self.bans:
+                    continue
+                client = p.client.decode("utf-8", "replace") if isinstance(p.client, bytes) else str(p.client)
+                pid = p.pid.to_bytes()[:8]
+                bad = _bad_client(client, pid)
+                if bad:
+                    self.ban(ip, f"{bad} ({client or pid[:8].decode('latin-1', 'replace')})")
+                    continue
+                seen = self._peer_seen.get((key, ip))
+                if seen is None:
+                    self._peer_seen[(key, ip)] = (p.total_upload, p.progress)
+                    continue
+                sent = p.total_upload - seen[0]
+                gained = (p.progress - seen[1]) * size
+                if sent > max(FAKE_MIN_BYTES, size * 0.05) and gained < sent * 0.1:
+                    self.ban(ip, f"fake progress: got {sent >> 20} MiB, progress +{max(gained, 0) / size:.1%} ({client})")
+        if len(self._peer_seen) > 20000:
+            self._peer_seen.clear()
+
+    # ── tracker rules: H&R + per-tracker speed ─────────────────
+    def tracker_rule(self, host: str) -> dict:
+        return self.cfg.get("tracker_rules", {}).get(host, {})
+
+    def hnr_left(self, key: str, h=None, s=None) -> str:
+        """Text like '12 ч / рейтинг 1.00' while the tracker's seeding requirement isn't met."""
+        h = h or self.handles.get(key)
+        if not h:
+            return ""
+        rule = self.tracker_rule(self._host(key, h))
+        need_h, need_r = float(rule.get("min_hours", 0) or 0), float(rule.get("min_ratio", 0) or 0)
+        if not need_h and not need_r:
+            return ""
+        s = s or h.status()
+        if not s.has_metadata:
+            return ""
+        hours = s.seeding_duration.total_seconds() / 3600
+        ratio = _ratio(s.all_time_upload, s.all_time_download, s.total_wanted_done)
+        if (need_h and hours >= need_h) or (need_r and ratio >= need_r):
+            return ""
+        from .i18n import t
+        parts = []
+        if need_h:
+            parts.append(t("hnr_hours", f"{need_h - hours:.1f}"))
+        if need_r:
+            parts.append(t("hnr_ratio", f"{need_r:.2f}"))
+        return t("hnr_or").join(parts)
+
+    def _apply_tracker_limits(self) -> None:
+        """A tracker's limit is shared equally by its running torrents (libtorrent has no
+        per-tracker limit). Torrents with their own limit (Properties) are left alone."""
+        groups: dict[str, list] = {}
+        for key, h in self.handles.items():
+            if not h.is_valid() or self.opts.get(key, {}).get("own_limits"):
+                continue
+            host = self._host(key, h)
+            r = self.tracker_rule(host)
+            if r.get("dl_limit") or r.get("ul_limit"):
+                if not (h.flags() & lt.torrent_flags.paused):
+                    groups.setdefault(host, []).append((key, h))
+            elif key in self._limited:
+                h.set_download_limit(-1)
+                h.set_upload_limit(-1)
+                self._limited.discard(key)
+        for host, items in groups.items():
+            r = self.tracker_rule(host)
+            n = len(items)
+            dl = int(r.get("dl_limit", 0)) * 1024 // n
+            ul = int(r.get("ul_limit", 0)) * 1024 // n
+            for key, h in items:
+                h.set_download_limit(dl or -1)
+                h.set_upload_limit(ul or -1)
+                self._limited.add(key)
+
+    # ── cross-seed ─────────────────────────────────────────────
+    def find_cross(self, ti) -> dict | None:
+        """Existing torrent whose files hold the same data (same sizes) as torrent_info `ti`:
+        {"key", "name", "save_path", "renamed": {index: path}}. Names may differ between trackers."""
+        fs = ti.files()
+        new = [(i, fs.file_path(i), fs.file_size(i)) for i in range(fs.num_files())
+               if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
+        if not new or sum(sz for _, _, sz in new) < 1 << 20:
+            return None
+        for key, h in self.handles.items():
+            if not h.is_valid():
+                continue
+            s = h.status()
+            if not s.has_metadata or s.total_wanted_done <= 0:
+                continue
+            efs = h.torrent_file().files()
+            old = [(efs.file_path(i), efs.file_size(i)) for i in range(efs.num_files())
+                   if not efs.file_flags(i) & lt.file_storage.flag_pad_file]
+            renamed = _match_files(new, old)
+            if renamed is not None:
+                return {"key": key, "name": s.name, "save_path": s.save_path, "renamed": renamed}
+        return None
+
+    def add_cross(self, path: str, match: dict, paused: bool = False) -> str:
+        """Add .torrent onto another torrent's data. upload_mode: nothing is downloaded (so
+        mismatching pieces can't overwrite the other torrent's files) until the check passes."""
+        atp = lt.add_torrent_params()
+        atp.ti = lt.torrent_info(path)
+        if match["renamed"]:
+            atp.renamed_files = match["renamed"]
+        atp.flags |= lt.torrent_flags.upload_mode
+        key = self._add(atp, match["save_path"], paused)
+        self._cross_check.add(key)
+        return key
+
+    def _check_cross(self) -> None:
+        for key in list(self._cross_check):
+            h = self.handles.get(key)
+            if not h or not h.is_valid():
+                self._cross_check.discard(key)
+                continue
+            s = h.status()
+            if s.state in (lt.torrent_status.checking_files, lt.torrent_status.checking_resume_data):
+                continue
+            self._cross_check.discard(key)
+            if s.progress >= 1.0:
+                h.unset_flags(lt.torrent_flags.upload_mode)
+            self.cross_results.append((s.name, key, s.progress))
+            self._log("torrent" if s.progress >= 1.0 else "error",
+                      f"cross-seed {s.name}: {s.progress:.1%}")
 
     # ── persistence ────────────────────────────────────────────
     def _resume_path(self, key: str) -> str:
@@ -253,6 +435,8 @@ class Engine:
 
     def remove(self, key: str, delete_files: bool = False) -> None:
         self.tr_status.pop(key, None)
+        self._limited.discard(key)
+        self._cross_check.discard(key)
         h = self.handles.pop(key, None)
         if h is None:
             return
@@ -335,6 +519,16 @@ class Engine:
                     self.portmap[name] = "error:" + a.message()
                     self._log("error", a.message())
         self._apply_stop_rules()
+        self._polls = getattr(self, "_polls", 0) + 1
+        if self._cross_check:
+            self._check_cross()
+        if self._polls % 3 == 0:
+            self._apply_tracker_limits()
+        if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
+            try:
+                self._scan_peers()
+            except Exception as e:      # never let peer bookkeeping break the alert loop
+                self._log("error", f"peer scan: {e}")
         if time.time() - self._stats_flushed > 300:     # survive a crash: flush totals every 5 min
             self._flush_stats()
 
@@ -427,6 +621,8 @@ class Engine:
                 tracker_host=self._host(key, h),
                 category=self.opts.get(key, {}).get("category", ""),
                 kind=self._kind(key, h, s),
+                tags=tuple(self.opts.get(key, {}).get("tags", ())),
+                hnr=self.hnr_left(key, h, s) if s.progress >= 1.0 else "",
             ))
         return out
 
@@ -467,8 +663,8 @@ class Engine:
         h = self.handles[key]
         o = self.opts.get(key, {})
         return {
-            "dl_limit": max(0, h.download_limit()) // 1024,     # KiB/s, 0 = unlimited
-            "ul_limit": max(0, h.upload_limit()) // 1024,
+            "dl_limit": int(o.get("dl_limit", 0)) if o.get("own_limits") else 0,   # KiB/s, 0 = unlimited
+            "ul_limit": int(o.get("ul_limit", 0)) if o.get("own_limits") else 0,
             "super_seed": bool(h.flags() & lt.torrent_flags.super_seeding),
             "stop_mode": o.get("stop_mode", "global"),          # global | custom | never
             "stop_ratio": float(o.get("stop_ratio", 0.0)),       # 0 = off
@@ -485,9 +681,12 @@ class Engine:
             h.set_flags(lt.torrent_flags.super_seeding)
         else:
             h.unset_flags(lt.torrent_flags.super_seeding)
-        # new rule → may stop again even if it already fired once
-        self.opts[key] = {"stop_mode": p["stop_mode"], "stop_ratio": float(p["stop_ratio"]),
-                          "stop_hours": int(p["stop_hours"]), "rule_done": False}
+        # new rule → may stop again even if it already fired once; category / tags are kept
+        own = bool(int(p["dl_limit"]) or int(p["ul_limit"]))
+        self._limited.discard(key)
+        self.opts.setdefault(key, {}).update(
+            stop_mode=p["stop_mode"], stop_ratio=float(p["stop_ratio"]), stop_hours=int(p["stop_hours"]),
+            rule_done=False, own_limits=own, dl_limit=int(p["dl_limit"]), ul_limit=int(p["ul_limit"]))
         self._save_opts()
         h.save_resume_data(lt.torrent_handle.save_info_dict)
 
@@ -516,7 +715,7 @@ class Engine:
             ratio = _ratio(s.all_time_upload, s.all_time_download, s.total_wanted_done)
             hours = s.seeding_duration.total_seconds() / 3600
             hit = (ratio_lim and ratio >= ratio_lim) or (hours_lim and hours >= hours_lim)
-            if hit:
+            if hit and not self.hnr_left(key, h, s):    # never stop before the tracker's requirement
                 self.pause(key)
                 self.opts.setdefault(key, {})["rule_done"] = True
                 self._save_opts()
@@ -543,6 +742,21 @@ class Engine:
         else:
             o.pop("category", None)
         self._save_opts()
+
+    def set_tags(self, key: str, tags: list[str]) -> None:
+        if key not in self.handles:
+            return
+        o = self.opts.setdefault(key, {})
+        tags = sorted({x.strip() for x in tags if x.strip()}, key=str.lower)
+        if tags:
+            o["tags"] = tags
+        else:
+            o.pop("tags", None)
+        self._save_opts()
+
+    def all_tags(self) -> list[str]:
+        found = {x for k, o in self.opts.items() if k in self.handles for x in o.get("tags", ())}
+        return sorted(found | set(self.cfg.get("tags", [])), key=str.lower)
 
     def category_path(self, name: str) -> str:
         for c in self.cfg.get("categories", []):
@@ -615,7 +829,11 @@ class Engine:
                 if time.time() - os.path.getmtime(path) < 2:     # still being written by the browser
                     continue
                 cat = self.cfg.get("watch_category", "")
-                key = self.add_torrent_file(path, save_path=self.category_path(cat) or None)
+                match = self.find_cross(lt.torrent_info(path)) if self.cfg.get("cross_seed", True) else None
+                if match:
+                    key = self.add_cross(path, match)
+                else:
+                    key = self.add_torrent_file(path, save_path=self.category_path(cat) or None)
                 if cat:
                     self.set_category(key, cat)
                 added.append(fn)
@@ -733,6 +951,50 @@ class Engine:
             self._flush_stats()
         except OSError:
             pass
+
+
+# Leech-only clients (take, never give back) — matched by peer-id prefix or client name
+BAD_PEER_IDS = (b"-XL", b"-SD", b"-XF", b"-QD", b"-BN", b"-DL", b"-HP", b"-TT")
+BAD_NAMES = ("xunlei", "thunder", "qqdownload", "baidu", "dandelion", "offline download", "torrentstorm")
+FAKE_MIN_BYTES = 64 << 20      # judge fake progress only after sending a peer this much
+
+
+def _bad_client(client: str, pid: bytes) -> str:
+    low = client.lower()
+    for n in BAD_NAMES:
+        if n in low:
+            return "leech client"
+    if pid.startswith(BAD_PEER_IDS):
+        return "leech client"
+    return ""
+
+
+def _match_files(new: list[tuple[int, str, int]], old: list[tuple[str, int]]) -> dict | None:
+    """Map every file of the new torrent to an existing file of the same size.
+    Same relative path wins, then same file name, then the only file of that size.
+    Returns {new index: existing path} for files whose path differs, None if anything is missing."""
+    import posixpath
+    def norm(p):
+        return p.replace("\\", "/")
+    by_size: dict[int, list[str]] = {}
+    for path, size in old:
+        by_size.setdefault(size, []).append(norm(path))
+    used: set[str] = set()
+    renamed: dict[int, str] = {}
+    for idx, path, size in new:
+        cands = [c for c in by_size.get(size, []) if c not in used]
+        if not cands:
+            return None
+        path = norm(path)
+        pick = next((c for c in cands if c == path), None) \
+            or next((c for c in cands if posixpath.basename(c).lower() == posixpath.basename(path).lower()), None) \
+            or (cands[0] if len(cands) == 1 else None)
+        if pick is None:
+            return None
+        used.add(pick)
+        if pick != path:
+            renamed[idx] = pick
+    return renamed
 
 
 def _alert_id(a) -> tuple:

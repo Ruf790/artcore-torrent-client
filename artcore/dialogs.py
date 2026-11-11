@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QPlainTextEdit,
-                               QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .i18n import t
 
@@ -147,6 +148,112 @@ class CategoriesEditor(QWidget):
             if name:
                 out.append({"name": name, "path": (self.tbl.item(r, 1).text() if self.tbl.item(r, 1) else "").strip()})
         return out
+
+
+class TrackerRulesEditor(QWidget):
+    """Per-tracker rules for Settings: H&R (min seeding hours / ratio) and shared speed limits."""
+    COLS = ("tr_host", "tr_min_hours", "tr_min_ratio", "tr_dl", "tr_ul")
+
+    def __init__(self, rules: dict, hosts: list[str], parent=None):
+        super().__init__(parent)
+        self.hosts = [h for h in hosts if h and h != "DHT"]
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.tbl = QTableWidget(0, len(self.COLS))
+        self.tbl.setHorizontalHeaderLabels([t(k) for k in self.COLS])
+        self.tbl.verticalHeader().hide()
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        hh = self.tbl.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in range(1, len(self.COLS)):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        self.tbl.setMinimumHeight(130)
+        for host, r in sorted(rules.items()):
+            self._add_row(host, r)
+        lay.addWidget(self.tbl)
+        row = QHBoxLayout()
+        add = QPushButton(t("cat_add")); add.clicked.connect(self._new)
+        rm = QPushButton(t("cat_remove")); rm.setObjectName("danger"); rm.clicked.connect(self._remove)
+        row.addWidget(add); row.addStretch(); row.addWidget(rm)
+        lay.addLayout(row)
+
+    def _add_row(self, host: str, r: dict):
+        from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox
+        i = self.tbl.rowCount()
+        self.tbl.insertRow(i)
+        self.tbl.setItem(i, 0, QTableWidgetItem(host))
+        hours = QSpinBox(); hours.setRange(0, 10000); hours.setValue(int(r.get("min_hours", 0)))
+        hours.setSpecialValueText("—")
+        ratio = QDoubleSpinBox(); ratio.setRange(0, 100); ratio.setSingleStep(0.1)
+        ratio.setValue(float(r.get("min_ratio", 0))); ratio.setSpecialValueText("—")
+        dl = QSpinBox(); dl.setRange(0, 10_000_000); dl.setValue(int(r.get("dl_limit", 0))); dl.setSpecialValueText("∞")
+        ul = QSpinBox(); ul.setRange(0, 10_000_000); ul.setValue(int(r.get("ul_limit", 0))); ul.setSpecialValueText("∞")
+        for c, w in enumerate((hours, ratio, dl, ul), start=1):
+            self.tbl.setCellWidget(i, c, w)
+
+    def _new(self):
+        have = {h for h in self.rules()}
+        choices = [h for h in self.hosts if h not in have]
+        host, ok = QInputDialog.getItem(self, t("set_grp_trackers"), t("tr_host_prompt"),
+                                        choices or [""], 0, True)
+        host = host.strip().lower().removeprefix("www.")
+        if ok and host and host not in have:
+            self._add_row(host, {})
+            self.tbl.selectRow(self.tbl.rowCount() - 1)
+
+    def _remove(self):
+        for r in sorted({i.row() for i in self.tbl.selectionModel().selectedRows()}, reverse=True):
+            self.tbl.removeRow(r)
+
+    def rules(self) -> dict:
+        out = {}
+        for r in range(self.tbl.rowCount()):
+            host = (self.tbl.item(r, 0).text() if self.tbl.item(r, 0) else "").strip().lower()
+            if not host:
+                continue
+            w = [self.tbl.cellWidget(r, c) for c in range(1, len(self.COLS))]
+            out[host] = {"min_hours": w[0].value(), "min_ratio": round(w[1].value(), 2),
+                         "dl_limit": w[2].value(), "ul_limit": w[3].value()}
+        return out
+
+
+class TagsDialog(QDialog):
+    """Check the tags of the selected torrents; new tags can be typed in."""
+    def __init__(self, all_tags: list[str], checked: set[str], partial: set[str], parent=None):
+        super().__init__(parent)
+        _ui()._theme_title_bar(self)
+        self.setWindowTitle(t("tags_title"))
+        self.setMinimumWidth(360)
+        lay = QVBoxLayout(self)
+        self.lst = QListWidget()
+        for tag in all_tags:
+            self._add(tag, Qt.Checked if tag in checked else Qt.PartiallyChecked if tag in partial else Qt.Unchecked)
+        lay.addWidget(self.lst, 1)
+        row = QHBoxLayout()
+        self.new = QLineEdit(); self.new.setPlaceholderText(t("tags_new"))
+        self.new.returnPressed.connect(self._add_new)
+        b = QPushButton(t("cat_add")); b.clicked.connect(self._add_new)
+        row.addWidget(self.new, 1); row.addWidget(b)
+        lay.addLayout(row)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setObjectName("primary")
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _add(self, tag: str, state):
+        it = QListWidgetItem(tag)
+        it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+        it.setCheckState(state)
+        self.lst.addItem(it)
+
+    def _add_new(self):
+        tag = self.new.text().strip()
+        if tag and not self.lst.findItems(tag, Qt.MatchFixedString):
+            self._add(tag, Qt.Checked)
+        self.new.clear()
+
+    def states(self) -> dict[str, Qt.CheckState]:
+        return {self.lst.item(i).text(): self.lst.item(i).checkState() for i in range(self.lst.count())}
 
 
 def folder_row(parent: QWidget, value: str) -> tuple[QHBoxLayout, QLineEdit]:

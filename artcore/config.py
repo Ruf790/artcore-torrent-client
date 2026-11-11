@@ -39,12 +39,32 @@ DEFAULTS = {
     "last_update_check": 0,
     "toasts":           True,
     "ui_state":         {},         # window geometry, column layout, splitter, tab (base64 Qt states)
+    "tracker_rules":    {},         # host → {min_hours, min_ratio, dl_limit, ul_limit}
+    "ban_bad_peers":    True,       # leech-only clients (Xunlei …) and fake-progress peers
+    "cross_seed":       True,       # reuse data of an existing torrent when the files match
+    "tags":             [],         # known tags (also those not used by any torrent yet)
 }
+
+
+PORTABLE_MARKER = "portable.ini"
+
+
+def portable_dir() -> str | None:
+    """Portable mode: a portable.ini next to ArtCoreClient.exe keeps everything in .\\Data."""
+    import sys
+    if not getattr(sys, "frozen", False):
+        return None
+    base = os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.join(base, "Data") if os.path.exists(os.path.join(base, PORTABLE_MARKER)) else None
+
+
+def is_portable() -> bool:
+    return portable_dir() is not None
 
 
 def data_dir() -> str:
     base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
-    path = os.path.join(base, "ArtCoreClient")
+    path = portable_dir() or os.path.join(base, "ArtCoreClient")
     os.makedirs(path, exist_ok=True)
     return path
 

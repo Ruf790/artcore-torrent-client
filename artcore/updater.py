@@ -86,4 +86,6 @@ def installer_cmdline(path: str) -> str:
 
 
 def can_self_update() -> bool:
-    return sys.platform == "win32" and getattr(sys, "frozen", False)
+    """The installer only updates the installed copy; a portable folder is updated by hand."""
+    from .config import is_portable
+    return sys.platform == "win32" and getattr(sys, "frozen", False) and not is_portable()

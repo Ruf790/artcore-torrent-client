@@ -145,6 +145,8 @@ jobs:
           Copy-Item LICENSE dist/ArtCoreClient/LICENSE.txt
           Copy-Item COPYING dist/ArtCoreClient/COPYING.txt
           Copy-Item THIRD-PARTY.md dist/ArtCoreClient/THIRD-PARTY.txt
+          # portable mode: settings and torrents live in .\Data next to the exe
+          Set-Content dist/ArtCoreClient/portable.ini "[ArtCore]`r`n; delete this file to use %APPDATA%\ArtCoreClient"
           Compress-Archive -Path dist/ArtCoreClient -DestinationPath installer/ArtCoreClient-portable.zip
 
       - uses: actions/upload-artifact@v4
