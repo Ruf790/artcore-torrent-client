@@ -346,7 +346,7 @@ class Engine:
             pass
         if not reason:
             reason = a.error.message() if a.error.value() else a.message()
-        self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = _mask_passkey(reason)
+        self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = reason
 
     def tracker_error(self, key: str) -> str:
         """Error text when every tracker that answered has failed; "" while any one works.
@@ -358,8 +358,8 @@ class Engine:
         return next(iter(st.values()))
 
     def _log(self, kind: str, text: str) -> None:
-        """kind: system | network | torrent | tracker | error. Passkeys are masked."""
-        self.messages.append((kind, _mask_passkey(text)))
+        """kind: system | network | torrent | tracker | error."""
+        self.messages.append((kind, text))
         del self.messages[:-2000]
 
     # ── statistics ─────────────────────────────────────────────
@@ -701,7 +701,7 @@ class Engine:
                      files=sum(1 for i in range(fs.num_files())
                                if not fs.file_flags(i) & lt.file_storage.flag_pad_file),
                      creator=ti.creator(), created=ti.creation_date(),
-                     comment=_mask_passkey(ti.comment()), private=ti.priv())
+                     comment=ti.comment(), private=ti.priv())
         return d
 
     def trackers(self, key: str) -> list[dict]:
@@ -719,7 +719,7 @@ class Engine:
                         ok = True                       # some announce (v1 or v2) is accepted
             if ok:
                 msg = ""
-            out.append({"url": _mask_passkey(t["url"]), "tier": t["tier"], "message": msg})
+            out.append({"url": t["url"], "tier": t["tier"], "message": msg})
         return out
 
     def totals(self) -> tuple[int, int]:
@@ -765,22 +765,6 @@ def _ratio(uploaded: int, downloaded: int, done: int) -> float:
     if base > 0:
         return uploaded / base
     return float("inf") if uploaded > 0 else 0.0
-
-
-_PASSKEY_PARAM = None
-_PASSKEY_PATH = None
-
-
-def _mask_passkey(text: str) -> str:
-    """Hide passkeys in announce URLs and tracker messages shown in the UI / log (screenshots!).
-    Covers ?passkey= / torrent_pass= / authkey= / pk= / uk= / key= and 32-hex path segments."""
-    import re
-    global _PASSKEY_PARAM, _PASSKEY_PATH
-    if _PASSKEY_PARAM is None:
-        _PASSKEY_PARAM = re.compile(r"([?&;](?:passkey|torrent_pass|authkey|pk|uk|key)=)[A-Za-z0-9_-]{8,}", re.I)
-        _PASSKEY_PATH = re.compile(r"(?<![0-9A-Za-z])()[0-9a-fA-F]{32}(?![0-9A-Za-z])")
-    text = _PASSKEY_PARAM.sub(lambda m: m.group(1) + "•" * 8, text)
-    return _PASSKEY_PATH.sub(lambda m: m.group(1) + "•" * 8, text)
 
 
 PIECE_SIZES = [0] + [1 << n for n in range(14, 26)]     # 0 = auto, 16 KiB … 32 MiB
