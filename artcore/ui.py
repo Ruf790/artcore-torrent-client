@@ -1508,7 +1508,7 @@ class MainWindow(QMainWindow):
         import time as _time
         from . import updater as _upd
         if self.cfg.get("check_updates", True) and _upd.can_self_update() \
-                and _time.time() - self.cfg.get("last_update_check", 0) > 20 * 3600:
+                and _time.time() - self.cfg.get("last_update_check", 0) > self.UPDATE_EVERY / 2:
             self.check_updates()
 
         self.timer = QTimer(self)
@@ -1865,6 +1865,15 @@ class MainWindow(QMainWindow):
         self.tick()
 
     # ── updates ────────────────────────────────────────────────
+    UPDATE_EVERY = 6 * 3600     # also re-checked while running: the client usually lives in the tray for days
+
+    def _maybe_check_updates(self):
+        import time as _time
+        from . import updater as _upd
+        if self.cfg.get("check_updates", True) and _upd.can_self_update() \
+                and _time.time() - self.cfg.get("last_update_check", 0) > self.UPDATE_EVERY:
+            self.check_updates()
+
     def check_updates(self, manual: bool = False):
         import threading
         import time as _time
@@ -1893,6 +1902,14 @@ class MainWindow(QMainWindow):
             self.log_event("system", t("upd_available", val["version"]))
             if manual:
                 self.show_update()
+            elif self.cfg.get("update_notified") != val["version"]:
+                self.cfg["update_notified"] = val["version"]       # one toast per new version
+                config.save(self.cfg)
+                text = t("upd_available", val["version"])
+                shown = (self.cfg.get("toasts", True) and self.notifier.available
+                         and self.notifier.show(APP_TITLE, text, [(t("upd_install"), "update:")]))
+                if not shown and self.tray.isVisible():
+                    self.tray.showMessage(APP_TITLE, text, app_icon(), 8000)
         elif manual:
             QMessageBox.information(self, t("upd_title"), t("upd_none", VERSION))
 
@@ -2121,6 +2138,10 @@ class MainWindow(QMainWindow):
 
     def on_toast(self, arg: str):
         action, _, key = arg.partition(":")
+        if action == "update":
+            self.show_normal()
+            self.show_update()
+            return
         if action == "open" and key in self.engine.handles:
             row = next((r for r in self.engine.rows() if r.key == key), None)
             if row:
@@ -2273,6 +2294,8 @@ class MainWindow(QMainWindow):
     # ── refresh ────────────────────────────────────────────────
     def tick(self):
         self._ticks = getattr(self, "_ticks", 0) + 1
+        if self._ticks % 600 == 0:
+            self._maybe_check_updates()
         if self._ticks % 5 == 0:                 # watch folder + VPN binding every 5 s
             self.engine.scan_watch_dir()
             ok = self.engine.check_binding()
