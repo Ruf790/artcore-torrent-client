@@ -27,6 +27,7 @@ from . import APP_TITLE, VERSION, config, theme, winint
 from .engine import (Engine, TorrentRow, create_torrent, torrent_files,
                      PRIO_SKIP, PRIO_NORMAL, PRIO_HIGH)
 from .i18n import t
+from . import widgets
 
 C = theme.current   # live colour dict, updated in place on theme switch
 
@@ -107,6 +108,11 @@ STATE_STYLE = {
     "queued":      ("muted_subtle",   "secondary"),
     "error":       ("danger_subtle",  "danger_text"),
 }
+STATE_ICON = {
+    "downloading": "fa6s.arrow-down", "metadata": "fa6s.magnet", "checking": "fa6s.rotate",
+    "seeding": "fa6s.arrow-up", "finished": "fa6s.check", "paused": "fa6s.pause",
+    "queued": "fa6s.clock", "error": "fa6s.triangle-exclamation",
+}
 FILTER_STATES = {
     "all":         None,
     "downloading": {"downloading", "metadata", "checking"},
@@ -159,6 +165,13 @@ class TorrentModel(QAbstractTableModel):
                 return QColor(C["success_text"] if dark else C["success"])
             if c in (C_TRACKER, C_ETA, C_SIZE, C_CAT):
                 return QColor(C["secondary"])
+        if role == Qt.DecorationRole:
+            if c == C_NAME:
+                return widgets.torrent_icon(r.kind)
+            if c == C_CAT and r.category:
+                return widgets.icon("fa6s.tag", "purple")
+            if c == C_TRACKER and r.tracker_host:
+                return widgets.icon("fa6s.globe" if r.tracker_host != "DHT" else "fa6s.diagram-project", "info")
         if role == Qt.FontRole and c == C_NAME:
             f = QFont()
             f.setWeight(QFont.DemiBold)
@@ -276,13 +289,16 @@ class BadgeDelegate(QStyledItemDelegate):
         bg, fg = STATE_STYLE.get(r.state, ("muted_subtle", "secondary"))
         f = painter.font(); f.setPointSizeF(8.5); f.setWeight(QFont.DemiBold); painter.setFont(f)
         text = t("st_" + r.state)
-        w = QFontMetrics(f).horizontalAdvance(text) + 20
+        w = QFontMetrics(f).horizontalAdvance(text) + 36
         pill = QRectF(option.rect.left() + 6, option.rect.center().y() - 10, w, 20)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(C[bg]))
         painter.drawRoundedRect(pill, 10, 10)
+        ic = STATE_ICON.get(r.state, "fa6s.circle")
+        painter.drawPixmap(int(pill.left() + 9), int(pill.center().y() - 5),
+                           qta.icon(ic, color=C[fg]).pixmap(10, 10))
         painter.setPen(QColor(C[fg]))
-        painter.drawText(pill, Qt.AlignCenter, text)
+        painter.drawText(pill.adjusted(16, 0, 0, 0), Qt.AlignCenter, text)
         painter.restore()
 
 
@@ -472,6 +488,10 @@ LOG_STYLE = {   # soft badge colours per event type, like the site's .st-soft-*
 }
 
 
+LOG_ICON = {"system": "fa6s.gear", "network": "fa6s.wifi", "torrent": "fa6s.download",
+            "tracker": "fa6s.server", "error": "fa6s.triangle-exclamation"}
+
+
 class LogView(QWidget):
     """Global log like BitComet's: No. / Time / Type / Message, coloured rows, filter."""
     MAX = 3000
@@ -484,9 +504,9 @@ class LogView(QWidget):
         lay.setContentsMargins(12, 8, 12, 4)
         bar = QHBoxLayout()
         self.filter = QComboBox()
-        self.filter.addItem(t("log_all"), "")
+        self.filter.addItem(widgets.icon("fa6s.list"), t("log_all"), "")
         for k in LOG_KINDS:
-            self.filter.addItem(t("lk_" + k), k)
+            self.filter.addItem(widgets.icon(LOG_ICON[k], LOG_STYLE[k][1]), t("lk_" + k), k)
         self.filter.currentIndexChanged.connect(lambda _: self.rebuild())
         bar.addWidget(self.filter)
         bar.addStretch()
@@ -507,7 +527,7 @@ class LogView(QWidget):
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hh.setHighlightSections(False)
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        for c, w in ((0, 50), (1, 150), (2, 90)):
+        for c, w in ((0, 50), (1, 150), (2, 125)):
             self.tbl.setColumnWidth(c, w)
         self.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tbl.customContextMenuRequested.connect(self._menu)
@@ -535,6 +555,7 @@ class LogView(QWidget):
             if c == 2:
                 it.setForeground(QColor(C[fg]))
                 it.setFont(QFont(it.font().family(), -1, QFont.DemiBold))
+                it.setIcon(widgets.icon(LOG_ICON.get(kind, "fa6s.circle-info"), fg))
             if kind == "error":
                 it.setBackground(QColor(C["danger_subtle"]))
             if c == 3:
@@ -609,6 +630,12 @@ class StatsView(QTableWidget):
         except Exception:
             self.proc = None
 
+    @property
+    def SECTION_ICONS(self):
+        return {t("sg_general"): ("fa6s.circle-info", "primary"), t("sg_network"): ("fa6s.network-wired", "info"),
+                t("sg_speed"): ("fa6s.gauge-high", "orange"), t("sg_system"): ("fa6s.microchip", "purple"),
+                t("sg_totals"): ("fa6s.square-poll-vertical", "success")}
+
     def set_rows(self, rows: list[tuple[str, str] | str]):
         """str = section header, (label, value) = item row."""
         if self.rowCount() != len(rows):
@@ -620,6 +647,7 @@ class StatsView(QTableWidget):
                     self.setSpan(i, 0, 1, 2)
                 it = self._cell(i, 0)
                 it.setText(r)
+                it.setIcon(widgets.icon(*self.SECTION_ICONS.get(r, ("fa6s.circle-info", "primary"))))
                 f = QFont(theme.TITLE_FONT, 11); f.setWeight(QFont.DemiBold)
                 it.setFont(f)
                 it.setForeground(QColor(C["emphasis"]))
@@ -728,10 +756,22 @@ class StatsView(QTableWidget):
 #  Dialogs
 # ============================================================
 
-def _section(text: str) -> QLabel:
-    lab = QLabel(text)
+def _section(text: str, icon_name: str | None = None, color: str = "primary") -> QLabel:
+    """Section title in Oswald; with an icon it becomes an HTML label with the icon inline."""
+    lab = QLabel()
     lab.setStyleSheet(f'font-family:"{theme.TITLE_FONT}"; font-size: 12.5pt; font-weight: 600; '
                       f'color:{C["emphasis"]}; padding-top: 8px;')
+    if icon_name:
+        import base64
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.WriteOnly)
+        widgets.icon(icon_name, color).pixmap(18, 18).save(buf, "PNG")
+        b64 = base64.b64encode(bytes(ba)).decode()
+        lab.setTextFormat(Qt.RichText)
+        lab.setText(f'<img src="data:image/png;base64,{b64}" width="18" height="18" '
+                    f'style="vertical-align:middle">&nbsp;&nbsp;{text}')
+    else:
+        lab.setText(text)
     return lab
 
 
@@ -765,7 +805,7 @@ class SettingsDialog(QDialog):
             return s
 
         # ── general
-        form.addRow(_section(t("set_grp_general")))
+        form.addRow(_section(t("set_grp_general"), "fa6s.sliders", "primary"))
         self.path = QLineEdit(cfg["save_path"])
         browse = QPushButton(t("set_browse"))
         browse.clicked.connect(self._browse)
@@ -797,7 +837,7 @@ class SettingsDialog(QDialog):
         form.addRow(urow)
 
         # ── connection
-        form.addRow(_section(t("set_grp_conn")))
+        form.addRow(_section(t("set_grp_conn"), "fa6s.plug", "info"))
         self.port     = spin(cfg["port"], 1024, 65535)
         self.dl       = spin(cfg["dl_limit"], 0, 10_000_000)
         self.ul       = spin(cfg["ul_limit"], 0, 10_000_000)
@@ -816,7 +856,7 @@ class SettingsDialog(QDialog):
 
         from .netx import interfaces
         from .dialogs import folder_row
-        form.addRow(_section(t("set_grp_net")))
+        form.addRow(_section(t("set_grp_net"), "fa6s.shield-halved", "success"))
         self.iface = QComboBox()
         self.iface.addItem(t("iface_any"), "")
         names = [n for n, _ in interfaces()]
@@ -843,7 +883,7 @@ class SettingsDialog(QDialog):
         self.geoip = QCheckBox(t("set_geoip")); self.geoip.setChecked(cfg.get("geoip", True))
         form.addRow(self.geoip)
 
-        form.addRow(_section(t("set_grp_seed")))
+        form.addRow(_section(t("set_grp_seed"), "fa6s.seedling", "success"))
         self.stop_ratio = QDoubleSpinBox(); self.stop_ratio.setRange(0, 1000); self.stop_ratio.setSingleStep(0.1)
         self.stop_ratio.setValue(float(cfg.get("stop_ratio", 0)))
         self.stop_hours = spin(cfg.get("stop_hours", 0), 0, 100_000)
@@ -852,7 +892,7 @@ class SettingsDialog(QDialog):
         hint = QLabel(t("pr_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
         form.addRow(hint)
 
-        form.addRow(_section(t("set_grp_sched")))
+        form.addRow(_section(t("set_grp_sched"), "fa6s.clock", "orange"))
         self.sch_on = QCheckBox(t("sch_enable")); self.sch_on.setChecked(cfg.get("sched_enabled", False))
         form.addRow(self.sch_on)
         self.sch_from = QTimeEdit(QTime.fromString(cfg.get("sched_from", "08:00"), "HH:mm"))
@@ -868,11 +908,11 @@ class SettingsDialog(QDialog):
         form.addRow(t("sch_ul"), self.sch_ul)
 
         from .dialogs import CategoriesEditor, folder_row
-        form.addRow(_section(t("set_grp_cats")))
+        form.addRow(_section(t("set_grp_cats"), "fa6s.tags", "purple"))
         self.cats = CategoriesEditor(cfg.get("categories", []))
         form.addRow(self.cats)
 
-        form.addRow(_section(t("set_grp_folders")))
+        form.addRow(_section(t("set_grp_folders"), "fa6s.folder-open", "warning"))
         wrow, self.watch = folder_row(self, cfg.get("watch_dir", ""))
         form.addRow(t("set_watch"), wrow)
         self.watch_cat = QComboBox()
@@ -890,7 +930,7 @@ class SettingsDialog(QDialog):
         # ── windows
         self.autostart = None
         if winint.IS_WIN:
-            form.addRow(_section(t("set_grp_windows")))
+            form.addRow(_section(t("set_grp_windows"), "fa6b.windows", "info"))
             self.autostart = QCheckBox(t("set_autostart"))
             self.autostart.setChecked(winint.autostart_enabled())
             form.addRow(self.autostart)
@@ -1061,7 +1101,7 @@ class AddTorrentDialog(QDialog):
 
     def _fill(self, files):
         folders: dict[tuple, QTreeWidgetItem] = {}
-        ic_dir, ic_file = icon("fa6s.folder", "warning"), icon("fa6s.file")
+        ic_dir = widgets.folder_icon(False)
         self.tree.blockSignals(True)
         for idx, path, size in files:
             parts = path.replace("\\", "/").split("/")
@@ -1079,7 +1119,7 @@ class AddTorrentDialog(QDialog):
             leaf = QTreeWidgetItem(parent, [parts[-1], fmt_size(size)])
             leaf.setFlags(leaf.flags() | Qt.ItemIsUserCheckable)
             leaf.setCheckState(0, Qt.Checked)
-            leaf.setIcon(0, ic_file)
+            leaf.setIcon(0, widgets.file_icon(parts[-1]))
             leaf.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
             self.leaves.append((leaf, idx, size))
 
@@ -1157,7 +1197,7 @@ class PropertiesDialog(QDialog):
         head = _section(name); head.setWordWrap(True)
         form.addRow(head)
 
-        form.addRow(_section(t("pr_speed")))
+        form.addRow(_section(t("pr_speed"), "fa6s.gauge-high", "orange"))
         self.dl = QSpinBox(); self.dl.setRange(0, 10_000_000); self.dl.setValue(props["dl_limit"])
         self.ul = QSpinBox(); self.ul.setRange(0, 10_000_000); self.ul.setValue(props["ul_limit"])
         form.addRow(t("pr_dl"), self.dl)
@@ -1165,7 +1205,7 @@ class PropertiesDialog(QDialog):
         self.sup = QCheckBox(t("pr_super")); self.sup.setChecked(props["super_seed"])
         form.addRow(self.sup)
 
-        form.addRow(_section(t("pr_stop")))
+        form.addRow(_section(t("pr_stop"), "fa6s.hand", "danger"))
         self.mode = QComboBox()
         for k in ("pr_mode_global", "pr_mode_custom", "pr_mode_never"):
             self.mode.addItem(t(k))
@@ -1564,9 +1604,13 @@ class MainWindow(QMainWindow):
         pills.setSpacing(6)
         self.pill_group = QButtonGroup(self)
         self.pills: dict[str, QPushButton] = {}
+        pill_icons = {"all": ("fa6s.layer-group", "primary"), "downloading": ("fa6s.arrow-down", "primary"),
+                      "seeding": ("fa6s.arrow-up", "success"), "paused": ("fa6s.pause", "secondary"),
+                      "error": ("fa6s.triangle-exclamation", "danger")}
         for key in FILTER_STATES:
             b = QPushButton(t("f_" + key))
             b.setObjectName("pill")
+            self._themed_icon(b.setIcon, *pill_icons[key])
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _=False, k=key: self.proxy.set_filter(state=k))
@@ -1656,15 +1700,29 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(6)
         self.g: dict[str, QLabel] = {}
         keys = ["gen_path", "gen_size", "gen_downloaded", "gen_uploaded", "gen_ratio", "gen_tracker", "gen_error"]
+        gen_icons = {"gen_path": ("fa6s.folder-open", "warning"), "gen_size": ("fa6s.hard-drive", "secondary"),
+                     "gen_downloaded": ("fa6s.arrow-down", "primary"), "gen_uploaded": ("fa6s.arrow-up", "success"),
+                     "gen_ratio": ("fa6s.scale-balanced", "purple"), "gen_tracker": ("fa6s.server", "info"),
+                     "gen_error": ("fa6s.circle-exclamation", "danger")}
         for i, k in enumerate(keys):
             lab = QLabel(t(k)); lab.setObjectName("rowLbl")
+            ic = QLabel()
+            self._themed_icon(lambda q, ic=ic: ic.setPixmap(q.pixmap(14, 14)), *gen_icons[k])
+            lab_w = QWidget()
+            lab_box = QHBoxLayout(lab_w); lab_box.setContentsMargins(0, 0, 0, 0); lab_box.setSpacing(7)
+            lab_box.addWidget(ic); lab_box.addWidget(lab); lab_box.addStretch()
             val = QLabel(); val.setObjectName("rowVal")
             val.setTextInteractionFlags(Qt.TextSelectableByMouse)
             r, c = (i, 0) if i < 4 else (i - 4, 2)
-            grid.addWidget(lab, r, c)
+            grid.addWidget(lab_w, r, c)
             grid.addWidget(val, r, c + 1)
             self.g[k] = val
-        plab = QLabel(t("gen_pieces")); plab.setObjectName("rowLbl")
+        plab = QWidget()
+        pbox = QHBoxLayout(plab); pbox.setContentsMargins(0, 0, 0, 0); pbox.setSpacing(7)
+        pic = QLabel()
+        self._themed_icon(lambda q: pic.setPixmap(q.pixmap(14, 14)), "fa6s.puzzle-piece", "orange")
+        ptxt = QLabel(t("gen_pieces")); ptxt.setObjectName("rowLbl")
+        pbox.addWidget(pic); pbox.addWidget(ptxt); pbox.addStretch()
         self.piecebar = PieceBar()
         grid.addWidget(plab, 4, 0)
         grid.addWidget(self.piecebar, 4, 1, 1, 3)
@@ -1673,12 +1731,9 @@ class MainWindow(QMainWindow):
         grid.setRowStretch(5, 1)
         self.tabs.addTab(gen, t("tab_general"))
 
-        self.files_tbl = self._mk_table(["file_name", "col_size", "col_progress", "file_prio"], stretch=0)
-        self.files_tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.files_tbl = widgets.FilesView()
         self.files_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_tbl.customContextMenuRequested.connect(self.files_menu)
-        for c, w in ((1, 100), (2, 90), (3, 120)):
-            self.files_tbl.setColumnWidth(c, w)
         self.tabs.addTab(self.files_tbl, t("tab_files"))
 
         self.peers_tbl = self._mk_table(["peer_ip", "peer_country", "peer_client", "col_progress", "col_down", "col_up"], stretch=2)
@@ -1814,6 +1869,9 @@ class MainWindow(QMainWindow):
 
     # ── theme ──────────────────────────────────────────────────
     def retheme(self):
+        widgets.clear_cache()
+        if hasattr(self, "files_tbl"):
+            self.files_tbl.retheme()
         for setter, name, key in self._themed:
             setter(icon(name, key))
         for k in (self.k_down, self.k_up, self.k_active, self.k_session):
@@ -2197,7 +2255,8 @@ class MainWindow(QMainWindow):
                 lab.setText("—")
             self.peers_tbl.setRowCount(0)
             self.tr_tbl.setRowCount(0)
-            self.files_tbl.setRowCount(0)
+            self.files_tbl.clear()
+            self.files_tbl.key = None
             self.piecebar.set_pieces([], False)
             return
         trs = self.engine.trackers(row.key)
@@ -2223,12 +2282,23 @@ class MainWindow(QMainWindow):
                 country = f"{code}  {cname}" if code else ""
                 for j, v in enumerate((p["ip"], country, p["client"], f"{p['progress'] * 100:.1f}%",
                                        fmt_speed(p["down"]), fmt_speed(p["up"]))):
-                    self.peers_tbl.setItem(i, j, QTableWidgetItem(v))
+                    it = QTableWidgetItem(v)
+                    if j == 0:
+                        it.setIcon(widgets.icon("fa6s.circle-user" if p["progress"] < 1 else "fa6s.seedling",
+                                                "primary" if p["progress"] < 1 else "success"))
+                    elif j == 1 and code:
+                        it.setIcon(widgets.icon("fa6s.earth-europe", "info"))
+                    self.peers_tbl.setItem(i, j, it)
         elif tab == 3:
             self.tr_tbl.setRowCount(len(trs))
             for i, tr in enumerate(trs):
                 for j, v in enumerate((tr["url"], str(tr["tier"]), tr["message"])):
-                    self.tr_tbl.setItem(i, j, QTableWidgetItem(v))
+                    it = QTableWidgetItem(v)
+                    if j == 0:
+                        bad = bool(tr["message"])
+                        it.setIcon(widgets.icon("fa6s.circle-exclamation" if bad else "fa6s.circle-check",
+                                                "warning" if bad else "success"))
+                    self.tr_tbl.setItem(i, j, it)
 
     # ── speed schedule ─────────────────────────────────────────
     def apply_schedule(self) -> bool:
@@ -2253,53 +2323,21 @@ class MainWindow(QMainWindow):
     PRIO_TEXT = {PRIO_SKIP: "prio_skip", PRIO_NORMAL: "prio_normal", PRIO_HIGH: "prio_high"}
 
     def refresh_files(self, key: str):
-        files = self.engine.files(key)
-        tbl = self.files_tbl
-        if not files:
-            tbl.setRowCount(1)
-            for j, v in enumerate((t("files_wait"), "", "", "")):
-                tbl.setItem(0, j, QTableWidgetItem(v))
-            return
-        # keep the same items (and selection) between 1 s refreshes
-        same = (tbl.rowCount() == len(files) and tbl.item(0, 0) is not None
-                and tbl.item(0, 0).data(Qt.UserRole) == (key, files[0]["index"]))
-        if not same:
-            tbl.setRowCount(len(files))
-        ic = icon("fa6s.file")
-        for i, f in enumerate(files):
-            prio = f["priority"]
-            label = t(self.PRIO_TEXT.get(prio, "prio_high" if prio > PRIO_NORMAL else "prio_normal"))
-            vals = (f["path"], fmt_size(f["size"]), f"{f['progress'] * 100:.1f}%", label)
-            for j, v in enumerate(vals):
-                it = tbl.item(i, j) if same else None
-                if it is None:
-                    it = QTableWidgetItem()
-                    if j == 0:
-                        it.setIcon(ic)
-                    if j in (1, 2):
-                        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                    tbl.setItem(i, j, it)
-                it.setText(v)
-                it.setData(Qt.UserRole, (key, f["index"]))
-                skip = prio == PRIO_SKIP
-                it.setForeground(QColor(C["secondary"]) if skip else
-                                 QColor(C["primary_text"] if theme.current_name == "dark" else C["primary"])
-                                 if (j == 3 and prio > PRIO_NORMAL) else QColor(C["body"]))
+        self.files_tbl.update_files(key, self.engine.files(key))
 
     def files_menu(self, pos):
-        rows = sorted({i.row() for i in self.files_tbl.selectedItems()})
-        data = [self.files_tbl.item(r, 0).data(Qt.UserRole) for r in rows if self.files_tbl.item(r, 0)]
-        data = [d for d in data if d]
-        if not data:
+        key = self.files_tbl.key
+        idxs = self.files_tbl.selected_indices()
+        if not key or not idxs:
             return
-        key = data[0][0]
-        idxs = [d[1] for d in data]
         m = QMenu(self)
         for prio, name, col in ((PRIO_HIGH, "fa6s.angles-up", "primary"),
                                 (PRIO_NORMAL, "fa6s.minus", "secondary"),
                                 (PRIO_SKIP, "fa6s.ban", "danger")):
             m.addAction(icon(name, col), t(self.PRIO_TEXT[prio]),
                         lambda p=prio: (self.engine.set_file_priority(key, idxs, p), self.refresh_files(key)))
+        m.addSeparator()
+        m.addAction(icon("fa6s.folder-open", "warning"), t("open_folder"), self.open_folder)
         m.exec(self.files_tbl.viewport().mapToGlobal(pos))
 
     # ── window / quit ──────────────────────────────────────────

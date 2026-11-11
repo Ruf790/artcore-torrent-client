@@ -55,6 +55,7 @@ class TorrentRow:
     tracker: str
     tracker_host: str   # domain of the first tracker, "DHT" when there is none
     category: str = ""
+    kind: str = "file"  # video | audio | … | folder | magnet — for the name icon
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -86,6 +87,7 @@ class Engine:
         self.finished_names: list[str] = []    # for tray notifications
         self.stopped_names: list[str] = []     # paused by a stop-seeding rule
         self._hosts: dict[str, str] = {}
+        self._kinds: dict[str, str] = {}
         # per-torrent options libtorrent doesn't keep in resume data (stop-seeding rules)
         self.opts_path = os.path.join(data_dir, "torrent_opts.json")
         try:
@@ -391,8 +393,22 @@ class Engine:
                 tracker=s.current_tracker,
                 tracker_host=self._host(key, h),
                 category=self.opts.get(key, {}).get("category", ""),
+                kind=self._kind(key, h, s),
             ))
         return out
+
+    def _kind(self, key: str, h: lt.torrent_handle, s) -> str:
+        cached = self._kinds.get(key)
+        if cached:
+            return cached
+        if not s.has_metadata:
+            return "magnet"
+        from .filetypes import torrent_kind
+        fs = h.torrent_file().files()
+        files = [(fs.file_path(i), fs.file_size(i)) for i in range(fs.num_files())
+                 if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
+        self._kinds[key] = kind = torrent_kind(files)
+        return kind
 
     def _host(self, key: str, h: lt.torrent_handle) -> str:
         cached = self._hosts.get(key)
