@@ -1720,12 +1720,23 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(6)
         self.g: dict[str, QLabel] = {}
-        keys = ["gen_path", "gen_size", "gen_downloaded", "gen_uploaded", "gen_ratio", "gen_tracker", "gen_error"]
+        columns = [   # three columns like BitComet's summary: transfer · torrent · metadata
+            ["gen_path", "gen_size", "gen_downloaded", "gen_uploaded", "gen_ratio", "gen_active"],
+            ["gen_tracker", "gen_error", "gen_added", "gen_completed", "gen_private", "gen_creator"],
+            ["gen_hash1", "gen_hash2", "gen_piece_info", "gen_files", "gen_created", "gen_comment"],
+        ]
         gen_icons = {"gen_path": ("fa6s.folder-open", "warning"), "gen_size": ("fa6s.hard-drive", "secondary"),
                      "gen_downloaded": ("fa6s.arrow-down", "primary"), "gen_uploaded": ("fa6s.arrow-up", "success"),
                      "gen_ratio": ("fa6s.scale-balanced", "purple"), "gen_tracker": ("fa6s.server", "info"),
-                     "gen_error": ("fa6s.circle-exclamation", "danger")}
-        for i, k in enumerate(keys):
+                     "gen_error": ("fa6s.circle-exclamation", "danger"),
+                     "gen_active": ("fa6s.stopwatch", "teal"), "gen_added": ("fa6s.calendar-plus", "primary"),
+                     "gen_completed": ("fa6s.calendar-check", "success"), "gen_private": ("fa6s.lock", "orange"),
+                     "gen_creator": ("fa6s.wrench", "secondary"), "gen_hash1": ("fa6s.fingerprint", "purple"),
+                     "gen_hash2": ("fa6s.fingerprint", "pink"), "gen_piece_info": ("fa6s.cubes", "orange"),
+                     "gen_files": ("fa6s.copy", "info"), "gen_created": ("fa6s.calendar", "secondary"),
+                     "gen_comment": ("fa6s.comment", "teal")}
+        cells = [(k, r, col * 2) for col, ks in enumerate(columns) for r, k in enumerate(ks)]
+        for k, r, c in cells:
             lab = QLabel(t(k)); lab.setObjectName("rowLbl")
             ic = QLabel()
             self._themed_icon(lambda q, ic=ic: ic.setPixmap(q.pixmap(14, 14)), *gen_icons[k])
@@ -1734,7 +1745,7 @@ class MainWindow(QMainWindow):
             lab_box.addWidget(ic); lab_box.addWidget(lab); lab_box.addStretch()
             val = QLabel(); val.setObjectName("rowVal")
             val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            r, c = (i, 0) if i < 4 else (i - 4, 2)
+            val.setMinimumWidth(40)
             grid.addWidget(lab_w, r, c)
             grid.addWidget(val, r, c + 1)
             self.g[k] = val
@@ -1745,11 +1756,12 @@ class MainWindow(QMainWindow):
         ptxt = QLabel(t("gen_pieces")); ptxt.setObjectName("rowLbl")
         pbox.addWidget(pic); pbox.addWidget(ptxt); pbox.addStretch()
         self.piecebar = PieceBar()
-        grid.addWidget(plab, 4, 0)
-        grid.addWidget(self.piecebar, 4, 1, 1, 3)
+        grid.addWidget(plab, 6, 0)
+        grid.addWidget(self.piecebar, 6, 1, 1, 5)
         grid.setColumnStretch(1, 2)
         grid.setColumnStretch(3, 2)
-        grid.setRowStretch(5, 1)
+        grid.setColumnStretch(5, 3)
+        grid.setRowStretch(7, 1)
         self.tabs.addTab(gen, t("tab_general"))
 
         self.files_tbl = widgets.FilesView()
@@ -2369,6 +2381,30 @@ class MainWindow(QMainWindow):
         self.g["gen_tracker"].setText(trs[0]["url"] if trs else "DHT")
         self.g["gen_error"].setText(row.error or "—")
         self.g["gen_error"].setStyleSheet(f"color:{C['danger']};" if row.error else "")
+        inf = self.engine.info(row.key)
+        def when(ts):
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts and ts > 0 else "—"
+        def dur(sec):
+            h, m = divmod(sec // 60, 60)
+            return f"{h}:{m:02d}:{sec % 60:02d}"
+        vals = {
+            "gen_active": t("gen_active_val", dur(inf.get("active", 0)), dur(inf.get("seeding", 0))),
+            "gen_added": when(inf.get("added")),
+            "gen_completed": when(inf.get("completed")),
+            "gen_private": "—" if inf.get("private") is None else t("yes" if inf["private"] else "no"),
+            "gen_creator": inf.get("creator") or "—",
+            "gen_hash1": inf.get("v1") or "—",
+            "gen_hash2": inf.get("v2") or "—",
+            "gen_piece_info": (f"{inf['pieces']} × {fmt_size(inf['piece_len'])}" if inf.get("pieces") else "—"),
+            "gen_files": str(inf.get("files") or "—"),
+            "gen_created": when(inf.get("created")),
+            "gen_comment": inf.get("comment") or "—",
+        }
+        for k, v in vals.items():
+            lab = self.g[k]
+            if lab.text() != v:
+                lab.setText(v)
+                lab.setToolTip(v if len(v) > 30 else "")
 
         tab = self.tabs.currentIndex()
         if tab == 0:
