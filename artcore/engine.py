@@ -54,6 +54,7 @@ class TorrentRow:
     error: str
     tracker: str
     tracker_host: str   # domain of the first tracker, "DHT" when there is none
+    category: str = ""
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -236,8 +237,15 @@ class Engine:
             if isinstance(a, lt.save_resume_data_alert):
                 self._write_resume(a)
             elif isinstance(a, lt.torrent_finished_alert):
-                self.finished_names.append(a.handle.status().name)
+                st = a.handle.status()
+                self.finished_names.append(st.name)
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
+                self._move_when_done(a.handle, st)
+            elif isinstance(a, lt.storage_moved_alert):
+                self._log("torrent", a.message())
+                a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
+            elif isinstance(a, lt.storage_moved_failed_alert):
+                self._log("error", a.message())
             elif isinstance(a, lt.metadata_received_alert):
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, (lt.tracker_error_alert, lt.torrent_error_alert, lt.listen_failed_alert,
@@ -326,6 +334,7 @@ class Engine:
                 error=s.errc.message() if s.errc.value() else "",
                 tracker=s.current_tracker,
                 tracker_host=self._host(key, h),
+                category=self.opts.get(key, {}).get("category", ""),
             ))
         return out
 
@@ -418,6 +427,100 @@ class Engine:
         """Used by the speed schedule; 0 = unlimited."""
         self.ses.apply_settings({"download_rate_limit": int(dl_kib) * 1024,
                                  "upload_rate_limit": int(ul_kib) * 1024})
+
+    # ── categories / moving / trackers ─────────────────────────
+    def set_category(self, key: str, name: str) -> None:
+        if key not in self.handles:
+            return
+        o = self.opts.setdefault(key, {})
+        if name:
+            o["category"] = name
+        else:
+            o.pop("category", None)
+        self._save_opts()
+
+    def category_path(self, name: str) -> str:
+        for c in self.cfg.get("categories", []):
+            if c.get("name") == name:
+                return c.get("path", "")
+        return ""
+
+    def move(self, key: str, path: str) -> None:
+        """Move downloaded files to another folder (no re-download)."""
+        h = self.handles.get(key)
+        if h and path and os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(h.status().save_path)):
+            os.makedirs(path, exist_ok=True)
+            h.move_storage(path)
+
+    def _move_when_done(self, h: lt.torrent_handle, st) -> None:
+        """Settings → "Move completed downloads to": only torrents that were really downloaded
+        (not ones seeded from your own disk), into <folder>/<category> when categorised."""
+        target = self.cfg.get("move_done_dir", "")
+        if not target or st.total_payload_download <= 0 and st.all_time_download <= 0:
+            return
+        cat = self.opts.get(_key(h), {}).get("category", "")
+        if cat and self.cfg.get("move_done_by_category", True):
+            target = os.path.join(target, cat)
+        self.move(_key(h), target)
+
+    def trackers_raw(self, key: str) -> list[tuple[str, int]]:
+        """Full tracker URLs (with passkey) for the editor."""
+        h = self.handles.get(key)
+        return [(t["url"], t["tier"]) for t in h.trackers()] if h else []
+
+    def set_trackers(self, key: str, trackers: list[tuple[str, int]]) -> None:
+        h = self.handles.get(key)
+        if not h:
+            return
+        entries = []
+        for u, tier in trackers:
+            e = lt.announce_entry(u)
+            e.tier = tier
+            entries.append(e)
+        h.replace_trackers(entries)
+        self._hosts.pop(key, None)
+        h.force_reannounce()
+        h.save_resume_data(lt.torrent_handle.save_info_dict)
+
+    def replace_in_trackers(self, keys: list[str], old: str, new: str) -> int:
+        """Find & replace in tracker URLs (e.g. a changed passkey). Returns torrents changed."""
+        changed = 0
+        if not old:
+            return 0
+        for key in keys:
+            trs = self.trackers_raw(key)
+            new_trs = [(u.replace(old, new), tier) for u, tier in trs]
+            if new_trs != trs:
+                self.set_trackers(key, new_trs)
+                changed += 1
+        return changed
+
+    def scan_watch_dir(self) -> list[str]:
+        """Add .torrent files that appeared in the watch folder; renames them to .torrent.added."""
+        folder = self.cfg.get("watch_dir", "")
+        if not folder or not os.path.isdir(folder):
+            return []
+        added = []
+        for fn in sorted(os.listdir(folder)):
+            if not fn.lower().endswith(".torrent"):
+                continue
+            path = os.path.join(folder, fn)
+            try:
+                if time.time() - os.path.getmtime(path) < 2:     # still being written by the browser
+                    continue
+                cat = self.cfg.get("watch_category", "")
+                key = self.add_torrent_file(path, save_path=self.category_path(cat) or None)
+                if cat:
+                    self.set_category(key, cat)
+                added.append(fn)
+                self._log("torrent", f"watch folder: {fn}")
+            except Exception as e:
+                self._log("error", f"watch folder: {fn}: {e}")
+            try:
+                os.replace(path, path + ".added")
+            except OSError:
+                pass
+        return added
 
     # ── files ──────────────────────────────────────────────────
     def files(self, key: str) -> list[dict]:
