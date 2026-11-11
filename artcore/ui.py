@@ -278,7 +278,7 @@ PROGRESS_COLORS = {   # state → (start, end) of the bar gradient
     "downloading": ("primary", "info"), "metadata": ("warning", "orange"), "checking": ("warning", "orange"),
     "seeding": ("success", "teal"), "finished": ("success", "teal"),
     "paused": ("secondary", "secondary"), "queued": ("secondary", "secondary"),
-    "error": ("danger", "pink"), "tracker_error": ("warning", "orange"),
+    "error": ("danger", "pink"), "tracker_error": ("danger", "pink"),
 }
 
 
