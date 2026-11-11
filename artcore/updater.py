@@ -74,8 +74,15 @@ def run_installer(path: str) -> None:
     quitting, after the session is saved and the mutex released). setup.iss restarts the client."""
     if sys.platform != "win32":
         raise OSError("installer runs on Windows only")
-    cmd = f'ping -n 4 127.0.0.1 >nul & start "" "{path}" /SILENT /SP- /NOCANCEL /CLOSEAPPLICATIONS'
-    subprocess.Popen(["cmd.exe", "/c", cmd], close_fds=True, creationflags=0x08000000)   # CREATE_NO_WINDOW
+    subprocess.Popen(installer_cmdline(path), close_fds=True, creationflags=0x08000000)   # CREATE_NO_WINDOW
+
+
+def installer_cmdline(path: str) -> str:
+    """A ready command line, not an argv list: Python would escape the inner quotes as \\" which
+    cmd.exe does not understand ('start \\"\\" …' → "Windows cannot find '\\\\'").
+    /s /c strips only the outer pair of quotes and runs the rest verbatim."""
+    inner = f'ping -n 4 127.0.0.1 >nul & start "" "{path}" /SILENT /SP- /NOCANCEL /CLOSEAPPLICATIONS'
+    return f'cmd.exe /d /s /c "{inner}"'
 
 
 def can_self_update() -> bool:

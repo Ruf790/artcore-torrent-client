@@ -49,6 +49,19 @@ jobs:
         run: |
           python -c "import libtorrent as lt; from artcore import engine, ui, winint; print('libtorrent', lt.__version__)"
 
+      - name: Self-update launcher test (quoting through cmd.exe)
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP "upd test"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          Set-Content (Join-Path $d "Setup.bat") "@echo %* > `"$d\marker.txt`""
+          python -c "import sys, subprocess; sys.path.insert(0, '.'); from artcore.updater import installer_cmdline as c; print(c(sys.argv[1])); subprocess.Popen(c(sys.argv[1]), creationflags=0x08000000).wait()" (Join-Path $d "Setup.bat")
+          Start-Sleep -Seconds 10
+          $m = Join-Path $d "marker.txt"
+          if (-not (Test-Path $m)) { Write-Error "installer was not started"; exit 1 }
+          Get-Content $m
+          if (-not (Select-String -Path $m -Pattern "/SILENT" -Quiet)) { Write-Error "arguments lost"; exit 1 }
+
       - name: Render icon
         env:
           QT_QPA_PLATFORM: offscreen
