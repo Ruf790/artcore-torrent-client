@@ -126,6 +126,28 @@ STRINGS = {
                         ".torrent files and magnet links now open in ArtCore Client."),
     "assoc_default":   ("Уже клиент по умолчанию",           "Already the default client"),
     "assoc_portable":  ("Доступно в установленной версии (.exe)", "Available in the installed version (.exe)"),
+    # add dialog / files tab
+    "ad_title":        ("Добавление торрента",               "Add torrent"),
+    "ad_save_to":      ("Сохранить в",                       "Save to"),
+    "ad_files":        ("Файлы",                             "Files"),
+    "ad_all":          ("Выбрать все",                       "Select all"),
+    "ad_none":         ("Снять все",                         "Select none"),
+    "ad_paused":       ("Добавить на паузе",                 "Add paused"),
+    "ad_selected":     ("Выбрано {0} из {1}",                "Selected {0} of {1}"),
+    "ad_free":         ("Свободно на диске: {0}",            "Free disk space: {0}"),
+    "ad_no_space":     ("Не хватает места на диске",         "Not enough disk space"),
+    "ad_magnet_note":  ("Список файлов появится после получения метаданных — выбрать файлы можно будет на вкладке «Файлы».",
+                        "The file list appears once metadata is received — pick files on the Files tab."),
+    "ad_nothing":      ("Не выбрано ни одного файла",        "No files selected"),
+    "add_btn":         ("Добавить",                          "Add"),
+    "set_show_add":    ("Показывать окно добавления торрента", "Show the add torrent dialog"),
+    "tab_files":       ("Файлы",                             "Files"),
+    "file_name":       ("Файл",                              "File"),
+    "file_prio":       ("Приоритет",                         "Priority"),
+    "prio_skip":       ("Не качать",                         "Don't download"),
+    "prio_normal":     ("Обычный",                           "Normal"),
+    "prio_high":       ("Высокий",                           "High"),
+    "files_wait":      ("Ожидание метаданных…",              "Waiting for metadata…"),
 }
 
 

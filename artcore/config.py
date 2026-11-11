@@ -17,6 +17,7 @@ DEFAULTS = {
     "minimize_to_tray": True,
     "language":         "ru",
     "theme":            "system",   # system | light | dark
+    "show_add_dialog":  True,
 }
 
 

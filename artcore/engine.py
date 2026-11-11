@@ -12,6 +12,17 @@ import libtorrent as lt
 
 from . import APP_NAME, VERSION, PEER_ID_CODE, VERSION_TUPLE
 
+# libtorrent download priorities
+PRIO_SKIP, PRIO_NORMAL, PRIO_HIGH = 0, 4, 7
+
+
+def torrent_files(ti: lt.torrent_info) -> list[tuple[int, str, int]]:
+    """(index, path, size) for the add dialog; pad files skipped."""
+    fs = ti.files()
+    return [(i, fs.file_path(i), fs.file_size(i)) for i in range(fs.num_files())
+            if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
+
+
 STATE_NAMES = {
     lt.torrent_status.checking_files:        "checking",
     lt.torrent_status.downloading_metadata:  "metadata",
@@ -134,10 +145,13 @@ class Engine:
         os.replace(tmp, self._resume_path(key))
 
     # ── adding / removing ──────────────────────────────────────
-    def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False) -> str:
+    def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False,
+                         file_priorities: list[int] | None = None) -> str:
         ti = lt.torrent_info(path)
         atp = lt.add_torrent_params()
         atp.ti = ti
+        if file_priorities is not None:
+            atp.file_priorities = file_priorities
         return self._add(atp, save_path, paused)
 
     def add_magnet(self, uri: str, save_path: str | None = None, paused: bool = False) -> str:
@@ -254,6 +268,40 @@ class Engine:
         if host or h.status().has_metadata:   # magnet without metadata may get trackers later
             self._hosts[key] = host or "DHT"
         return host or "DHT"
+
+    # ── files ──────────────────────────────────────────────────
+    def files(self, key: str) -> list[dict]:
+        """Files of a torrent (pad files of v2/hybrid torrents skipped)."""
+        h = self.handles.get(key)
+        if not h or not h.status().has_metadata:
+            return []
+        fs = h.torrent_file().files()
+        done = h.file_progress(lt.torrent_handle.piece_granularity)
+        prios = h.get_file_priorities()
+        out = []
+        for i in range(fs.num_files()):
+            if fs.file_flags(i) & lt.file_storage.flag_pad_file:
+                continue
+            size = fs.file_size(i)
+            out.append({
+                "index": i,
+                "path": fs.file_path(i),
+                "size": size,
+                "progress": (done[i] / size) if size else 1.0,
+                "priority": prios[i] if i < len(prios) else PRIO_NORMAL,
+            })
+        return out
+
+    def set_file_priority(self, key: str, indices: list[int], prio: int) -> None:
+        h = self.handles.get(key)
+        if not h:
+            return
+        prios = list(h.get_file_priorities())
+        for i in indices:
+            if 0 <= i < len(prios):
+                prios[i] = prio
+        h.prioritize_files(prios)
+        h.save_resume_data(lt.torrent_handle.save_info_dict)
 
     def peers(self, key: str) -> list[dict]:
         h = self.handles.get(key)
