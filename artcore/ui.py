@@ -624,6 +624,22 @@ def _fmt_uptime(sec: int) -> str:
     return (f"{d}d " if d else "") + f"{h}:{m:02d}:{s:02d}"
 
 
+def _country_strip(by_country: dict[str, list], total: int, top: int = 10) -> str:
+    """HTML: flag + code + count for the biggest countries, then "+N more"."""
+    items = sorted(by_country.items(), key=lambda kv: -kv[1][1])
+    parts = []
+    for code, (name, n) in items[:top]:
+        path = widgets.flag_path(code)
+        img = (f'<img src="{QUrl.fromLocalFile(path).toString()}" width="20" height="15" style="vertical-align:middle">'
+               if path else "&#127760;")
+        label = code or t("geo_unknown")
+        parts.append(f'<span title="{name}">{img}&nbsp;<b>{label}</b>&nbsp;{n}</span>')
+    rest = len(items) - top
+    head = t("geo_summary", total, len([c for c in by_country if c]))
+    tail = f" &nbsp; {t('geo_more', rest)}" if rest > 0 else ""
+    return f"{head} &nbsp;&nbsp; " + " &nbsp;·&nbsp; ".join(parts) + tail
+
+
 class MiniWidget(QWidget):
     """Floating always-on-top speed window (BitComet-style): drag to move, double-click opens the
     client, right-click for a menu. Small graph of the last two minutes behind the numbers."""
@@ -715,6 +731,7 @@ class StatsView(QTableWidget):
         hh.setHighlightSections(False)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
         self.setColumnWidth(0, 300)
+        self.setIconSize(QSize(20, 15))            # country flags are 4:3
         self.firewall: bool | None = None
         self._fw_checked = False
         try:
@@ -729,7 +746,8 @@ class StatsView(QTableWidget):
         return {t("sg_general"): ("fa6s.circle-info", "primary"), t("sg_network"): ("fa6s.network-wired", "info"),
                 t("sg_speed"): ("fa6s.gauge-high", "orange"), t("sg_system"): ("fa6s.microchip", "purple"),
                 t("sg_totals"): ("fa6s.square-poll-vertical", "success"),
-                t("sg_trackers"): ("fa6s.server", "info")}
+                t("sg_trackers"): ("fa6s.server", "info"),
+                t("sg_countries"): ("fa6s.earth-europe", "info")}
 
     def set_rows(self, rows: list[tuple[str, str] | str]):
         """str = section header, (label, value) = item row."""
@@ -748,10 +766,40 @@ class StatsView(QTableWidget):
                 it.setForeground(QColor(C["emphasis"]))
                 it.setBackground(QColor(C["tertiary_bg"]))
             else:
-                for c, v in enumerate(r):
+                if self.columnSpan(i, 0) != 1:
+                    self.setSpan(i, 0, 1, 1)
+                for c, v in enumerate(r[:2]):
                     it = self._cell(i, c)
                     it.setText("    " + v if c == 0 else v)
                     it.setForeground(QColor(C["secondary"] if c == 0 else C["body"]))
+                    it.setFont(QFont())
+                    it.setBackground(QColor(0, 0, 0, 0))
+                    if c == 0:
+                        it.setIcon((widgets.flag_icon(r[2]) or QIcon()) if len(r) > 2 else QIcon())
+
+    def _country_rows(self, win) -> list:
+        """Peers of all torrents by country (top 15), refreshed every 5 s."""
+        import time as _t
+        if win.geo is None or win.geo.status != "ready":
+            return []
+        if _t.time() - getattr(self, "_geo_at", 0) > 5:
+            self._geo_at = _t.time()
+            counts: dict[str, list] = {}
+            for key in list(win.engine.handles):
+                for p in win.engine.peers(key):
+                    code, name = win.geo.lookup(p["host"])
+                    ent = counts.setdefault(code, [name, 0, 0, 0])
+                    ent[1] += 1
+                    ent[2] += p["down"]
+                    ent[3] += p["up"]
+            self._geo_rows = sorted(counts.items(), key=lambda kv: -kv[1][1])[:15]
+        rows = getattr(self, "_geo_rows", [])
+        if not rows:
+            return []
+        return [t("sg_countries")] + [
+            (f"{name or t('geo_unknown')} ({code})" if code else t("geo_unknown"),
+             t("st_country_v", n, fmt_size(d) + "/s", fmt_size(u) + "/s"), code)
+            for code, (name, n, d, u) in rows]
 
     def _cell(self, r: int, c: int) -> QTableWidgetItem:
         it = self.item(r, c)
@@ -848,6 +896,7 @@ class StatsView(QTableWidget):
             *[(f"{host}  ({n})", t("st_tracker_v", fmt_size(up), fmt_size(down),
                                      f"{up / down:.2f}" if down else ("∞" if up else "—")))
               for host, up, down, n in eng.tracker_totals()],
+            *self._country_rows(win),
         ])
 
 
@@ -2004,7 +2053,19 @@ class MainWindow(QMainWindow):
         self.peers_tbl.setColumnWidth(1, 170)
         self.peers_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.peers_tbl.customContextMenuRequested.connect(self.peers_menu)
-        self.tabs.addTab(self.peers_tbl, t("tab_peers"))
+        self.peers_tbl.setIconSize(QSize(20, 15))
+        peers_page = QWidget()
+        pl = QVBoxLayout(peers_page)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
+        self.peers_summary = QLabel()           # "peers by country" strip with flags
+        self.peers_summary.setObjectName("meta")
+        self.peers_summary.setTextFormat(Qt.RichText)
+        self.peers_summary.setContentsMargins(14, 8, 14, 8)
+        self.peers_summary.setWordWrap(True)
+        pl.addWidget(self.peers_summary)
+        pl.addWidget(self.peers_tbl, 1)
+        self.tabs.addTab(peers_page, t("tab_peers"))
         self.tr_tbl = self._mk_table(["tr_url", "tr_tier", "tr_msg"], stretch=0)
         self.tr_tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
         self.tr_tbl.setColumnWidth(1, 80)
@@ -2877,6 +2938,7 @@ class MainWindow(QMainWindow):
             for lab in self.g.values():
                 lab.setText("—")
             self.peers_tbl.setRowCount(0)
+            self.peers_summary.hide()
             self.tr_tbl.setRowCount(0)
             self.files_tbl.clear()
             self.files_tbl.key = None
@@ -2927,9 +2989,16 @@ class MainWindow(QMainWindow):
         elif tab == 2:
             peers = self.engine.peers(row.key)
             self.peers_tbl.setRowCount(len(peers))
+            by_country: dict[str, list] = {}
+            for p in peers:
+                code, cname = self.geo.lookup(p["host"]) if self.geo else ("", "")
+                ent = by_country.setdefault(code, [cname, 0])
+                ent[1] += 1
+            self.peers_summary.setText(_country_strip(by_country, len(peers)))
+            self.peers_summary.setVisible(bool(peers))
             for i, p in enumerate(peers):
                 code, cname = self.geo.lookup(p["host"]) if self.geo else ("", "")
-                country = f"{code}  {cname}" if code else ""
+                country = cname or code
                 for j, v in enumerate((p["ip"], country, p["client"], f"{p['progress'] * 100:.1f}%",
                                        fmt_speed(p["down"]), fmt_speed(p["up"]))):
                     it = QTableWidgetItem(v)
@@ -2938,7 +3007,8 @@ class MainWindow(QMainWindow):
                         it.setIcon(widgets.icon("fa6s.circle-user" if p["progress"] < 1 else "fa6s.seedling",
                                                 "primary" if p["progress"] < 1 else "success"))
                     elif j == 1 and code:
-                        it.setIcon(widgets.icon("fa6s.earth-europe", "info"))
+                        it.setIcon(widgets.flag_icon(code) or widgets.icon("fa6s.earth-europe", "info"))
+                        it.setToolTip(f"{code} — {cname}")
                     self.peers_tbl.setItem(i, j, it)
         elif tab == 3:
             self.tr_tbl.setRowCount(len(trs))
