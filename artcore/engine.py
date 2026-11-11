@@ -81,6 +81,7 @@ class Engine:
         self.portmap: dict[str, str] = {}     # "UPnP" / "NAT-PMP" → status text
         # key → {(tracker url, v1/v2, local endpoint): last error, "" = ok}
         self.tr_status: dict[str, dict[tuple, str]] = {}
+        self.tr_peers: dict[str, dict[tuple, int]] = {}     # same key → peers in the last tracker reply
         self.stats_path = os.path.join(data_dir, "stats.json")
         try:
             with open(self.stats_path, encoding="utf-8") as f:
@@ -602,6 +603,7 @@ class Engine:
                 self._log("error" if self.tracker_error(_key(a.handle)) else "tracker", a.message())
             elif isinstance(a, lt.tracker_reply_alert):
                 self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = ""
+                self.tr_peers.setdefault(_key(a.handle), {})[_alert_id(a)] = int(getattr(a, "num_peers", -1))
                 self._log("tracker", a.message())
             elif isinstance(a, (lt.torrent_error_alert, lt.listen_failed_alert,
                                 lt.file_error_alert, lt.fastresume_rejected_alert)):
@@ -1031,21 +1033,82 @@ class Engine:
         return d
 
     def trackers(self, key: str) -> list[dict]:
+        """Trackers of a torrent for the Trackers tab (qBittorrent-style).
+        Each tracker row sums up its announces; "children" are the single announces:
+        one per local endpoint (network interface) x protocol (v1 / v2 info-hash).
+        status: working | updating | not_working | tracker_error | not_contacted"""
         h = self.handles.get(key)
         if not h:
             return []
+        ihs = h.info_hashes()
+        has = (ihs.has_v1(), ihs.has_v2())
+        now = time.time()
+        errors = self.tr_status.get(key, {})
+        peers = self.tr_peers.get(key, {})
         out = []
         for t in h.trackers():
-            msg, ok = "", False
+            url = t["url"]
+            children = []
             for ep in t.get("endpoints", []):
-                for ih in ep.get("info_hashes", []):   # [v1, v2]
-                    if ih.get("message"):
-                        msg = msg or ih["message"]
-                    elif ih.get("start_sent") and not ih.get("fails"):
-                        ok = True                       # some announce (v1 or v2) is accepted
-            if ok:
-                msg = ""
-            out.append({"url": t["url"], "tier": t["tier"], "message": msg})
+                addr = ep.get("local_address") or ("", 0)
+                for i, ih in enumerate(ep.get("info_hashes", [])[:2]):
+                    if not has[i]:
+                        continue                      # a v1-only torrent has no v2 announce
+                    ver = "V1" if i == 0 else "V2"
+                    aid = (url, ver, str(tuple(addr)))
+                    reason = errors.get(aid, "")
+                    if ih.get("updating"):
+                        st = "updating"
+                    elif ih.get("fails"):
+                        # the tracker answered with a refusal → tracker error; no answer (network) → not working
+                        cat = (ih.get("last_error") or {}).get("category", "")
+                        st = "tracker_error" if ih.get("message") or cat == "libtorrent" else "not_working"
+                    elif ih.get("start_sent"):
+                        st = "working"
+                    else:
+                        st = "not_contacted"
+                    msg = ih.get("message") or (reason if st in ("not_working", "tracker_error") else "")
+                    children.append({
+                        "proto": "v1" if i == 0 else "v2",
+                        "endpoint": f"{addr[0]}:{addr[1]}" if addr[0] else "",
+                        "status": st, "message": msg,
+                        "peers": peers.get(aid, -1) if st == "working" else -1,
+                        "seeds": ih.get("scrape_complete", -1),
+                        "leeches": ih.get("scrape_incomplete", -1),
+                        "downloaded": ih.get("scrape_downloaded", -1),
+                        "next": _left(ih.get("next_announce", 0), now),
+                        "min": _left(ih.get("min_announce", 0), now),
+                    })
+            out.append(_sum_tracker(url, t["tier"], children))
+        out.sort(key=lambda r: r["tier"])          # stable: keeps the order inside a tier
+        return out
+
+    def peer_sources(self, key: str) -> dict:
+        """DHT / PeX / LSD rows of the Trackers tab: state and connected peers found through each."""
+        h = self.handles.get(key)
+        if not h:
+            return {}
+        try:
+            ti = h.torrent_file()
+            private = bool(ti and ti.priv())
+        except Exception:
+            private = False
+        counts = {n: [0, 0, 0] for n in ("dht", "pex", "lsd")}     # peers, seeds, leeches
+        flags = {"dht": lt.peer_info.dht, "pex": lt.peer_info.pex, "lsd": lt.peer_info.lsd}
+        try:
+            for p in h.get_peer_info():
+                for n, f in flags.items():
+                    if p.source & f:
+                        c = counts[n]
+                        c[0] += 1
+                        c[1 if p.flags & lt.peer_info.seed else 2] += 1
+        except Exception:
+            pass
+        enabled = {"dht": bool(self.cfg.get("dht", True)), "pex": True, "lsd": bool(self.cfg.get("lsd", True))}
+        out = {}
+        for n, (np, ns, nl) in counts.items():
+            status = "private" if private else ("working" if enabled[n] else "disabled")
+            out[n] = {"status": status, "peers": np, "seeds": ns, "leeches": nl}
         return out
 
     def totals(self) -> tuple[int, int]:
@@ -1104,6 +1167,39 @@ def _match_files(new: list[tuple[int, str, int]], old: list[tuple[str, int]]) ->
             renamed[idx] = pick
     return renamed
 
+
+
+def _left(t, now: float) -> int:
+    """Seconds until a posix time from an announce entry, 0 when it's due / unknown."""
+    try:
+        t = float(t.timestamp()) if hasattr(t, "timestamp") else float(t)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(t - now)) if t > 0 else 0
+
+
+_STATUS_RANK = {"working": 0, "updating": 1, "tracker_error": 2, "not_working": 3, "not_contacted": 4}
+
+
+def _sum_tracker(url: str, tier: int, children: list[dict]) -> dict:
+    """A tracker row from its announces: the best status wins, the numbers are the best known."""
+    row = {"url": url, "tier": tier, "proto": "", "status": "not_contacted", "message": "",
+           "peers": -1, "seeds": -1, "leeches": -1, "downloaded": -1, "next": 0, "min": 0,
+           "children": children if len(children) > 1 else []}
+    if not children:
+        return row
+    best = min(children, key=lambda c: _STATUS_RANK[c["status"]])
+    row["status"] = best["status"]
+    # an error shows only when no announce of this tracker is accepted
+    row["message"] = "" if best["status"] == "working" else next((c["message"] for c in children if c["message"]), "")
+    for k in ("peers", "seeds", "leeches", "downloaded"):
+        row[k] = max(c[k] for c in children)
+    nxt = [c["next"] for c in children if c["next"] > 0]
+    row["next"] = min(nxt) if nxt else 0
+    row["min"] = max(c["min"] for c in children)
+    if len(children) == 1:
+        row["proto"] = children[0]["proto"]
+    return row
 
 def _alert_id(a) -> tuple:
     """One tracker announce stream: URL × protocol version (v1/v2 hash) × local endpoint."""

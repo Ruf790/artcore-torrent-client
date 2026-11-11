@@ -237,3 +237,125 @@ class FilesView(QTreeWidget):
             it.setIcon(0, folder_icon(it.isExpanded()))
         for leaf in self.leaves.values():
             leaf.setIcon(0, file_icon(leaf.text(0)))
+
+
+class TrackersView(QTreeWidget):
+    """Trackers tab, qBittorrent-style: DHT / PeX / LSD on top, then the trackers.
+    A tracker announced more than once (hybrid v1+v2 torrent, several network interfaces)
+    expands into its single announces. Built once per torrent / tracker list, then only updated."""
+    COLS = ("tr_url", "tr_tier", "tr_proto", "tr_state", "tr_peers", "tr_seeds", "tr_leeches",
+            "tr_downloaded", "tr_msg", "tr_next", "tr_min")
+    STATUS_ICON = {
+        "working": ("fa6s.circle-check", "success"), "updating": ("fa6s.rotate", "info"),
+        "tracker_error": ("fa6s.circle-exclamation", "danger"), "not_working": ("fa6s.circle-xmark", "danger"),
+        "not_contacted": ("fa6s.hourglass-half", "secondary"),
+        "disabled": ("fa6s.ban", "secondary"), "private": ("fa6s.ban", "secondary"),
+    }
+    SOURCES = (("dht", "DHT", "fa6s.diagram-project"), ("pex", "PeX", "fa6s.people-arrows"),
+               ("lsd", "LSD", "fa6s.house-signal"))
+    NUMERIC = (1, 4, 5, 6, 7, 9, 10)
+
+    def __init__(self):
+        super().__init__()
+        self.setHeaderLabels([t(k) for k in self.COLS])
+        self.setUniformRowHeights(True)
+        self.setRootIsDecorated(True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setAnimated(True)
+        hh = self.header()
+        hh.setStretchLastSection(False)
+        hh.setSectionResizeMode(QHeaderView.Interactive)
+        for c, w in enumerate((420, 70, 90, 230, 60, 60, 60, 110, 260, 100, 100)):
+            hh.resizeSection(c, w)
+        for c in self.NUMERIC:
+            self.headerItem().setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
+        self.key = None
+        self._sig = None
+        self.rows: dict[str, QTreeWidgetItem] = {}
+        self.children_of: dict[str, list[QTreeWidgetItem]] = {}
+        self.expanded: set[str] = set()
+        self.itemExpanded.connect(lambda it: self.expanded.add(it.data(0, Qt.UserRole)))
+        self.itemCollapsed.connect(lambda it: self.expanded.discard(it.data(0, Qt.UserRole)))
+
+    def clear_view(self):
+        self.clear()
+        self.key, self._sig = None, None
+        self.rows, self.children_of = {}, {}
+
+    # ── build / update ─────────────────────────────────────────
+    def _build(self, key, trackers):
+        self.clear()
+        if key != self.key:
+            self.expanded = set()
+        self.key = key
+        self.rows, self.children_of = {}, {}
+        for name, label, ic in self.SOURCES:
+            it = QTreeWidgetItem(self, [f"** [{label}] **"] + [""] * (len(self.COLS) - 1))
+            it.setIcon(0, icon(ic, "secondary"))
+            it.setData(0, Qt.UserRole, name)
+            self.rows[name] = it
+        for tr in trackers:
+            it = QTreeWidgetItem(self, [tr["url"]] + [""] * (len(self.COLS) - 1))
+            it.setData(0, Qt.UserRole, tr["url"])
+            self.rows[tr["url"]] = it
+            kids = []
+            for c in tr["children"]:
+                label = c["endpoint"] or tr["url"]
+                kid = QTreeWidgetItem(it, [label] + [""] * (len(self.COLS) - 1))
+                kids.append(kid)
+            self.children_of[tr["url"]] = kids
+            if tr["url"] in self.expanded:
+                it.setExpanded(True)
+
+    def update_trackers(self, key: str, trackers: list[dict], sources: dict):
+        sig = (key, tuple((tr["url"], len(tr["children"])) for tr in trackers))
+        if sig != self._sig:
+            self._build(key, trackers)
+            self._sig = sig
+        muted = QColor(C["secondary"])
+        for name, _label, _ic in self.SOURCES:
+            s = sources.get(name)
+            it = self.rows[name]
+            if not s:
+                continue
+            vals = {2: "", 3: t("trs_" + s["status"]),
+                    4: self._n(s["peers"]), 5: self._n(s["seeds"]), 6: self._n(s["leeches"]),
+                    7: t("na"), 8: t("trs_private_msg") if s["status"] == "private" else "", 9: "", 10: ""}
+            self._fill(it, vals, s["status"])
+            for c in range(len(self.COLS)):
+                it.setForeground(c, muted)
+        for tr in trackers:
+            it = self.rows.get(tr["url"])
+            if it is None:
+                continue
+            self._fill(it, self._vals(tr), tr["status"])
+            it.setText(1, str(tr["tier"]))
+            for kid, c in zip(self.children_of.get(tr["url"], []), tr["children"]):
+                self._fill(kid, self._vals(c), c["status"])
+
+    def _vals(self, r: dict) -> dict:
+        from .ui import fmt_eta
+        return {2: r["proto"], 3: t("trs_" + r["status"]), 4: self._n(r["peers"]), 5: self._n(r["seeds"]),
+                6: self._n(r["leeches"]), 7: self._n(r["downloaded"]), 8: r["message"],
+                9: fmt_eta(r["next"]) if r["next"] > 0 else "", 10: fmt_eta(r["min"]) if r["min"] > 0 else ""}
+
+    @staticmethod
+    def _n(v: int) -> str:
+        return t("na") if v is None or v < 0 else str(v)
+
+    def _fill(self, it: QTreeWidgetItem, vals: dict, status: str):
+        for c, v in vals.items():
+            if it.text(c) != v:
+                it.setText(c, v)
+            if c in self.NUMERIC:
+                it.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
+        it.setToolTip(8, vals.get(8, ""))
+        it.setToolTip(0, it.text(0))
+        ic, col = self.STATUS_ICON.get(status, ("fa6s.circle-question", "secondary"))
+        it.setIcon(3, icon(ic, col))
+        bad = status in ("tracker_error", "not_working")
+        it.setForeground(8, QColor(C["danger"]) if bad else QColor(C["body"]))
+        if it.data(0, Qt.UserRole) not in ("dht", "pex", "lsd") and it.parent() is None:
+            it.setIcon(0, icon("fa6s.circle-exclamation" if bad else "fa6s.circle-check" if status == "working"
+                               else "fa6s.server", "danger" if bad else "success" if status == "working" else "secondary"))
