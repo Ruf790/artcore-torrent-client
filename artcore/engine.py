@@ -648,9 +648,12 @@ class Engine:
                 self._write_resume(a)
             elif isinstance(a, lt.torrent_finished_alert):
                 st = a.handle.status()
-                self.finished_names.append((st.name, _key(a.handle)))
+                # libtorrent also posts this when an already complete torrent is loaded at start-up;
+                # only a download that finished during this run gets the notification / done actions
+                if _finished_now(st, self.started):
+                    self.finished_names.append((st.name, _key(a.handle)))
+                    self._move_when_done(a.handle, st)
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
-                self._move_when_done(a.handle, st)
             elif isinstance(a, lt.storage_moved_alert):
                 self._log("torrent", a.message())
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
@@ -1450,6 +1453,12 @@ def _proxy_settings(c: dict) -> dict:
             "proxy_peer_connections": bool(c.get("proxy_peers", True)),
             "proxy_tracker_connections": True,
             "proxy_hostnames": bool(c.get("proxy_hostnames", True))}
+
+
+def _finished_now(st, started: float) -> bool:
+    """True when the torrent completed during this run, not in an earlier one."""
+    done = int(getattr(st, "completed_time", 0) or 0)
+    return done > 0 and done >= started - 5
 
 def _left(t, now: float) -> int:
     """Seconds until a posix time from an announce entry, 0 when it's due / unknown."""
