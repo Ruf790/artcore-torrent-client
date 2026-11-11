@@ -93,9 +93,12 @@ def icon(name: str, color_key: str = "secondary") -> QIcon:
 # ============================================================
 
 COLS = ["col_name", "col_size", "col_progress", "col_state", "col_down", "col_up",
-        "col_seeds", "col_peers", "col_ratio", "col_eta", "col_tracker", "col_category", "col_tags"]
+        "col_seeds", "col_peers", "col_ratio", "col_eta", "col_tracker", "col_category", "col_tags",
+        "col_done", "col_left", "col_total_down", "col_total_up", "col_sess_down", "col_sess_up"]
 (C_NAME, C_SIZE, C_PROG, C_STATE, C_DOWN, C_UP, C_SEEDS, C_PEERS,
- C_RATIO, C_ETA, C_TRACKER, C_CAT, C_TAGS) = range(len(COLS))
+ C_RATIO, C_ETA, C_TRACKER, C_CAT, C_TAGS,
+ C_DONE, C_LEFT, C_TDOWN, C_TUP, C_SDOWN, C_SUP) = range(len(COLS))
+HIDDEN_COLS = (C_DONE, C_LEFT, C_TDOWN, C_TUP, C_SDOWN, C_SUP)   # off until switched on in the header menu
 NO_TAG = "\x00none"
 NO_CATEGORY = "\x00none"
 
@@ -150,8 +153,11 @@ class TorrentModel(QAbstractTableModel):
                 C_NAME: r.name, C_SIZE: fmt_size(r.size), C_PROG: f"{r.progress * 100:.1f}%",
                 C_STATE: t("st_" + r.state), C_DOWN: fmt_speed(r.down_rate), C_UP: fmt_speed(r.up_rate),
                 C_SEEDS: str(r.seeds), C_PEERS: str(r.peers), C_RATIO: fmt_ratio(r.ratio),
-                C_ETA: fmt_eta(r.eta) if r.state == "downloading" else "", C_TRACKER: r.tracker_host,
+                C_ETA: fmt_eta(r.eta) if r.eta >= 0 and r.progress < 1 else "", C_TRACKER: r.tracker_host,
                 C_CAT: r.category, C_TAGS: ", ".join(r.tags),
+                C_DONE: fmt_size(r.done), C_LEFT: fmt_size(max(0, r.size - r.done)) if r.size > r.done else "",
+                C_TDOWN: fmt_size(r.downloaded), C_TUP: fmt_size(r.uploaded),
+                C_SDOWN: fmt_size(r.sess_down) if r.sess_down else "", C_SUP: fmt_size(r.sess_up) if r.sess_up else "",
             }[c]
         if role == Qt.UserRole:  # sort key
             return {
@@ -160,6 +166,8 @@ class TorrentModel(QAbstractTableModel):
                 C_RATIO: r.ratio if r.ratio != float("inf") else 1e18,
                 C_ETA: r.eta if r.eta >= 0 else 1e18, C_TRACKER: r.tracker_host,
                 C_CAT: r.category.lower(), C_TAGS: ", ".join(r.tags).lower(),
+                C_DONE: r.done, C_LEFT: max(0, r.size - r.done), C_TDOWN: r.downloaded, C_TUP: r.uploaded,
+                C_SDOWN: r.sess_down, C_SUP: r.sess_up,
             }[c]
         if role == Qt.ForegroundRole:
             dark = theme.current_name == "dark"
@@ -167,7 +175,7 @@ class TorrentModel(QAbstractTableModel):
                 return QColor(C["primary_text"] if dark else C["primary"])
             if c == C_UP and r.up_rate > 0:
                 return QColor(C["success_text"] if dark else C["success"])
-            if c in (C_TRACKER, C_ETA, C_SIZE, C_CAT, C_TAGS):
+            if c in (C_TRACKER, C_ETA, C_SIZE, C_CAT, C_TAGS, C_LEFT):
                 return QColor(C["secondary"])
         if role == Qt.DecorationRole:
             if c == C_NAME:
@@ -2307,6 +2315,9 @@ class MainWindow(QMainWindow):
         for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 145), (C_DOWN, 95), (C_UP, 95),
                      (C_SEEDS, 55), (C_PEERS, 55), (C_RATIO, 65), (C_ETA, 80), (C_TRACKER, 150), (C_CAT, 110)):
             self.table.setColumnWidth(c, w)
+        for c in HIDDEN_COLS:
+            self.table.setColumnWidth(c, 135)
+            hh.setSectionHidden(c, True)
         self._default_header = hh.saveState()
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.context_menu)
@@ -3098,8 +3109,20 @@ class MainWindow(QMainWindow):
             a.setChecked(not hh.isSectionHidden(c))
             a.toggled.connect(lambda on, c=c: hh.setSectionHidden(c, not on))
         m.addSeparator()
+        col = hh.logicalIndexAt(pos)
+        if col >= 0 and col != C_NAME:
+            m.addAction(icon("fa6s.left-right"), t("cols_fit"), lambda: self.table.resizeColumnToContents(col))
+        m.addAction(icon("fa6s.arrows-left-right-to-line"), t("cols_fit_all"), lambda: [
+            self.table.resizeColumnToContents(c) for c in range(len(COLS)) if c != C_NAME and not hh.isSectionHidden(c)])
         m.addAction(icon("fa6s.rotate-left"), t("cols_reset"), lambda: hh.restoreState(self._default_header))
+        m.addAction(icon("fa6s.arrow-down-wide-short"), t("cols_unsort"), self._reset_sort)
         m.exec(hh.mapToGlobal(pos))
+
+    def _reset_sort(self):
+        """Back to the order torrents were added in."""
+        self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self.proxy.sort(-1)
+        self.proxy.invalidate()
 
     def tags_dialog(self):
         from .dialogs import TagsDialog

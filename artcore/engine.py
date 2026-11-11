@@ -58,6 +58,9 @@ class TorrentRow:
     kind: str = "file"  # video | audio | … | folder | magnet — for the name icon
     tags: tuple = ()
     hnr: str = ""       # what is left of the tracker's seeding requirement, "" = done / no rule
+    done: int = 0       # bytes of the wanted files already here
+    sess_down: int = 0  # downloaded / uploaded since the client started
+    sess_up: int = 0
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -784,6 +787,7 @@ class Engine:
                 kind=self._kind(key, h, s),
                 tags=tuple(self.opts.get(key, {}).get("tags", ())),
                 hnr=self.hnr_left(key, h, s) if s.progress >= 1.0 else "",
+                done=s.total_wanted_done, sess_down=s.total_payload_download, sess_up=s.total_payload_upload,
             ))
         return out
 
