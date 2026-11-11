@@ -224,18 +224,22 @@ class Taskbar:
             return
         try:
             import ctypes
-            from ctypes import wintypes
+            import uuid
 
-            class GUID(ctypes.Structure):
-                _fields_ = [("a", wintypes.DWORD), ("b", wintypes.WORD), ("c", wintypes.WORD), ("d", ctypes.c_ubyte * 8)]
+            def guid(text: str):
+                return (ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID(text).bytes_le)
 
             ole32 = ctypes.windll.ole32
             ole32.CoInitialize(None)          # S_FALSE when Qt already did it — fine
-            clsid, iid = GUID(), GUID()
-            ole32.CLSIDFromString("{56FDF344-FD6D-11d0-958A-006097C9A090}", ctypes.byref(clsid))
-            ole32.CLSIDFromString("{ea1afb91-9e28-4b86-90e9-9e9f8a5eee6f}", ctypes.byref(iid))
+            clsid = guid("56FDF344-FD6D-11d0-958A-006097C9A090")          # CLSID_TaskbarList
             ptr = ctypes.c_void_p()
-            hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(ptr))
+            hr = -1
+            # ITaskbarList3, else ITaskbarList4 (same vtable start)
+            for iid_text in ("ea1afb91-9e28-4b86-90e9-9e9f8a5eee6f", "c43dc798-95d1-4bea-9030-bb99e2983a1a"):
+                iid = guid(iid_text)
+                hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(ptr))
+                if hr == 0 and ptr.value:
+                    break
             if hr != 0 or not ptr.value:
                 self.diag = f"CoCreateInstance {hr & 0xFFFFFFFF:#x}"
                 return
