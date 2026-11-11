@@ -197,17 +197,17 @@ QComboBox QAbstractItemView {{
 }}
 QCheckBox {{ color: {c['body']}; spacing: 8px; }}
 /* checkboxes like Bootstrap .form-check-input */
-QCheckBox::indicator, QTreeView::indicator {{
+QCheckBox::indicator, QTreeView::indicator, QTableView::indicator {{
   width: 15px; height: 15px; border: 1px solid {c['secondary']}; border-radius: 4px; background: {c['body_bg']};
 }}
-QCheckBox::indicator:hover, QTreeView::indicator:hover {{ border-color: {c['primary']}; }}
-QCheckBox::indicator:checked, QTreeView::indicator:checked {{
+QCheckBox::indicator:hover, QTreeView::indicator:hover, QTableView::indicator:hover {{ border-color: {c['primary']}; }}
+QCheckBox::indicator:checked, QTreeView::indicator:checked, QTableView::indicator:checked {{
   background: {c['primary']}; border-color: {c['primary']}; image: url("{img.get('check', '')}");
 }}
 QTreeView::indicator:indeterminate {{
   background: {c['primary']}; border-color: {c['primary']}; image: url("{img.get('minus', '')}");
 }}
-QCheckBox::indicator:disabled {{ background: {c['tertiary_bg']}; border-color: {c['border']}; }}
+QCheckBox::indicator:disabled, QTableView::indicator:disabled {{ background: {c['tertiary_bg']}; border-color: {c['border']}; }}
 
 /* table */
 QTableView, QTableWidget {{
