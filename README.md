@@ -73,8 +73,10 @@ python run.py
 ```
 
 ## Новая версия
-Поменять номер в трёх местах, закоммитить и поставить тег `v1.1.0` —
-GitHub Actions сам соберёт установщик и опубликует релиз:
+Поменять номер в трёх местах и смерджить в `main`, затем на GitHub:
+**Releases → Draft a new release → тег `v1.1.0` → Publish release** —
+GitHub Actions сам соберёт установщик и прикрепит его к релизу (≈3 мин),
+а установленные клиенты предложат обновиться:
 - `artcore/__init__.py`: `VERSION`, `VERSION_TUPLE` (из него собирается peer_id: 1.1.0 → `-Ag1100-`)
 - `setup.iss`: `#define AppVersion`
 - `version_info.txt`: filevers / prodvers / FileVersion / ProductVersion
