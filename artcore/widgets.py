@@ -66,6 +66,31 @@ def icon(name: str, key: str = "secondary") -> QIcon:
 PRIO_ICON = {0: ("fa6s.ban", "danger"), 4: ("fa6s.minus", "secondary"), 7: ("fa6s.angles-up", "primary")}
 
 
+_flags: dict[str, QIcon] = {}
+
+
+def flag_path(code: str) -> str:
+    """Path of the country flag PNG (flag-icons, MIT), "" if there is none."""
+    import os
+    path = theme.asset("flags", code.lower() + ".png") if code else ""
+    return path if path and os.path.exists(path) else ""
+
+
+def flag_icon(code: str) -> QIcon | None:
+    """Flag at 20×15 (2× PNG for HiDPI); None for unknown codes."""
+    code = (code or "").lower()
+    if code not in _flags:
+        from PySide6.QtGui import QPixmap
+        path = flag_path(code)
+        if path:
+            pm = QPixmap(path)
+            pm.setDevicePixelRatio(2.0)
+            _flags[code] = QIcon(pm)
+        else:
+            _flags[code] = None
+    return _flags[code]
+
+
 def prio_icon(prio: int) -> QIcon:
     if prio > 4:
         prio = 7

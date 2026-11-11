@@ -12,6 +12,7 @@ The Windows build bundles the following components under their own licenses:
 | [QtAwesome](https://github.com/spyder-ide/qtawesome) | MIT | |
 | [Font Awesome Free](https://fontawesome.com) icons | icons CC BY 4.0, font SIL OFL 1.1 | via QtAwesome |
 | [Oswald](https://fonts.google.com/specimen/Oswald) font | SIL OFL 1.1 | `assets/fonts/OFL.txt` |
+| [flag-icons](https://github.com/lipis/flag-icons) | MIT | country flags, rendered to PNG; `assets/flags/LICENSE.txt` |
 | [psutil](https://github.com/giampaolo/psutil) | BSD 3-Clause | |
 | [maxminddb](https://github.com/maxmind/MaxMind-DB-Reader-python) | Apache 2.0 | reader only, no MaxMind data |
 | [windows-toasts](https://github.com/DatGuy1/Windows-Toasts) | Apache 2.0 | Windows only |
