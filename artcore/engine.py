@@ -617,6 +617,8 @@ class Engine:
         h = self.handles.get(key)
         if h:
             self._unfreeze(key, h)
+            self.tr_status.pop(key, None)         # start again from a clean tracker state
+            self.tr_peers.pop(key, None)
             h.unset_flags(lt.torrent_flags.auto_managed)
             h.pause()
             h.save_resume_data(lt.torrent_handle.save_info_dict)
@@ -1295,6 +1297,11 @@ class Engine:
         ihs = h.info_hashes()
         has = (ihs.has_v1(), ihs.has_v2())
         now = time.time()
+        if h.flags() & lt.torrent_flags.paused:       # stopped (qBittorrent: "Not contacted yet")
+            return sorted(({"url": t["url"], "tier": t["tier"], "proto": "", "status": "not_contacted",
+                            "message": "", "peers": -1, "seeds": -1, "leeches": -1, "downloaded": -1,
+                            "next": 0, "min": 0, "children": []} for t in h.trackers()),
+                          key=lambda r: r["tier"])
         errors = self.tr_status.get(key, {})
         peers = self.tr_peers.get(key, {})
         out = []
