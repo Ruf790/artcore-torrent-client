@@ -75,6 +75,9 @@ class Engine:
         os.makedirs(self.resume_dir, exist_ok=True)
 
         self.cfg      = cfg
+        if cfg.get("random_port"):                 # BitComet's "random port on start"
+            import random
+            cfg["port"] = random.randint(20000, 60000)
         self.handles: dict[str, lt.torrent_handle] = {}
         self.messages: list[tuple[str, str]] = []   # (kind, text) log events for the UI
         self.started = time.time()
@@ -164,6 +167,9 @@ class Engine:
             "enable_lsd":   bool(c.get("lsd", True)),
             "enable_upnp":  bool(c.get("upnp", True)),
             "enable_natpmp": bool(c.get("upnp", True)),
+            "enable_outgoing_utp": bool(c.get("utp", True)),
+            "enable_incoming_utp": bool(c.get("utp", True)),
+            **_proxy_settings(c),
             "download_rate_limit": int(c.get("dl_limit", 0)) * 1024,
             "upload_rate_limit":   int(c.get("ul_limit", 0)) * 1024,
             "active_downloads": int(c.get("active_downloads", 5)),
@@ -549,8 +555,27 @@ class Engine:
         if key in self.handles:
             raise ValueError("Этот торрент уже добавлен")
         self.handles[key] = h
+        self._add_auto_trackers(h)
         h.save_resume_data(lt.torrent_handle.save_info_dict)
         return key
+
+    def _add_auto_trackers(self, h: lt.torrent_handle) -> None:
+        """Settings → Trackers: extra trackers for public torrents (never for private ones —
+        a private tracker counts any other announce as cheating)."""
+        if not self.cfg.get("auto_trackers_on"):
+            return
+        urls = [u.strip() for u in self.cfg.get("auto_trackers", "").splitlines() if u.strip()]
+        try:
+            ti = h.torrent_file()
+            if not urls or ti is None or ti.priv():
+                return
+            have = {t["url"] for t in h.trackers()}
+            tier = max([t["tier"] for t in h.trackers()] + [-1]) + 1
+            for u in urls:
+                if u not in have:
+                    h.add_tracker({"url": u, "tier": tier})
+        except Exception as e:
+            self._log("error", f"auto trackers: {e}")
 
     def add_params(self, atp: lt.add_torrent_params) -> str:
         """Add prepared params (import from other clients); save_path is already set."""
@@ -1407,6 +1432,24 @@ def _buckets(bits, n: int) -> list[float]:
         chunk = bits[a:z]
         out.append(sum(1 for x in chunk if x) / len(chunk))
     return out
+
+
+def _proxy_settings(c: dict) -> dict:
+    """libtorrent proxy settings from the config (Settings → Connection → Proxy)."""
+    kind = c.get("proxy_type", "none")
+    auth = bool(c.get("proxy_auth")) and bool(c.get("proxy_user"))
+    pt = {"none": lt.proxy_type_t.none, "socks4": lt.proxy_type_t.socks4,
+          "socks5": lt.proxy_type_t.socks5_pw if auth else lt.proxy_type_t.socks5,
+          "http": lt.proxy_type_t.http_pw if auth else lt.proxy_type_t.http}.get(kind, lt.proxy_type_t.none)
+    if kind == "none" or not c.get("proxy_host"):
+        return {"proxy_type": int(lt.proxy_type_t.none)}
+    return {"proxy_type": int(pt), "proxy_hostname": str(c.get("proxy_host", "")),
+            "proxy_port": int(c.get("proxy_port", 1080)),
+            "proxy_username": str(c.get("proxy_user", "")) if auth else "",
+            "proxy_password": str(c.get("proxy_pass", "")) if auth else "",
+            "proxy_peer_connections": bool(c.get("proxy_peers", True)),
+            "proxy_tracker_connections": True,
+            "proxy_hostnames": bool(c.get("proxy_hostnames", True))}
 
 def _left(t, now: float) -> int:
     """Seconds until a posix time from an announce entry, 0 when it's due / unknown."""

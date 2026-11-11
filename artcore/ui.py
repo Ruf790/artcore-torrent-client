@@ -966,37 +966,297 @@ def _theme_title_bar(w: QWidget) -> None:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, cfg: dict, parent=None):
+    """Settings laid out like BitComet's: section tree on the left, one page per section,
+    OK / Cancel / Apply."""
+    def __init__(self, cfg: dict, parent=None, on_apply=None):
         super().__init__(parent)
         _theme_title_bar(self)
         self.setWindowTitle(t("settings"))
-        self.setMinimumWidth(560)
+        self.setWindowIcon(app_icon())
         self.cfg = dict(cfg)
-        from PySide6.QtWidgets import QScrollArea
+        self.on_apply = on_apply
+        scr = QGuiApplication.primaryScreen().availableGeometry()
+        self.resize(min(1060, int(scr.width() * 0.9)), min(760, int(scr.height() * 0.85)))
+        self.setMinimumSize(820, 560)
+        from PySide6.QtWidgets import QPlainTextEdit
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 14)
-        content = QWidget(); content.setObjectName("page")
-        form = QFormLayout(content)
-        form.setContentsMargins(20, 12, 20, 8)
-        form.setVerticalSpacing(8)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(content)
-        outer.addWidget(scroll, 1)
-        self.resize(620, min(820, int(QGuiApplication.primaryScreen().availableGeometry().height() * 0.85)))
+        outer.setContentsMargins(12, 12, 12, 12)
+        body = QHBoxLayout()
+        body.setSpacing(10)
+        self.nav = QTreeWidget()
+        self.nav.setHeaderHidden(True)
+        self.nav.setFixedWidth(250)
+        self.nav.setIconSize(QSize(16, 16))
+        self.nav.setUniformRowHeights(True)
+        self.nav.setIndentation(16)
+        self.stack = QStackedWidget()
+        body.addWidget(self.nav)
+        body.addWidget(self.stack, 1)
+        outer.addLayout(body, 1)
+        self._items: dict[str, QTreeWidgetItem] = {}
 
-        def spin(val, lo, hi):
-            s = QSpinBox()
-            s.setRange(lo, hi)
-            s.setValue(int(val))
-            return s
+        def page(key, ic, color, parent_key=None):
+            """New page: tree item + scrollable form with a title. Returns its QFormLayout."""
+            w = QWidget(); w.setObjectName("page")
+            form = QFormLayout(w)
+            form.setContentsMargins(18, 8, 18, 12)
+            form.setVerticalSpacing(9)
+            form.setHorizontalSpacing(14)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            title = _section(t(key), ic, color)
+            title.setStyleSheet(title.styleSheet() + "font-size: 15pt; padding-bottom: 6px;")
+            form.addRow(title)
+            sc = QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QFrame.NoFrame)
+            sc.setWidget(w)
+            idx = self.stack.addWidget(sc)
+            par = self._items.get(parent_key)
+            it = QTreeWidgetItem(par if par is not None else self.nav, [t(key)])
+            it.setIcon(0, widgets.icon(ic, color))
+            it.setData(0, Qt.UserRole, idx)
+            self._items[key] = it
+            return form
 
-        # ── general
-        form.addRow(_section(t("set_grp_general"), "fa6s.sliders", "primary"))
+        def spin(val, lo, hi, suffix="", zero=""):
+            sb = QSpinBox()
+            sb.setRange(lo, hi)
+            sb.setValue(int(val))
+            if suffix:
+                sb.setSuffix(suffix)
+            if zero:
+                sb.setSpecialValueText(zero)
+            return sb
+
+        def note(text):
+            lab = QLabel(text); lab.setObjectName("meta"); lab.setWordWrap(True)
+            return lab
+
+        from .dialogs import CategoriesEditor, TrackerRulesEditor, folder_row
+        from .netx import interfaces
+        kib = " KiB/s"
+
+        # ── Connection ────────────────────────────────────────
+        form = page("sp_conn", "fa6s.globe", "info")
+        form.addRow(_section(t("sp_general"), None))
+        self.dl = spin(cfg["dl_limit"], 0, 10_000_000, kib, t("unlimited"))
+        self.ul = spin(cfg["ul_limit"], 0, 10_000_000, kib, t("unlimited"))
+        form.addRow(t("set_dl_limit"), self.dl)
+        form.addRow(t("set_ul_limit"), self.ul)
+        form.addRow(note(t("sp_ul_warn")))
+        form.addRow(_section(t("sp_port"), None))
+        self.port = spin(cfg["port"], 1024, 65535)
+        prow = QHBoxLayout()
+        prow.addWidget(self.port)
+        rb = QPushButton(icon("fa6s.shuffle"), t("sp_random_port"))
+        rb.clicked.connect(lambda: __import__("random") and self.port.setValue(__import__("random").randint(20000, 60000)))
+        prow.addWidget(rb)
+        prow.addStretch()
+        form.addRow(t("set_port"), prow)
+        self.random_port = QCheckBox(t("sp_random_start")); self.random_port.setChecked(cfg.get("random_port", False))
+        form.addRow(self.random_port)
+        form.addRow(_section(t("sp_forward"), None))
+        self.upnp = QCheckBox(t("set_upnp")); self.upnp.setChecked(cfg["upnp"])
+        form.addRow(self.upnp)
+
+        # ── Connection → Proxy
+        form = page("sp_proxy", "fa6s.user-secret", "secondary", "sp_conn")
+        self.px_type = QComboBox()
+        for k in ("none", "socks5", "socks4", "http"):
+            self.px_type.addItem(t("px_" + k), k)
+        self.px_type.setCurrentIndex(max(0, self.px_type.findData(cfg.get("proxy_type", "none"))))
+        form.addRow(t("px_type"), self.px_type)
+        self.px_host = QLineEdit(cfg.get("proxy_host", "")); self.px_host.setPlaceholderText("127.0.0.1")
+        self.px_port = spin(cfg.get("proxy_port", 1080), 1, 65535)
+        form.addRow(t("px_host"), self.px_host)
+        form.addRow(t("px_port"), self.px_port)
+        self.px_peers = QCheckBox(t("px_peers")); self.px_peers.setChecked(cfg.get("proxy_peers", True))
+        self.px_dns = QCheckBox(t("px_dns")); self.px_dns.setChecked(cfg.get("proxy_hostnames", True))
+        form.addRow(self.px_peers)
+        form.addRow(self.px_dns)
+        form.addRow(_section(t("px_auth_sec"), None))
+        self.px_auth = QCheckBox(t("px_auth")); self.px_auth.setChecked(cfg.get("proxy_auth", False))
+        self.px_user = QLineEdit(cfg.get("proxy_user", ""))
+        self.px_pass = QLineEdit(cfg.get("proxy_pass", "")); self.px_pass.setEchoMode(QLineEdit.Password)
+        form.addRow(self.px_auth)
+        form.addRow(t("px_user"), self.px_user)
+        form.addRow(t("px_pass"), self.px_pass)
+        form.addRow(note(t("px_hint")))
+
+        def px_state():
+            on = self.px_type.currentData() != "none"
+            for w in (self.px_host, self.px_port, self.px_peers, self.px_dns, self.px_auth):
+                w.setEnabled(on)
+            auth = on and self.px_auth.isChecked() and self.px_type.currentData() != "socks4"
+            self.px_user.setEnabled(auth)
+            self.px_pass.setEnabled(auth)
+        self.px_type.currentIndexChanged.connect(px_state)
+        self.px_auth.toggled.connect(px_state)
+        px_state()
+
+        # ── Connection → Network / VPN
+        form = page("sp_net", "fa6s.shield-halved", "success", "sp_conn")
+        self.iface = QComboBox()
+        self.iface.addItem(t("iface_any"), "")
+        names = [n for n, _ in interfaces()]
+        for n, ip in interfaces():
+            self.iface.addItem(f"{n}  ({ip})", n)
+        cur = cfg.get("bind_interface", "")
+        if cur and cur not in names:
+            self.iface.addItem(t("iface_missing", cur), cur)
+        self.iface.setCurrentIndex(max(0, self.iface.findData(cur)))
+        form.addRow(t("set_iface"), self.iface)
+        form.addRow(note(t("iface_hint")))
+        self.geoip = QCheckBox(t("set_geoip")); self.geoip.setChecked(cfg.get("geoip", True))
+        form.addRow(self.geoip)
+
+        # ── Folders
+        form = page("sp_folders", "fa6s.folder-open", "warning")
         self.path = QLineEdit(cfg["save_path"])
-        browse = QPushButton(t("set_browse"))
+        browse = QPushButton("…"); browse.setFixedWidth(46); browse.setToolTip(t("set_browse"))
         browse.clicked.connect(self._browse)
         row = QHBoxLayout(); row.addWidget(self.path); row.addWidget(browse)
         form.addRow(t("set_save_path"), row)
+        mrow, self.move_done = folder_row(self, cfg.get("move_done_dir", ""))
+        form.addRow(t("set_move_done"), mrow)
+        self.move_bycat = QCheckBox(t("set_move_bycat"))
+        self.move_bycat.setChecked(cfg.get("move_done_by_category", True))
+        form.addRow(self.move_bycat)
+        form.addRow(_section(t("sp_watch"), None))
+        wrow, self.watch = folder_row(self, cfg.get("watch_dir", ""))
+        form.addRow(t("set_watch"), wrow)
+        self.watch_cat = QComboBox()
+        self.watch_cat.addItem(t("cat_none"), "")
+        for c in cfg.get("categories", []):
+            self.watch_cat.addItem(c["name"], c["name"])
+        self.watch_cat.setCurrentIndex(max(0, self.watch_cat.findData(cfg.get("watch_category", ""))))
+        form.addRow(t("set_watch_cat"), self.watch_cat)
+        if config.is_portable():
+            form.addRow(note(t("set_portable", config.data_dir())))
+
+        # ── Folders → Categories
+        form = page("set_grp_cats", "fa6s.tags", "purple", "sp_folders")
+        self.cats = CategoriesEditor(cfg.get("categories", []))
+        form.addRow(self.cats)
+
+        # ── Tasks
+        form = page("sp_tasks", "fa6s.list-check", "primary")
+        form.addRow(_section(t("sp_adding"), None))
+        self.show_add = QCheckBox(t("set_show_add")); self.show_add.setChecked(cfg.get("show_add_dialog", True))
+        self.add_sub = QCheckBox(t("ad_subfolder")); self.add_sub.setChecked(cfg.get("add_subfolder", False))
+        self.del_torrent = QCheckBox(t("sp_del_torrent")); self.del_torrent.setChecked(cfg.get("delete_torrent_file", False))
+        self.cross = QCheckBox(t("set_cross")); self.cross.setChecked(cfg.get("cross_seed", True))
+        for w in (self.show_add, self.add_sub, self.del_torrent, self.cross):
+            form.addRow(w)
+        form.addRow(_section(t("sp_done"), None))
+        self.toasts = None
+        if winint.IS_WIN:
+            self.toasts = QCheckBox(t("set_toasts")); self.toasts.setChecked(cfg.get("toasts", True))
+            form.addRow(self.toasts)
+        self.done_open = QCheckBox(t("set_done_open")); self.done_open.setChecked(cfg.get("done_open_folder", False))
+        form.addRow(self.done_open)
+        self.done_cmd = QLineEdit(cfg.get("done_cmd", ""))
+        self.done_cmd.setPlaceholderText('"C:\\Program Files\\Windows Defender\\MpCmdRun.exe" -Scan -ScanType 3 -File "%F"')
+        form.addRow(t("set_done_cmd"), self.done_cmd)
+        form.addRow(note(t("set_done_hint")))
+        form.addRow(_section(t("sp_queue"), None))
+        self.act_dl = spin(cfg["active_downloads"], 1, 100)
+        self.act_seed = spin(cfg["active_seeds"], 1, 1000)
+        form.addRow(t("set_active_dl"), self.act_dl)
+        form.addRow(t("set_active_seed"), self.act_seed)
+
+        # ── Tasks → BitTorrent
+        form = page("sp_bt", "fa6s.magnet", "danger", "sp_tasks")
+        form.addRow(_section(t("sp_transfer"), None))
+        self.dht = QCheckBox(t("sp_dht")); self.dht.setChecked(cfg["dht"])
+        self.lsd = QCheckBox(t("sp_lsd")); self.lsd.setChecked(cfg.get("lsd", True))
+        form.addRow(self.dht)
+        form.addRow(self.lsd)
+        form.addRow(note(t("sp_private_note")))
+        self.enc = QComboBox()
+        for k in ("prefer", "require", "disable"):
+            self.enc.addItem(t("enc_" + k), k)
+        self.enc.setCurrentIndex(max(0, self.enc.findData(cfg.get("encryption", "prefer"))))
+        form.addRow(t("set_enc"), self.enc)
+        self.utp = QComboBox()
+        self.utp.addItem(t("sp_utp_on"), True)
+        self.utp.addItem(t("sp_utp_off"), False)
+        self.utp.setCurrentIndex(0 if cfg.get("utp", True) else 1)
+        form.addRow(t("sp_utp"), self.utp)
+        form.addRow(_section(t("set_grp_seed"), None))
+        self.stop_ratio = QDoubleSpinBox(); self.stop_ratio.setRange(0, 1000); self.stop_ratio.setSingleStep(0.1)
+        self.stop_ratio.setValue(float(cfg.get("stop_ratio", 0)))
+        self.stop_ratio.setSpecialValueText(t("pm_off"))
+        self.stop_hours = spin(cfg.get("stop_hours", 0), 0, 100_000, " h", t("pm_off"))
+        form.addRow(t("pr_ratio"), self.stop_ratio)
+        form.addRow(t("pr_hours"), self.stop_hours)
+        form.addRow(note(t("pr_hint")))
+
+        # ── Tasks → BitTorrent → Trackers
+        form = page("set_grp_trackers", "fa6s.server", "info", "sp_bt")
+        hosts = sorted({r.tracker_host for r in parent.model.rows}) if parent is not None else []
+        self.tr_rules = TrackerRulesEditor(cfg.get("tracker_rules", {}), hosts)
+        form.addRow(self.tr_rules)
+        form.addRow(note(t("tr_rules_hint")))
+        form.addRow(_section(t("sp_auto_trk"), None))
+        self.auto_trk_on = QCheckBox(t("sp_auto_trk_on")); self.auto_trk_on.setChecked(cfg.get("auto_trackers_on", False))
+        form.addRow(self.auto_trk_on)
+        self.auto_trk = QPlainTextEdit(cfg.get("auto_trackers", ""))
+        self.auto_trk.setPlaceholderText("udp://tracker.example.org:6969/announce")
+        self.auto_trk.setMinimumHeight(120)
+        form.addRow(self.auto_trk)
+        form.addRow(note(t("sp_auto_trk_hint")))
+        self.auto_trk_on.toggled.connect(self.auto_trk.setEnabled)
+        self.auto_trk.setEnabled(self.auto_trk_on.isChecked())
+
+        # ── Tasks → BitTorrent → IP filter
+        form = page("sp_ipf", "fa6s.filter", "success", "sp_bt")
+        irow, self.ipf = folder_row(self, cfg.get("ip_filter", ""))
+        irow.itemAt(1).widget().clicked.disconnect()          # pick a file, not a folder
+        irow.itemAt(1).widget().clicked.connect(self._pick_ipf)
+        self.ipf.setPlaceholderText("https://… / C:\\ipfilter.dat")
+        form.addRow(t("set_ipfilter"), irow)
+        form.addRow(note(t("sp_ipf_hint")))
+
+        # ── Tasks → BitTorrent → Client filter
+        form = page("sp_clientf", "fa6s.user-shield", "danger", "sp_bt")
+        self.ban_bad = QCheckBox(t("set_ban_bad")); self.ban_bad.setChecked(cfg.get("ban_bad_peers", True))
+        form.addRow(self.ban_bad)
+        self._engine = parent.engine if parent is not None else None
+        nb = len(self._engine.bans) if self._engine else 0
+        self.unban = QPushButton(icon("fa6s.broom"), t("set_unban", nb))
+        self.unban.setEnabled(nb > 0)
+        self.unban.clicked.connect(self._clear_bans)
+        brow = QHBoxLayout(); brow.addWidget(self.unban); brow.addStretch()
+        form.addRow(brow)
+        form.addRow(note(t("sp_clientf_hint")))
+
+        # ── Integration
+        form = page("sp_integ", "fa6s.puzzle-piece", "orange")
+        self.autostart = None
+        if winint.IS_WIN:
+            self.autostart = QCheckBox(t("set_autostart"))
+            self.autostart.setChecked(winint.autostart_enabled())
+            form.addRow(self.autostart)
+            self.assoc_btn = QPushButton(t("set_assoc_btn"))
+            self.assoc_btn.clicked.connect(self._assoc)
+            if not winint.exe_path():
+                self.assoc_btn.setEnabled(False)
+                self.assoc_btn.setToolTip(t("assoc_portable"))
+            elif winint.is_default_handler():
+                self.assoc_btn.setText(t("assoc_default"))
+            form.addRow(t("set_assoc"), self.assoc_btn)
+        else:
+            form.addRow(note(t("sp_win_only")))
+        form.addRow(_section(t("sp_updates"), None))
+        urow = QHBoxLayout()
+        self.upd = QCheckBox(t("set_updates")); self.upd.setChecked(cfg.get("check_updates", True))
+        urow.addWidget(self.upd, 1)
+        ub = QPushButton(icon("fa6s.rotate"), t("upd_check_now"))
+        ub.clicked.connect(lambda: parent.check_updates(manual=True) if parent is not None else None)
+        urow.addWidget(ub)
+        form.addRow(urow)
+
+        # ── View
+        form = page("sp_view", "fa6s.palette", "pink")
         self.theme = QComboBox()
         for k in ("theme_system", "theme_light", "theme_dark"):
             self.theme.addItem(t(k))
@@ -1010,124 +1270,19 @@ class SettingsDialog(QDialog):
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
-        if config.is_portable():
-            pl = QLabel(t("set_portable", config.data_dir())); pl.setObjectName("meta"); pl.setWordWrap(True)
-            form.addRow(pl)
+        form.addRow(_section(t("sp_window"), None))
         self.tray = QCheckBox(t("set_tray")); self.tray.setChecked(cfg["minimize_to_tray"])
-        form.addRow(self.tray)
-        self.toasts = None
-        if winint.IS_WIN:
-            self.toasts = QCheckBox(t("set_toasts")); self.toasts.setChecked(cfg.get("toasts", True))
-            form.addRow(self.toasts)
-        self.show_add = QCheckBox(t("set_show_add")); self.show_add.setChecked(cfg.get("show_add_dialog", True))
-        form.addRow(self.show_add)
-        urow = QHBoxLayout()
-        self.upd = QCheckBox(t("set_updates")); self.upd.setChecked(cfg.get("check_updates", True))
-        urow.addWidget(self.upd, 1)
-        ub = QPushButton(t("upd_check_now"))
-        ub.clicked.connect(lambda: parent.check_updates(manual=True) if parent is not None else None)
-        urow.addWidget(ub)
-        form.addRow(urow)
-
-        # ── connection
-        form.addRow(_section(t("set_grp_conn"), "fa6s.plug", "info"))
-        self.port     = spin(cfg["port"], 1024, 65535)
-        self.dl       = spin(cfg["dl_limit"], 0, 10_000_000)
-        self.ul       = spin(cfg["ul_limit"], 0, 10_000_000)
-        self.act_dl   = spin(cfg["active_downloads"], 1, 100)
-        self.act_seed = spin(cfg["active_seeds"], 1, 1000)
-        form.addRow(t("set_port"), self.port)
-        form.addRow(t("set_dl_limit"), self.dl)
-        form.addRow(t("set_ul_limit"), self.ul)
-        form.addRow(t("set_active_dl"), self.act_dl)
-        form.addRow(t("set_active_seed"), self.act_seed)
-        # ── seeding
-        self.dht  = QCheckBox(t("set_dht"));  self.dht.setChecked(cfg["dht"])
-        self.upnp = QCheckBox(t("set_upnp")); self.upnp.setChecked(cfg["upnp"])
-        form.addRow(self.dht)
-        form.addRow(self.upnp)
-
-        from .netx import interfaces
-        from .dialogs import folder_row
-        form.addRow(_section(t("set_grp_net"), "fa6s.shield-halved", "success"))
-        self.iface = QComboBox()
-        self.iface.addItem(t("iface_any"), "")
-        names = [n for n, _ in interfaces()]
-        for n, ip in interfaces():
-            self.iface.addItem(f"{n}  ({ip})", n)
-        cur = cfg.get("bind_interface", "")
-        if cur and cur not in names:
-            self.iface.addItem(t("iface_missing", cur), cur)
-        self.iface.setCurrentIndex(max(0, self.iface.findData(cur)))
-        form.addRow(t("set_iface"), self.iface)
-        ih = QLabel(t("iface_hint")); ih.setObjectName("meta"); ih.setWordWrap(True)
-        form.addRow(ih)
-        self.enc = QComboBox()
-        for k in ("prefer", "require", "disable"):
-            self.enc.addItem(t("enc_" + k), k)
-        self.enc.setCurrentIndex(max(0, self.enc.findData(cfg.get("encryption", "prefer"))))
-        form.addRow(t("set_enc"), self.enc)
-        irow, self.ipf = folder_row(self, cfg.get("ip_filter", ""))
-        # the browse button of folder_row picks folders — swap it for a file picker
-        irow.itemAt(1).widget().clicked.disconnect()
-        irow.itemAt(1).widget().clicked.connect(self._pick_ipf)
-        self.ipf.setPlaceholderText("https://… / C:\\ipfilter.dat")
-        form.addRow(t("set_ipfilter"), irow)
-        self.geoip = QCheckBox(t("set_geoip")); self.geoip.setChecked(cfg.get("geoip", True))
-        form.addRow(self.geoip)
-
-        form.addRow(_section(t("set_grp_seed"), "fa6s.seedling", "success"))
-        self.stop_ratio = QDoubleSpinBox(); self.stop_ratio.setRange(0, 1000); self.stop_ratio.setSingleStep(0.1)
-        self.stop_ratio.setValue(float(cfg.get("stop_ratio", 0)))
-        self.stop_hours = spin(cfg.get("stop_hours", 0), 0, 100_000)
-        form.addRow(t("pr_ratio"), self.stop_ratio)
-        form.addRow(t("pr_hours"), self.stop_hours)
-        hint = QLabel(t("pr_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
-        form.addRow(hint)
-
-        from .dialogs import TrackerRulesEditor
-        form.addRow(_section(t("set_grp_trackers"), "fa6s.server", "info"))
-        hosts = sorted({r.tracker_host for r in parent.model.rows}) if parent is not None else []
-        self.tr_rules = TrackerRulesEditor(cfg.get("tracker_rules", {}), hosts)
-        form.addRow(self.tr_rules)
-        th = QLabel(t("tr_rules_hint")); th.setObjectName("meta"); th.setWordWrap(True)
-        form.addRow(th)
-
-        form.addRow(_section(t("set_grp_protect"), "fa6s.user-shield", "danger"))
-        self.ban_bad = QCheckBox(t("set_ban_bad")); self.ban_bad.setChecked(cfg.get("ban_bad_peers", True))
-        brow = QHBoxLayout()
-        brow.addWidget(self.ban_bad, 1)
-        self._engine = parent.engine if parent is not None else None
-        nb = len(self._engine.bans) if self._engine else 0
-        self.unban = QPushButton(t("set_unban", nb))
-        self.unban.setEnabled(nb > 0)
-        self.unban.clicked.connect(self._clear_bans)
-        brow.addWidget(self.unban)
-        form.addRow(brow)
-        self.cross = QCheckBox(t("set_cross")); self.cross.setChecked(cfg.get("cross_seed", True))
-        form.addRow(self.cross)
-
-        form.addRow(_section(t("set_grp_power"), "fa6s.bolt", "warning"))
-        self.awake = QCheckBox(t("set_awake")); self.awake.setChecked(cfg.get("keep_awake", True))
-        self.awake_seed = QCheckBox(t("set_awake_seed")); self.awake_seed.setChecked(cfg.get("keep_awake_seed", False))
-        form.addRow(self.awake)
-        form.addRow(self.awake_seed)
-        self.min_free = spin(cfg.get("min_free_gb", 0), 0, 100_000)
-        self.min_free.setSuffix(" GB"); self.min_free.setSpecialValueText(t("pm_off"))
-        form.addRow(t("set_min_free"), self.min_free)
-        self.done_open = QCheckBox(t("set_done_open")); self.done_open.setChecked(cfg.get("done_open_folder", False))
-        form.addRow(self.done_open)
-        self.done_cmd = QLineEdit(cfg.get("done_cmd", ""))
-        self.done_cmd.setPlaceholderText('"C:\\Program Files\\Windows Defender\\MpCmdRun.exe" -Scan -ScanType 3 -File "%F"')
-        form.addRow(t("set_done_cmd"), self.done_cmd)
-        dh = QLabel(t("set_done_hint")); dh.setObjectName("meta"); dh.setWordWrap(True)
-        form.addRow(dh)
         self.mini_cb = QCheckBox(t("set_mini")); self.mini_cb.setChecked(cfg.get("mini_widget", False))
-        form.addRow(self.mini_cb)
         self.title_speed = QCheckBox(t("set_title_speed")); self.title_speed.setChecked(cfg.get("speed_in_title", True))
-        form.addRow(self.title_speed)
+        for w in (self.tray, self.mini_cb, self.title_speed):
+            form.addRow(w)
 
-        form.addRow(_section(t("set_grp_sched"), "fa6s.clock", "orange"))
+        # ── Advanced
+        form = page("sp_adv", "fa6s.gears", "secondary")
+        form.addRow(note(t("sp_adv_hint")))
+
+        # ── Advanced → Scheduler
+        form = page("set_grp_sched", "fa6s.clock", "orange", "sp_adv")
         self.sch_on = QCheckBox(t("sch_enable")); self.sch_on.setChecked(cfg.get("sched_enabled", False))
         form.addRow(self.sch_on)
         self.sch_from = QTimeEdit(QTime.fromString(cfg.get("sched_from", "08:00"), "HH:mm"))
@@ -1137,53 +1292,47 @@ class SettingsDialog(QDialog):
         trow = QHBoxLayout()
         trow.addWidget(self.sch_from); trow.addWidget(QLabel(t("sch_to"))); trow.addWidget(self.sch_to); trow.addStretch()
         form.addRow(t("sch_from"), trow)
-        self.sch_dl = spin(cfg.get("sched_dl", 0), 0, 10_000_000)
-        self.sch_ul = spin(cfg.get("sched_ul", 0), 0, 10_000_000)
+        self.sch_dl = spin(cfg.get("sched_dl", 0), 0, 10_000_000, kib, t("unlimited"))
+        self.sch_ul = spin(cfg.get("sched_ul", 0), 0, 10_000_000, kib, t("unlimited"))
         form.addRow(t("sch_dl"), self.sch_dl)
         form.addRow(t("sch_ul"), self.sch_ul)
 
-        from .dialogs import CategoriesEditor, folder_row
-        form.addRow(_section(t("set_grp_cats"), "fa6s.tags", "purple"))
-        self.cats = CategoriesEditor(cfg.get("categories", []))
-        form.addRow(self.cats)
+        # ── Advanced → Power & disk
+        form = page("set_grp_power", "fa6s.bolt", "warning", "sp_adv")
+        self.awake = QCheckBox(t("set_awake")); self.awake.setChecked(cfg.get("keep_awake", True))
+        self.awake_seed = QCheckBox(t("set_awake_seed")); self.awake_seed.setChecked(cfg.get("keep_awake_seed", False))
+        form.addRow(self.awake)
+        form.addRow(self.awake_seed)
+        self.min_free = spin(cfg.get("min_free_gb", 0), 0, 100_000, " GB", t("pm_off"))
+        form.addRow(t("set_min_free"), self.min_free)
 
-        form.addRow(_section(t("set_grp_folders"), "fa6s.folder-open", "warning"))
-        wrow, self.watch = folder_row(self, cfg.get("watch_dir", ""))
-        form.addRow(t("set_watch"), wrow)
-        self.watch_cat = QComboBox()
-        self.watch_cat.addItem(t("cat_none"), "")
-        for c in cfg.get("categories", []):
-            self.watch_cat.addItem(c["name"], c["name"])
-        self.watch_cat.setCurrentIndex(max(0, self.watch_cat.findData(cfg.get("watch_category", ""))))
-        form.addRow(t("set_watch_cat"), self.watch_cat)
-        mrow, self.move_done = folder_row(self, cfg.get("move_done_dir", ""))
-        form.addRow(t("set_move_done"), mrow)
-        self.move_bycat = QCheckBox(t("set_move_bycat"))
-        self.move_bycat.setChecked(cfg.get("move_done_by_category", True))
-        form.addRow(self.move_bycat)
+        self.nav.expandAll()
+        self.nav.currentItemChanged.connect(
+            lambda it, _: it is not None and self.stack.setCurrentIndex(it.data(0, Qt.UserRole)))
+        self.nav.setCurrentItem(self._items["sp_conn"])
 
-        # ── windows
-        self.autostart = None
-        if winint.IS_WIN:
-            form.addRow(_section(t("set_grp_windows"), "fa6b.windows", "info"))
-            self.autostart = QCheckBox(t("set_autostart"))
-            self.autostart.setChecked(winint.autostart_enabled())
-            form.addRow(self.autostart)
-            self.assoc_btn = QPushButton(t("set_assoc_btn"))
-            self.assoc_btn.clicked.connect(self._assoc)
-            if not winint.exe_path():
-                self.assoc_btn.setEnabled(False)
-                self.assoc_btn.setToolTip(t("assoc_portable"))
-            elif winint.is_default_handler():
-                self.assoc_btn.setText(t("assoc_default"))
-            form.addRow(t("set_assoc"), self.assoc_btn)
+        btns = QHBoxLayout()
+        btns.addStretch()
+        ok = QPushButton(t("ok")); ok.setObjectName("primary"); ok.setDefault(True)
+        cancel = QPushButton(t("cancel"))
+        self.apply_btn = QPushButton(t("apply"))
+        for b in (ok, cancel, self.apply_btn):
+            b.setMinimumWidth(110)
+            btns.addWidget(b)
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        self.apply_btn.clicked.connect(self._apply)
+        self.apply_btn.setVisible(on_apply is not None)
+        outer.addLayout(btns)
 
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setObjectName("primary")
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        bb.setContentsMargins(20, 0, 20, 0)
-        outer.addWidget(bb)
+    def open_page(self, key: str):
+        it = self._items.get(key)
+        if it is not None:
+            self.nav.setCurrentItem(it)
+
+    def _apply(self):
+        if self.on_apply is not None:
+            self.on_apply(self.result_cfg())
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, t("choose_folder"), self.path.text())
@@ -1220,7 +1369,14 @@ class SettingsDialog(QDialog):
         c.update(save_path=self.path.text(), port=self.port.value(), dl_limit=self.dl.value(),
                  ul_limit=self.ul.value(), active_downloads=self.act_dl.value(),
                  active_seeds=self.act_seed.value(), dht=self.dht.isChecked(),
-                 lsd=self.dht.isChecked(), upnp=self.upnp.isChecked(),
+                 lsd=self.lsd.isChecked(), upnp=self.upnp.isChecked(),
+                 random_port=self.random_port.isChecked(), utp=bool(self.utp.currentData()),
+                 proxy_type=self.px_type.currentData(), proxy_host=self.px_host.text().strip(),
+                 proxy_port=self.px_port.value(), proxy_auth=self.px_auth.isChecked(),
+                 proxy_user=self.px_user.text(), proxy_pass=self.px_pass.text(),
+                 proxy_peers=self.px_peers.isChecked(), proxy_hostnames=self.px_dns.isChecked(),
+                 auto_trackers_on=self.auto_trk_on.isChecked(), auto_trackers=self.auto_trk.toPlainText().strip(),
+                 add_subfolder=self.add_sub.isChecked(), delete_torrent_file=self.del_torrent.isChecked(),
                  minimize_to_tray=self.tray.isChecked(),
                  show_add_dialog=self.show_add.isChecked(), check_updates=self.upd.isChecked(),
                  toasts=self.toasts.isChecked() if self.toasts is not None else c.get("toasts", True),
@@ -1431,6 +1587,7 @@ class AddTorrentDialog(QDialog):
         self.name_edit.textChanged.connect(self._update)
         grid.addWidget(self.name_edit, 1, 1, 1, 3)
         self.subfolder = QCheckBox(t("ad_subfolder"))
+        self.subfolder.setChecked(bool(cfg.get("add_subfolder")))
         self.subfolder.setVisible(self.single)
         self.subfolder.toggled.connect(self._update)
         grid.addWidget(self.subfolder, 2, 1, 1, 3)
@@ -3016,6 +3173,11 @@ class MainWindow(QMainWindow):
             else:
                 label = os.path.basename(item)
             self.log_event("torrent", t("log_added", label))
+            if not is_magnet and self.cfg.get("delete_torrent_file") and item.lower().endswith(".torrent"):
+                try:
+                    os.remove(item)
+                except OSError:
+                    pass
         except Exception as e:
             QMessageBox.warning(self, APP_TITLE, t("add_error", e))
         self.tick()
@@ -3377,12 +3539,18 @@ class MainWindow(QMainWindow):
                 else:
                     self.engine.set_task_props(k, {x: task[x] for x in ("dht", "pex", "lsd") if x in task})
 
-    def settings_dialog(self):
-        d = SettingsDialog(self.cfg, self)
+    def settings_dialog(self, page: str = ""):
+        d = SettingsDialog(self.cfg, self, on_apply=self._apply_settings)
+        if page:
+            d.open_page(page)
         if d.exec():
+            self._apply_settings(d.result_cfg())
+
+    def _apply_settings(self, new_cfg: dict):
+        if True:
             old_theme = (self.cfg.get("theme"), self.cfg.get("ui_style"))
             old_net = (self.cfg.get("ip_filter"), self.cfg.get("geoip"))
-            self.cfg.update(d.result_cfg())
+            self.cfg.update(new_cfg)
             config.save(self.cfg)
             self.engine.apply_settings(self.cfg)
             self.set_mini(bool(self.cfg.get("mini_widget")))
