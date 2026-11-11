@@ -517,7 +517,7 @@ class Engine:
     # ── adding / removing ──────────────────────────────────────
     def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False,
                          file_priorities: list[int] | None = None, seed_mode: bool = False,
-                         renames: dict[int, str] | None = None) -> str:
+                         renames: dict[int, str] | None = None, task: dict | None = None) -> str:
         ti = lt.torrent_info(path)
         for idx, new_path in (renames or {}).items():     # name edited in the add dialog
             ti.rename_file(idx, new_path)
@@ -527,7 +527,10 @@ class Engine:
             atp.flags |= lt.torrent_flags.seed_mode
         if file_priorities is not None:
             atp.file_priorities = file_priorities
-        return self._add(atp, save_path, paused)
+        key = self._add(atp, save_path, paused)
+        if task:
+            self.set_task_props(key, task)
+        return key
 
     def add_magnet(self, uri: str, save_path: str | None = None, paused: bool = False) -> str:
         atp = lt.parse_magnet_uri(uri)
@@ -845,6 +848,72 @@ class Engine:
         self.opts.setdefault(key, {}).update(
             stop_mode=p["stop_mode"], stop_ratio=float(p["stop_ratio"]), stop_hours=int(p["stop_hours"]),
             rule_done=False, own_limits=own, dl_limit=int(p["dl_limit"]), ul_limit=int(p["ul_limit"]))
+        self._save_opts()
+        h.save_resume_data(lt.torrent_handle.save_info_dict)
+
+    # ── task properties (BitComet's Advanced / Publisher / Download order tabs) ──
+    def task_props(self, key: str) -> dict:
+        h = self.handles[key]
+        o = self.opts.get(key, {})
+        fl = h.flags()
+        st = h.status()
+        d = {"trackers": self.trackers_raw(key),
+             "dht": not fl & lt.torrent_flags.disable_dht, "pex": not fl & lt.torrent_flags.disable_pex,
+             "lsd": not fl & lt.torrent_flags.disable_lsd,
+             "super_seed": bool(fl & lt.torrent_flags.super_seeding),
+             "own_limits": bool(o.get("own_limits")),
+             "dl_limit": int(o.get("dl_limit", 0)), "ul_limit": int(o.get("ul_limit", 0)),
+             "web_seeds": sorted(h.url_seeds()),
+             "publisher": o.get("publisher", ""), "publisher_url": o.get("publisher_url", ""),
+             "private": False, "creator": "", "created": 0, "comment": "",
+             "files": [], "order": o.get("order")}
+        if st.has_metadata:
+            ti = h.torrent_file()
+            d.update(private=bool(ti.priv()), creator=ti.creator(), created=ti.creation_date(), comment=ti.comment())
+            fs = ti.files()
+            prog = h.file_progress()
+            prios = h.get_file_priorities()
+            d["files"] = [(i, fs.file_path(i), fs.file_size(i),
+                           prog[i] / fs.file_size(i) if fs.file_size(i) else 1.0, prios[i])
+                          for i in range(fs.num_files()) if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
+        return d
+
+    def set_task_props(self, key: str, p: dict) -> None:
+        h = self.handles.get(key)
+        if not h:
+            return
+        o = self.opts.setdefault(key, {})
+        if "trackers" in p and p["trackers"] != self.trackers_raw(key):
+            self.set_trackers(key, p["trackers"])
+        for name, flag in (("dht", lt.torrent_flags.disable_dht), ("pex", lt.torrent_flags.disable_pex),
+                           ("lsd", lt.torrent_flags.disable_lsd)):
+            if name in p:
+                (h.unset_flags if p[name] else h.set_flags)(flag)
+        if "super_seed" in p:
+            (h.set_flags if p["super_seed"] else h.unset_flags)(lt.torrent_flags.super_seeding)
+        if "own_limits" in p:
+            own = bool(p["own_limits"])
+            dl, ul = (int(p.get("dl_limit", 0)), int(p.get("ul_limit", 0))) if own else (0, 0)
+            h.set_download_limit(dl * 1024 or -1)
+            h.set_upload_limit(ul * 1024 or -1)
+            self._limited.discard(key)
+            o.update(own_limits=own and bool(dl or ul), dl_limit=dl, ul_limit=ul)
+        if "web_seeds" in p:
+            have, want = set(h.url_seeds()), {u.strip() for u in p["web_seeds"] if u.strip()}
+            for u in have - want:
+                h.remove_url_seed(u)
+            for u in want - have:
+                h.add_url_seed(u)
+        for k in ("publisher", "publisher_url"):
+            if p.get(k):
+                o[k] = p[k]
+        if "order" in p:
+            prios = list(h.get_file_priorities())
+            if p["order"]:
+                h.prioritize_files(order_priorities(p["order"], prios))
+                o["order"] = list(p["order"])
+            elif o.pop("order", None) is not None:          # custom order switched off: back to normal
+                h.prioritize_files([0 if x == 0 else 4 for x in prios])
         self._save_opts()
         h.save_resume_data(lt.torrent_handle.save_info_dict)
 
@@ -1306,6 +1375,17 @@ TASK_ONLY_ALERTS = (lt.tracker_announce_alert, lt.state_changed_alert, lt.hash_f
                     lt.torrent_finished_alert, lt.metadata_received_alert, lt.add_torrent_alert,
                     lt.file_renamed_alert, lt.performance_alert)
 
+
+
+def order_priorities(order: list[int], prios: list[int]) -> list[int]:
+    """BitComet-style download order on top of libtorrent priorities: the first files get 7,
+    the last 1 (libtorrent has 7 levels, so a long list shares levels in order). Skipped stay 0."""
+    out = list(prios)
+    wanted = [i for i in order if 0 <= i < len(out) and out[i] != 0]
+    n = len(wanted)
+    for pos, i in enumerate(wanted):
+        out[i] = 7 - (pos * 7) // n
+    return out
 
 def _buckets(bits, n: int) -> list[float]:
     """A peer's piece bitfield squeezed to n fractions (0..1) for a small bar."""

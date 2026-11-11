@@ -1506,75 +1506,32 @@ class AddTorrentDialog(QDialog):
             bl.addStretch()
         tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
 
-        # ── Advanced ───────────────────────────────────────────
-        adv = QWidget()
-        al = QVBoxLayout(adv)
-        al.setContentsMargins(6, 10, 6, 6)
-        al.setSpacing(8)
+        # ── Advanced · Publisher · Download order (same tabs as Task properties) ──
         if cross:
             self.cross_cb = QCheckBox(t("cross_offer", cross["name"], cross["save_path"]))
             self.cross_cb.setChecked(True)
             self.cross_cb.setStyleSheet(f"color:{C['success_text'] if theme.current_name == 'dark' else C['success']};"
                                         "font-weight:600;")
             bl.insertWidget(0, self.cross_cb)          # important enough for the first tab
-        al.addWidget(_section(t("ad_tab_adv"), "fa6s.gears", "secondary"))
-        ag = QGridLayout()
-        ag.setHorizontalSpacing(14)
-        ag.setVerticalSpacing(6)
-        rows = []
-        if ti is not None:
-            ih = ti.info_hashes()
-            rows = [("gen_hash1", str(ih.v1) if ih.has_v1() else "—"),
-                    ("gen_hash2", str(ih.v2) if ih.has_v2() else "—"),
-                    ("gen_piece_info", f"{ti.num_pieces()} × {fmt_size(ti.piece_length())}"),
-                    ("gen_files", str(len(self.files))),
-                    ("gen_private", t("yes" if ti.priv() else "no")),
-                    ("gen_creator", ti.creator() or "—"),
-                    ("gen_created", datetime.fromtimestamp(ti.creation_date()).strftime("%Y-%m-%d %H:%M:%S")
-                     if ti.creation_date() else "—"),
-                    ("gen_comment", ti.comment() or "—")]
-        for r, (k, v) in enumerate(rows):
-            lab = QLabel(t(k)); lab.setObjectName("rowLbl")
-            val = QLabel(v); val.setObjectName("rowVal"); val.setWordWrap(True)
-            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            ag.addWidget(lab, r, 0)
-            ag.addWidget(val, r, 1)
-        ag.setColumnStretch(1, 1)
-        al.addLayout(ag)
-        trs = list(scrape_src[0]) if scrape_src else []
-        if trs:
-            al.addWidget(_section(t("tab_trackers"), "fa6s.server", "info"))
-            tl = QLabel("\n".join(trs)); tl.setObjectName("rowVal")
-            tl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            al.addWidget(tl)
-        al.addStretch()
-        tabs.addTab(adv, icon("fa6s.gears"), t("ad_tab_adv"))
-
-        # ── Publisher ──────────────────────────────────────────
-        pubw = QWidget()
-        pl = QVBoxLayout(pubw)
-        pl.setContentsMargins(6, 10, 6, 6)
-        pl.setSpacing(8)
-        pl.addWidget(_section(t("ad_publisher"), "fa6s.bullhorn", "orange"))
-        txt = []
-        if pub or pub_url:
-            txt.append(f'<b>{html.escape(pub or pub_url)}</b>')
-            if pub_url:
-                txt.append(f'<a href="{html.escape(pub_url)}" style="color:{C["primary"]}">{html.escape(pub_url)}</a>')
-        comment = ti.comment() if ti is not None else ""
-        if comment:
-            c_html = html.escape(comment)
-            if comment.startswith(("http://", "https://")):
-                c_html = f'<a href="{c_html}" style="color:{C["primary"]}">{c_html}</a>'
-            txt.append(f'{t("gen_comment")}: {c_html}')
-        pinfo = QLabel("<br><br>".join(txt) or t("ad_no_publisher"))
-        pinfo.setTextFormat(Qt.RichText)
-        pinfo.setOpenExternalLinks(True)
-        pinfo.setWordWrap(True)
-        pinfo.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        pl.addWidget(pinfo)
-        pl.addStretch()
-        tabs.addTab(pubw, icon("fa6s.bullhorn"), t("ad_publisher"))
+        from . import taskprops
+        task = {"trackers": [(tr.url, tr.tier) for tr in ti.trackers()] if ti is not None
+                else [(u, 0) for u in (scrape_src[0] if scrape_src else [])],
+                "private": bool(ti.priv()) if ti is not None else False,
+                "creator": ti.creator() if ti is not None else "",
+                "created": ti.creation_date() if ti is not None else 0,
+                "comment": ti.comment() if ti is not None else "",
+                "publisher": pub, "publisher_url": pub_url,
+                "web_seeds": [w["url"] for w in ti.web_seeds()] if ti is not None else [],
+                "files": [(i, p_, sz, 0.0, 4) for i, p_, sz in self.files]}
+        self.adv = taskprops.AdvancedTab(task)
+        self.pubtab = taskprops.PublisherTab(task)
+        self.ordertab = taskprops.OrderTab(task) if ti is not None else None
+        tabs.addTab(self.adv, icon("fa6s.gears"), t("ad_tab_adv"))
+        tabs.addTab(self.pubtab, icon("fa6s.bullhorn"), t("ad_publisher"))
+        if self.ordertab is not None:
+            tabs.addTab(self.ordertab, icon("fa6s.arrow-down-1-9"), t("tp_order"))
+            tabs.currentChanged.connect(lambda _: self.ordertab.set_wanted(
+                {idx for lf, idx, _ in self.leaves if lf.checkState(0) == Qt.Checked}))
 
         if self.cross_cb is not None:          # cross-seed uses the other torrent's folder and all files
             def cross_toggled(on):
@@ -1792,6 +1749,18 @@ class AddTorrentDialog(QDialog):
                     out[idx] = new + "/" + parts[1]
         return out
 
+    def task(self) -> dict:
+        """Advanced / Publisher / Download order settings, applied right after adding."""
+        out = self.adv.result()
+        out.update(self.pubtab.result())
+        if self.ordertab is not None:
+            out.update(self.ordertab.result())
+        pub = self.meta.get("publisher", "")
+        url = self.meta.get("publisher-url", "")
+        if pub or url:
+            out.update(publisher=pub, publisher_url=url)
+        return out
+
     def priorities(self) -> list[int] | None:
         """None = everything selected (keep libtorrent defaults)."""
         if self.ti is None or all(lf.checkState(0) == Qt.Checked for lf, _, _ in self.leaves):
@@ -1804,24 +1773,28 @@ class AddTorrentDialog(QDialog):
 
 
 class PropertiesDialog(QDialog):
-    def __init__(self, name: str, props: dict, parent=None):
+    """'Task properties' like BitComet's: Basic settings · Advanced · Publisher · Download order."""
+    def __init__(self, name: str, props: dict, parent=None, task: dict | None = None, save_path: str = ""):
         super().__init__(parent)
+        from . import taskprops
         _theme_title_bar(self)
-        self.setWindowTitle(t("pr_title"))
-        self.setMinimumWidth(520)
-        form = QFormLayout(self)
-        form.setContentsMargins(20, 12, 20, 16)
+        self.setWindowTitle(t("tp_title"))
+        self.setWindowIcon(app_icon())
+        self.resize(900, 720)
+        task = task or {}
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 14)
+        tabs = QTabWidget()
+        lay.addWidget(tabs, 1)
+
+        basic = QWidget()
+        form = QFormLayout(basic)
+        form.setContentsMargins(10, 10, 10, 10)
         head = _section(name); head.setWordWrap(True)
         form.addRow(head)
-
-        form.addRow(_section(t("pr_speed"), "fa6s.gauge-high", "orange"))
-        self.dl = QSpinBox(); self.dl.setRange(0, 10_000_000); self.dl.setValue(props["dl_limit"])
-        self.ul = QSpinBox(); self.ul.setRange(0, 10_000_000); self.ul.setValue(props["ul_limit"])
-        form.addRow(t("pr_dl"), self.dl)
-        form.addRow(t("pr_ul"), self.ul)
-        self.sup = QCheckBox(t("pr_super")); self.sup.setChecked(props["super_seed"])
-        form.addRow(self.sup)
-
+        if save_path:
+            sp = QLabel(save_path); sp.setObjectName("rowVal"); sp.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            form.addRow(t("ad_path"), sp)
         form.addRow(_section(t("pr_stop"), "fa6s.hand", "danger"))
         self.mode = QComboBox()
         for k in ("pr_mode_global", "pr_mode_custom", "pr_mode_never"):
@@ -1837,12 +1810,24 @@ class PropertiesDialog(QDialog):
         form.addRow(hint)
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self._mode_changed()
+        tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
+
+        adv_src = dict(task)
+        adv_src.update(super_seed=props["super_seed"], own_limits=bool(props["dl_limit"] or props["ul_limit"]),
+                       dl_limit=props["dl_limit"], ul_limit=props["ul_limit"])
+        self.adv = taskprops.AdvancedTab(adv_src)
+        self.pub = taskprops.PublisherTab(task)
+        self.order = taskprops.OrderTab(task)
+        tabs.addTab(self.adv, icon("fa6s.gears"), t("ad_tab_adv"))
+        tabs.addTab(self.pub, icon("fa6s.bullhorn"), t("ad_publisher"))
+        tabs.addTab(self.order, icon("fa6s.arrow-down-1-9"), t("tp_order"))
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setObjectName("primary")
+        bb.button(QDialogButtonBox.Cancel).setText(t("cancel"))
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        form.addRow(bb)
+        lay.addWidget(bb)
 
     def _mode_changed(self):
         custom = self.mode.currentIndex() == 1
@@ -1850,9 +1835,20 @@ class PropertiesDialog(QDialog):
         self.hours.setEnabled(custom)
 
     def result_props(self) -> dict:
-        return {"dl_limit": self.dl.value(), "ul_limit": self.ul.value(), "super_seed": self.sup.isChecked(),
+        a = self.adv.result()
+        own = a["own_limits"]
+        return {"dl_limit": a["dl_limit"] if own else 0, "ul_limit": a["ul_limit"] if own else 0,
+                "super_seed": a["super_seed"],
                 "stop_mode": ("global", "custom", "never")[self.mode.currentIndex()],
                 "stop_ratio": self.ratio.value(), "stop_hours": self.hours.value()}
+
+    def result_task(self) -> dict:
+        """Tracker list, peer sources, web seeds, download order (limits / super-seed go via result_props)."""
+        a = self.adv.result()
+        out = {k: v for k, v in a.items() if k not in ("own_limits", "dl_limit", "ul_limit", "super_seed")}
+        out.update(self.pub.result())
+        out.update(self.order.result())
+        return out
 
 
 class HashThread(QThread):
@@ -2825,7 +2821,7 @@ class MainWindow(QMainWindow):
         import libtorrent as lt
         is_magnet = item.startswith("magnet:")
         try:
-            save_path, paused, prios, category, renames = None, False, None, "", {}
+            save_path, paused, prios, category, renames, task = None, False, None, "", {}, None
             ti = None if is_magnet else lt.torrent_info(item)
             cross = self.engine.find_cross(ti) if ti is not None and self.cfg.get("cross_seed", True) else None
             if self.cfg.get("show_add_dialog", True):
@@ -2846,6 +2842,7 @@ class MainWindow(QMainWindow):
                     return
                 save_path, paused, prios = d.path.text().strip() or None, d.start_paused, d.priorities()
                 renames = d.renames()
+                task = d.task()
                 for idx, new_path in renames.items():      # the existing-files check below sees the new names
                     ti.rename_file(idx, new_path)
                 category = d.cat.currentData() or ""
@@ -2878,7 +2875,7 @@ class MainWindow(QMainWindow):
                 key = self.engine.add_magnet(item, save_path=save_path, paused=paused)
             else:
                 key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios,
-                                                   seed_mode=seed_mode, renames=renames)
+                                                   seed_mode=seed_mode, renames=renames, task=task)
             if category:
                 self.engine.set_category(key, category)
             if not cross:
@@ -3227,11 +3224,17 @@ class MainWindow(QMainWindow):
             return
         key = keys[0]
         row = next((r for r in self.model.rows if r.key == key), None)
-        d = PropertiesDialog(row.name if row else key, self.engine.props(key), self)
+        d = PropertiesDialog(row.name if row else key, self.engine.props(key), self,
+                             task=self.engine.task_props(key), save_path=row.save_path if row else "")
         if d.exec():
             p = d.result_props()
+            task = d.result_task()
             for k in keys:                       # same settings for every selected torrent
                 self.engine.set_props(k, p)
+                if k == key:                     # trackers, web seeds and file order belong to this one
+                    self.engine.set_task_props(k, task)
+                else:
+                    self.engine.set_task_props(k, {x: task[x] for x in ("dht", "pex", "lsd") if x in task})
 
     def settings_dialog(self):
         d = SettingsDialog(self.cfg, self)
