@@ -94,5 +94,6 @@ GitHub Actions сам соберёт установщик и прикрепит 
 его туда добавят их админы. Подмены peer_id под другие клиенты в нём нет
 и не будет: за это на приватных трекерах банят.
 
-Шрифт Oswald — SIL Open Font License (assets/fonts/OFL.txt).
-Иконки — Font Awesome Free (через qtawesome).
+## Лицензия
+ArtCore Client распространяется под **GNU LGPL v3** (`LICENSE`; она дополняет GNU GPL v3 из `COPYING`).
+Лицензии сторонних компонентов (Qt/PySide6, libtorrent, Font Awesome, Oswald, DB-IP и др.) — в `THIRD-PARTY.md`.

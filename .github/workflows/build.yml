@@ -128,7 +128,11 @@ jobs:
 
       - name: Portable zip
         shell: pwsh
-        run: Compress-Archive -Path dist/ArtCoreClient -DestinationPath installer/ArtCoreClient-portable.zip
+        run: |
+          Copy-Item LICENSE dist/ArtCoreClient/LICENSE.txt
+          Copy-Item COPYING dist/ArtCoreClient/COPYING.txt
+          Copy-Item THIRD-PARTY.md dist/ArtCoreClient/THIRD-PARTY.txt
+          Compress-Archive -Path dist/ArtCoreClient -DestinationPath installer/ArtCoreClient-portable.zip
 
       - uses: actions/upload-artifact@v4
         with:
