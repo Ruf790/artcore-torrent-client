@@ -288,7 +288,11 @@ class ProgressDelegate(QStyledItemDelegate):
     white over the filled part. Gradient by state, light stripes while downloading."""
     H = 16
 
+    style = "classic"            # classic (qBittorrent) | rounded — Settings → View
+
     def paint(self, painter, option, index):
+        if ProgressDelegate.style == "classic":
+            return self._paint_classic(painter, option, index)
         from PySide6.QtGui import QLinearGradient
         r = _row_of(index)
         painter.save()
@@ -333,6 +337,36 @@ class ProgressDelegate(QStyledItemDelegate):
         painter.setPen(QColor(C["body"]))
         painter.drawText(bar, Qt.AlignCenter, txt)
         if p > 0:                                    # same text in white where the bar is filled
+            painter.save()
+            painter.setClipRect(fill)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(bar, Qt.AlignCenter, txt)
+            painter.restore()
+        painter.restore()
+
+    CLASSIC = {"error": "danger", "tracker_error": "danger", "paused": "secondary",
+               "stopped": "secondary", "queued": "secondary", "checking": "warning", "metadata": "warning"}
+
+    def _paint_classic(self, painter, option, index):
+        """qBittorrent-style: a flat rectangle the height of the row, solid fill,
+        percentage centred — white over the filled part."""
+        r = _row_of(index)
+        painter.save()
+        _paint_cell_bg(painter, option)
+        bar = QRectF(option.rect).adjusted(3, 6, -3, -6)
+        p = max(0.0, min(1.0, r.progress))
+        painter.setPen(QPen(QColor(C["border"]), 1))
+        painter.setBrush(QColor(C["body_bg"]))
+        painter.drawRect(bar.adjusted(0.5, 0.5, -0.5, -0.5))
+        fill = QRectF(bar.left(), bar.top(), bar.width() * p, bar.height())
+        if p > 0:
+            key = self.CLASSIC.get(r.state, "primary")
+            painter.fillRect(fill.adjusted(1, 1, 0, -1) if p < 1 else bar.adjusted(1, 1, -1, -1), QColor(C[key]))
+        f = painter.font(); f.setPointSizeF(8.5); painter.setFont(f)
+        txt = "100%" if p >= 1 else f"{p * 100:.1f}%"
+        painter.setPen(QColor(C["body"]))
+        painter.drawText(bar, Qt.AlignCenter, txt)
+        if p > 0:
             painter.save()
             painter.setClipRect(fill)
             painter.setPen(QColor("#ffffff"))
@@ -1309,6 +1343,11 @@ class SettingsDialog(QDialog):
             self.style_combo.addItem(t("style_" + k), k)
         self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(cfg.get("ui_style", "soft"))))
         form.addRow(t("set_style"), self.style_combo)
+        self.pbar = QComboBox()
+        self.pbar.addItem(t("pb_classic"), "classic")
+        self.pbar.addItem(t("pb_rounded"), "rounded")
+        self.pbar.setCurrentIndex(max(0, self.pbar.findData(cfg.get("progress_style", "classic"))))
+        form.addRow(t("pb_style"), self.pbar)
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
@@ -1439,7 +1478,7 @@ class SettingsDialog(QDialog):
                  bind_interface=self.iface.currentData() or "", encryption=self.enc.currentData(),
                  ip_filter=self.ipf.text().strip(), geoip=self.geoip.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
-                 ui_style=self.style_combo.currentData(),
+                 ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
 
@@ -2429,6 +2468,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.engine = engine
         self.cfg = cfg
+        ProgressDelegate.style = cfg.get("progress_style", "classic")
         self._quitting = False
         self._themed: list[tuple] = []        # (setter, icon name, colour key) for re-theming
         self.taskbar = winint.Taskbar()
@@ -3684,6 +3724,8 @@ class MainWindow(QMainWindow):
             old_net = (self.cfg.get("ip_filter"), self.cfg.get("geoip"))
             self.cfg.update(new_cfg)
             config.save(self.cfg)
+            ProgressDelegate.style = self.cfg.get("progress_style", "classic")
+            self.table.viewport().update()
             self.engine.apply_settings(self.cfg)
             self.set_mini(bool(self.cfg.get("mini_widget")))
             self._sched_state = None             # re-apply schedule limits on next tick
