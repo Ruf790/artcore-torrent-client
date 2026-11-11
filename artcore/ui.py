@@ -1846,7 +1846,11 @@ class MainWindow(QMainWindow):
                 key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios)
             if category:
                 self.engine.set_category(key, category)
-            self.log_event("torrent", t("log_added", item[:120] if is_magnet else os.path.basename(item)))
+            if is_magnet:
+                label = lt.parse_magnet_uri(item).name or item[:60] + "…"
+            else:
+                label = os.path.basename(item)
+            self.log_event("torrent", t("log_added", label))
         except Exception as e:
             QMessageBox.warning(self, APP_TITLE, t("add_error", e))
         self.tick()

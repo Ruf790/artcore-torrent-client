@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 
 from . import VERSION
@@ -24,8 +25,13 @@ def _ver(s: str) -> tuple[int, ...]:
 def check() -> dict | None:
     """Latest release if it is newer than this build: {version, notes, url, size, page}."""
     req = urllib.request.Request(API, headers={"User-Agent": UA, "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        rel = json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            rel = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:              # no releases published yet
+            return None
+        raise
     if rel.get("draft") or rel.get("prerelease"):
         return None
     tag = rel.get("tag_name", "")

@@ -302,6 +302,8 @@ class Engine:
                 self._log("error", a.message())
             elif isinstance(a, lt.metadata_received_alert):
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
+            elif isinstance(a, lt.tracker_error_alert) and _is_skip_notice(a):
+                pass   # libtorrent skipped a local endpoint (127.0.0.1, ::1, fe80::) that can't reach the tracker
             elif isinstance(a, (lt.tracker_error_alert, lt.torrent_error_alert, lt.listen_failed_alert,
                                 lt.file_error_alert, lt.fastresume_rejected_alert)):
                 self._log("error", a.message())
@@ -651,6 +653,12 @@ class Engine:
             self._flush_stats()
         except OSError:
             pass
+
+
+def _is_skip_notice(a) -> bool:
+    """'skipping tracker announce (unreachable)': not an error, the endpoint simply has no route."""
+    msg = a.message()
+    return "skipping tracker announce" in msg or "unreachable" in msg and "skipping" in msg
 
 
 def _ratio(uploaded: int, downloaded: int, done: int) -> float:
