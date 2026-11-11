@@ -122,7 +122,7 @@ class Engine:
             outgoing = ""
         return {
             # Client identity: what the tracker sees in peer_id / User-Agent
-            "peer_fingerprint": lt.generate_fingerprint(PEER_ID_CODE, *VERSION_TUPLE),
+            "peer_fingerprint": lt.generate_fingerprint(PEER_ID_CODE, VERSION_TUPLE[0], VERSION_TUPLE[1], 0, 0),
             "user_agent":       f"{APP_NAME}/{VERSION} libtorrent/{lt.__version__}",
             "listen_interfaces": listen,
             "outgoing_interfaces": outgoing,
