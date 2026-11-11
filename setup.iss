@@ -33,6 +33,7 @@ OutputBaseFilename=ArtCoreClient-Setup-{#AppVersion}
 SetupIconFile=assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
+AppCopyright=Copyright (C) 2026 Ruf790 — GNU LGPL v3
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -73,6 +74,9 @@ Name: "firewall";     Description: "{cm:Firewall}";          GroupDescription: "
 
 [Files]
 Source: "dist\ArtCoreClient\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "COPYING"; DestDir: "{app}"; DestName: "COPYING.txt"; Flags: ignoreversion
+Source: "THIRD-PARTY.md"; DestDir: "{app}"; DestName: "THIRD-PARTY.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; AppUserModelID: "ArtCore.Client"

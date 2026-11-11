@@ -9,6 +9,7 @@ VSVersionInfo(
       StringStruct('FileVersion', '1.0.2'),
       StringStruct('InternalName', 'ArtCoreClient'),
       StringStruct('OriginalFilename', 'ArtCoreClient.exe'),
+      StringStruct('LegalCopyright', 'Copyright (C) 2026 Ruf790. GNU LGPL v3.'),
       StringStruct('ProductName', 'ArtCore Client'),
       StringStruct('ProductVersion', '1.0.2')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
 """ArtCore Client — BitTorrent client for Windows."""
 
 APP_NAME      = "ArtCore"
