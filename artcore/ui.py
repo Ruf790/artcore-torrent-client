@@ -2485,8 +2485,12 @@ class MainWindow(QMainWindow):
         btn("add_magnet", "fa6s.magnet", self.add_magnet_dialog, color="ic_magnet", shortcut="Ctrl+U")
         btn("create_torrent", "fa6s.file-circle-plus", self.create_torrent_dialog, color="ic_create", shortcut="Ctrl+N")
         lay.addWidget(vsep())
-        btn("start", "fa6s.play", lambda: self._each(self.engine.resume), color="success")
-        btn("pause", "fa6s.pause", lambda: self._each(self.engine.pause), color="secondary")
+        b = btn("start", "fa6s.play", lambda: self._each(self.engine.resume, all_if_none=True), color="success")
+        b.setToolTip(t("start_tip"))
+        b = btn("pause", "fa6s.pause", lambda: self._each(self.engine.pause, all_if_none=True), color="secondary")
+        b.setToolTip(t("pause_tip"))
+        a = QAction(self); a.setShortcut(QKeySequence.SelectAll); a.triggered.connect(self.select_all)
+        self.addAction(a)
         btn("remove", "fa6s.trash-can", self.remove_selected, "danger", color="danger", shortcut="Delete")
         lay.addStretch()
 
@@ -2571,6 +2575,7 @@ class MainWindow(QMainWindow):
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)   # click, Ctrl/Shift+click, drag
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(38)
@@ -3080,10 +3085,20 @@ class MainWindow(QMainWindow):
     def selected_keys(self) -> list[str]:
         return [_row_of(idx).key for idx in self.table.selectionModel().selectedRows()]
 
-    def _each(self, fn):
-        for k in self.selected_keys():
+    def visible_keys(self) -> list[str]:
+        """Torrents shown under the current filter / search."""
+        return [_row_of(self.proxy.index(r, 0)).key for r in range(self.proxy.rowCount())]
+
+    def _each(self, fn, all_if_none: bool = False):
+        """Run fn on the selected torrents; Start / Pause with nothing selected act on all shown."""
+        keys = self.selected_keys() or (self.visible_keys() if all_if_none else [])
+        for k in keys:
             fn(k)
         self.tick()
+
+    def select_all(self):
+        self.table.setFocus()
+        self.table.selectAll()
 
     def _log_startup(self):
         import libtorrent as lt
@@ -3252,11 +3267,27 @@ class MainWindow(QMainWindow):
             QGuiApplication.clipboard().setText(lt.make_magnet_uri(self.engine.handles[keys[0]]))
 
     def context_menu(self, pos):
-        if not self.selected_keys():
+        idx = self.table.indexAt(pos)
+        sm = self.table.selectionModel()
+        if idx.isValid() and not sm.isRowSelected(idx.row(), QModelIndex()):
+            self.table.selectRow(idx.row())           # right-click on an unselected row selects it
+        if not self.selected_keys():                  # empty space: actions for all torrents
+            if not self.proxy.rowCount():
+                return
+            m = QMenu(self)
+            m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
+            m.addSeparator()
+            m.addAction(icon("fa6s.play", "success"), t("start_all"), lambda: self._each(self.engine.resume, True))
+            m.addAction(icon("fa6s.pause"), t("pause_all"), lambda: self._each(self.engine.pause, True))
+            m.exec(self.table.viewport().mapToGlobal(pos))
             return
         m = QMenu(self)
+        n = len(self.selected_keys())
+        if n > 1:
+            m.addSection(t("n_selected", n))
         m.addAction(icon("fa6s.play", "success"), t("start"), lambda: self._each(self.engine.resume))
         m.addAction(icon("fa6s.pause"), t("pause"), lambda: self._each(self.engine.pause))
+        m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
         m.addSeparator()
         m.addAction(icon("fa6s.folder-open"), t("open_folder"), self.open_folder)
         m.addAction(icon("fa6s.rotate"), t("recheck"), lambda: self._each(self.engine.recheck))
