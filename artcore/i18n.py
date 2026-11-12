@@ -980,16 +980,21 @@ STRINGS = {
     "ba_bad":          ("не читается: {0}",                  "unreadable: {0}"),
     "ba_folder":       ("Папка загрузок",                    "Download folder"),
     "ba_save":         ("Сохранить в:",                      "Save to:"),
-    "ba_rename":       ("Автопереименование, если файл или папка с таким именем уже есть",
-                        "Rename automatically if a file or folder with the same name exists"),
-    "ba_rename_tip":   ("Включено: «Фильм» станет «Фильм (2)», старые файлы не трогаются.\n"
-                        "Выключено: файлы в папке будут проверены и использованы (докачка).",
-                        "On: “Movie” becomes “Movie (2)”, the old files are left alone.\n"
-                        "Off: the files in the folder are checked and used (resume)."),
+    "ba_disk":         ("В папке",                           "In the folder"),
+    "ba_exists_full":  ("Уже есть полностью",                "Already there, complete"),
+    "ba_exists":       ("Уже есть: {0} из {1} файлов ({2})",  "Already there: {0} of {1} files ({2})"),
+    "ba_exists_tip":   ("Файлы этого торрента уже лежат в папке. При загрузке они будут проверены "
+                        "по хешу, качаться будет только недостающее.",
+                        "This torrent's files are already in the folder. When downloaded they are "
+                        "hash-checked first, only what is missing is downloaded."),
+    "ba_exists_note":  ("У {0} торрент(ов) файлы уже есть в этой папке. Если их загрузить, сначала пройдёт "
+                        "проверка хеша, затем докачается только недостающее.",
+                        "{0} torrent(s) already have files in this folder. If you download them, the data "
+                        "is hash-checked first, then only what is missing is downloaded."),
+    "ba_check_log":    ("{0}: файлы уже есть в папке — проверка хеша", "{0}: files already in the folder — hash check"),
     "ba_now":          ("Загрузить сейчас",                  "Download now"),
     "ba_later":        ("Загрузить позже",                   "Download later"),
     "ba_later_tip":    ("Добавить остановленными — запустите, когда нужно", "Add them stopped — start them when you want"),
-    "ba_renamed":      ("Переименовано (имя занято): {0} → {1}", "Renamed (name taken): {0} → {1}"),
     "ba_done":         ("Добавлено торрентов: {0} → {1}",    "Torrents added: {0} → {1}"),
     "ba_done_later":   ("Добавлено остановленными: {0} → {1}", "Added stopped: {0} → {1}"),
     "kb_history":      ("История удалённых торрентов",       "History of removed torrents"),

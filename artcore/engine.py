@@ -1037,11 +1037,12 @@ class Engine:
                 st = a.handle.status()
                 # libtorrent also posts this when an already complete torrent is loaded at start-up;
                 # only a download that finished during this run gets the notification / done actions
-                if _finished_now(st, self.started):
+                # really downloaded in this run — not just found complete on disk by a hash check
+                # (that one gets "Recheck finished", not "Downloaded" and the when-done actions)
+                if _finished_now(st, self.started) and (st.total_payload_download > 0 or st.all_time_download > 0):
                     self.finished_names.append((st.name, _key(a.handle)))
-                    if st.total_payload_download > 0:      # really downloaded, not found complete on disk
-                        self.count_event("completed")
-                        self._auto_export(_key(a.handle), "export_done_dir")
+                    self.count_event("completed")
+                    self._auto_export(_key(a.handle), "export_done_dir")
                     self._move_when_done(a.handle, st)
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, lt.storage_moved_alert):
