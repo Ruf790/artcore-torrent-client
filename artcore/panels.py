@@ -841,3 +841,203 @@ class RestoreDialog(QDialog):
 
     def mapping(self) -> list[tuple[str, str]]:
         return [(old, e.text().strip()) for old, e in self.edits if e.text().strip() and e.text().strip() != old]
+
+
+# ============================================================
+#  Batch add (like BitComet's "Batch download")
+# ============================================================
+
+class BatchAddDialog(QDialog):
+    """Several .torrent files / magnets at once: a checklist, one save folder, auto-rename,
+    Download now / Download later."""
+    def __init__(self, cfg: dict, items: list[str], known_keys: set[str], used_paths: list[str] = (), parent=None):
+        super().__init__(parent)
+        import libtorrent as lt
+        from .engine import _key_of
+        from .filetypes import torrent_kind
+        _theme_title_bar(self)
+        self.cfg = cfg
+        self.setWindowTitle(t("ba_title"))
+        self.setWindowIcon(app_icon())
+        self.resize(860, 600)
+        self.paused = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 12)
+        lay.setSpacing(8)
+        lay.addWidget(_section(t("ba_list"), "fa6s.list-check", "primary"))
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels([t("col_name"), t("col_size"), t("ba_src")])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setAlternatingRowColors(False)
+        hh = self.tree.header()
+        hh.setStretchLastSection(True)
+        hh.setSectionResizeMode(0, QHeaderView.Interactive)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tree.setColumnWidth(0, 330)
+        self.entries: list[dict] = []
+        seen: set[str] = set()
+        for it in items:
+            e = {"item": it, "ok": True, "note": "", "size": 0, "ti": None, "name": ""}
+            try:
+                if it.startswith("magnet:"):
+                    atp = lt.parse_magnet_uri(it)
+                    key = _key_of(atp.info_hashes)
+                    e["name"] = atp.name or it[:60] + "…"
+                    kind = "magnet"
+                else:
+                    ti = lt.torrent_info(it)
+                    key = _key_of(ti.info_hashes())
+                    fs = ti.files()
+                    e["ti"], e["name"], e["size"] = ti, ti.name(), ti.total_size()
+                    kind = torrent_kind([(fs.file_path(i), fs.file_size(i)) for i in range(min(fs.num_files(), 2000))])
+                if key in known_keys:
+                    e["ok"], e["note"] = False, t("ba_have")
+                elif key in seen:
+                    e["ok"], e["note"] = False, t("ba_dup")
+                seen.add(key)
+            except Exception as ex:
+                e["ok"], e["note"], e["bad"] = False, t("ba_bad", ex), True
+                e["name"] = os.path.basename(it)
+                kind = "file"
+            row = QTreeWidgetItem([e["name"], fmt_size(e["size"]) if e["size"] else "—",
+                                   it if not e["note"] else f"{e['note']} — {it}"])
+            row.setIcon(0, widgets.torrent_icon(kind))
+            row.setToolTip(0, e["name"])
+            row.setToolTip(2, it)
+            row.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            if e["ok"]:
+                row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+                row.setCheckState(0, Qt.Checked)
+            else:
+                row.setFlags(Qt.ItemIsEnabled)
+                row.setCheckState(0, Qt.Unchecked)
+                for c in range(3):
+                    row.setForeground(c, QColor(C["secondary"]))
+                if e.get("bad"):
+                    row.setForeground(2, QColor(C["danger"]))
+            self.tree.addTopLevelItem(row)
+            e["row"] = row
+            self.entries.append(e)
+        self.tree.itemChanged.connect(lambda *_: self._update())
+        lay.addWidget(self.tree, 1)
+
+        from PySide6.QtWidgets import QCheckBox
+        self.all_cb = QCheckBox()
+        self.all_cb.setTristate(False)
+        self.all_cb.clicked.connect(self._toggle_all)
+        lay.addWidget(self.all_cb)
+
+        lay.addWidget(_section(t("ba_folder"), "fa6s.folder-open", "warning"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel(t("ba_save")))
+        self.path = PathCombo(cfg, cfg.get("save_path", ""), list(used_paths))
+        self.path.textChanged.connect(lambda *_: self._update())
+        row.addWidget(self.path, 1)
+        b = QPushButton(icon("fa6s.folder-open", "warning"), "")
+        b.setFixedWidth(40)
+        b.setToolTip(t("set_browse"))
+        b.clicked.connect(self._browse)
+        row.addWidget(b)
+        lay.addLayout(row)
+        self.disk = DiskBar()
+        lay.addWidget(self.disk)
+        self.rename = QCheckBox(t("ba_rename"))
+        self.rename.setToolTip(t("ba_rename_tip"))
+        self.rename.setChecked(cfg.get("batch_rename", True))
+        lay.addWidget(self.rename)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        self.now = QPushButton(icon("fa6s.download", "#ffffff"), t("ba_now"))
+        self.now.setObjectName("primary")
+        self.now.setDefault(True)
+        self.now.clicked.connect(lambda: self._done(False))
+        self.later = QPushButton(icon("fa6s.clock", "secondary"), t("ba_later"))
+        self.later.setToolTip(t("ba_later_tip"))
+        self.later.clicked.connect(lambda: self._done(True))
+        cancel = QPushButton(t("cancel"))
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(self.now); btns.addWidget(self.later); btns.addWidget(cancel)
+        lay.addLayout(btns)
+        self._update()
+
+    def _checked(self) -> list[dict]:
+        return [e for e in self.entries if e["ok"] and e["row"].checkState(0) == Qt.Checked]
+
+    def _toggle_all(self, on: bool):
+        self.tree.blockSignals(True)
+        for e in self.entries:
+            if e["ok"]:
+                e["row"].setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+        self.tree.blockSignals(False)
+        self._update()
+
+    def _update(self):
+        ok = [e for e in self.entries if e["ok"]]
+        sel = self._checked()
+        self.all_cb.blockSignals(True)
+        self.all_cb.setText(t("ba_all", len(sel), len(ok)) +
+                            (f"   ·   {fmt_size(sum(e['size'] for e in sel))}" if sel else ""))
+        self.all_cb.setChecked(bool(ok) and len(sel) == len(ok))
+        self.all_cb.setEnabled(bool(ok))
+        self.all_cb.blockSignals(False)
+        p = self.folder()
+        probe = p
+        while probe and not os.path.exists(probe):
+            parent = os.path.dirname(probe)
+            probe = "" if parent == probe else parent
+        try:
+            du = shutil.disk_usage(probe) if probe else None
+        except OSError:
+            du = None
+        self.disk.set_values(du.total if du else 0, du.free if du else 0, sum(e["size"] for e in sel))
+        self.now.setEnabled(bool(sel) and bool(p))
+        self.later.setEnabled(bool(sel) and bool(p))
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, t("ba_folder"), self.folder() or self.cfg.get("save_path", ""))
+        if d:
+            self.path.setText(os.path.normpath(d))
+
+    def folder(self) -> str:
+        p = self.path.text().strip().strip('"')
+        return os.path.normpath(p) if p else ""
+
+    def _done(self, paused: bool):
+        self.paused = paused
+        self.cfg["batch_rename"] = self.rename.isChecked()
+        self.accept()
+
+    def selected(self) -> list[dict]:
+        return self._checked()
+
+
+def free_name(folder: str, name: str, taken: set[str] = frozenset()) -> str:
+    """'name' if nothing is called so in <folder>, else 'name (2)', 'name (3)'… (extension kept)."""
+    stem, ext = os.path.splitext(name)
+    if not ext or len(ext) > 6 or " " in ext:          # a folder name with a dot in it
+        stem, ext = name, ""
+    cand, n = name, 2
+    while os.path.exists(os.path.join(folder, cand)) or cand.lower() in taken:
+        cand = f"{stem} ({n}){ext}"
+        n += 1
+    return cand
+
+
+def rename_root(ti, new_root: str) -> dict[int, str]:
+    """Renames that give the torrent a new top-level name (file of a single-file torrent,
+    folder of a multi-file one) — for engine.add_torrent_file(renames=…)."""
+    import libtorrent as lt
+    fs = ti.files()
+    out = {}
+    for i in range(fs.num_files()):
+        if fs.file_flags(i) & lt.file_storage.flag_pad_file:      # never on disk
+            continue
+        p = fs.file_path(i).replace("\\", "/")
+        parts = p.split("/")
+        parts[0] = new_root
+        out[i] = os.path.join(*parts)
+    return out
