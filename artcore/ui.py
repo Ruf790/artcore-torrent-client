@@ -3734,6 +3734,7 @@ class MainWindow(QMainWindow):
         self.tr_tbl.customContextMenuRequested.connect(self.trackers_menu)
 
         self.peers_tbl = self._mk_table(PEER_COLS, stretch=2)
+        self.peers_tbl.doubleClicked.connect(self._peer_double_click)
         for c, w in enumerate((170, 150, 0, 80, 130, 95, 105, 105, 95, 90, 100, 100, 80, 100, 95)):
             if w:
                 self.peers_tbl.setColumnWidth(c, w)
@@ -4799,11 +4800,24 @@ class MainWindow(QMainWindow):
             m.addAction(icon("fa6s.list"), t("peer_copy_list"), self.copy_peer_list)
         if ip:
             m.addSeparator()
+            addr = self.peers_tbl.item(it.row(), 0).text()
+            m.addAction(icon("fa6s.magnifying-glass", "primary"), t("pd_menu"), lambda: self.peer_dialog(key, addr))
             m.addAction(icon("fa6s.copy"), t("peer_copy_ip"), lambda: QGuiApplication.clipboard().setText(ip))
             m.addAction(icon("fa6s.ban", "danger"), t("peer_ban", ip),
                         lambda: (self.engine.ban(ip, t("peer_ban_manual")), self.tick()))
         m.addAction(icon("fa6s.list"), t("bans_list") + f" ({len(self.engine.bans)})", self.bans_dialog)
         m.exec(self.peers_tbl.viewport().mapToGlobal(pos))
+
+    def peer_dialog(self, key: str, addr: str):
+        from .panels import PeerDialog
+        PeerDialog(self.engine, key, addr, self.geo, self).exec()
+        self.tick()
+
+    def _peer_double_click(self, index):
+        keys = self.selected_keys()
+        cell = self.peers_tbl.item(index.row(), 0)
+        if keys and cell is not None:
+            self.peer_dialog(keys[0], cell.text())
 
     def add_peer_dialog(self, key: str):
         from PySide6.QtWidgets import QInputDialog
