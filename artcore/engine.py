@@ -6,7 +6,6 @@ restart, and exposes a small API the UI calls from its timer.
 from __future__ import annotations
 
 import json
-import threading
 import os
 import time
 from dataclasses import dataclass
@@ -67,7 +66,6 @@ class TorrentRow:
     order: int = 0      # place in the list ("#" column, Up / Down buttons), 1-based
     moving: int = -1       # "Move…" in progress: percent of the data already at the new place, -1 = not moving
     missing: str = ""      # the data folder / files are gone (drive unplugged, folder renamed): where they were
-    promo: tuple = ()      # tracker promotions: "free" | "silver" | "30" | "2x" (api_promo.php)
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -126,10 +124,6 @@ class Engine:
         self.finished_names: list[str] = []    # for tray notifications
         self.stopped_names: list[str] = []     # paused by a stop-seeding rule
         self._hosts: dict[str, str] = {}
-        self.promos: dict[str, tuple] = {}            # key → ("free", "2x", …) from the tracker
-        self.promo_global: dict[str, str] = {}        # tracker host → site-wide event type
-        self._promo_off: dict[str, float] = {}         # tracker base URL → don't ask before
-        self._promo_at = 0.0
         self._kinds: dict[str, str] = {}
         # per-torrent options libtorrent doesn't keep in resume data (stop-seeding rules)
         self.opts_path = os.path.join(data_dir, "torrent_opts.json")
@@ -704,7 +698,6 @@ class Engine:
         return self._add(atp, save_path, paused)
 
     def _add(self, atp: lt.add_torrent_params, save_path: str | None, paused: bool) -> str:
-        self._promo_at = 0.0                    # new torrent: ask the tracker about promotions soon
         atp.save_path = save_path or self.cfg.get("save_path") or os.path.expanduser("~/Downloads")
         if self.cfg.get("preallocate"):     # reserve the whole size at once: no fragmentation, no "disk full" later
             atp.storage_mode = lt.storage_mode_t.storage_mode_allocate
@@ -1257,8 +1250,6 @@ class Engine:
             self._track_peers()
         if self._polls % 60 == 0 and self.bans:
             self.expire_bans()
-        if self._polls % 30 == 5:
-            self.refresh_promos()
         if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
             try:
                 self._scan_peers()
@@ -1491,7 +1482,7 @@ class Engine:
                 done=s.total_wanted_done, sess_down=s.total_payload_download, sess_up=s.total_payload_upload,
                 queue=s.queue_position + 1 if s.queue_position >= 0 else -1,
                 forced=not paused and not auto and not s.errc.value(),
-                moving=moving, missing=missing, promo=self.promo_of(key),
+                moving=moving, missing=missing,
             ))
         return out
 
@@ -1507,67 +1498,6 @@ class Engine:
                  if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
         self._kinds[key] = kind = torrent_kind(files)
         return kind
-
-    # ── tracker promotions (FREE / 50% / 30% / 2× upload) ─────
-    PROMO_EVERY = 15 * 60
-
-    def promo_of(self, key: str) -> tuple:
-        tags = set(self.promos.get(key, ()))
-        g = self.promo_global.get(self._hosts.get(key, ""))
-        if g:
-            tags |= set(_GLOBAL_PROMO.get(g, ()))
-        return tuple(x for x in ("free", "silver", "30", "2x") if x in tags)
-
-    def refresh_promos(self, force: bool = False) -> None:
-        """Ask trackers with an api_promo.php (the ArtCore Gangsta tracker) which torrents are on
-        promotion. Runs in a background thread; a tracker without the API is left alone for a day."""
-        if not self.cfg.get("tracker_promos", True):
-            self.promos.clear(); self.promo_global.clear()
-            return
-        now = time.time()
-        if not force and now - self._promo_at < self.PROMO_EVERY:
-            return
-        self._promo_at = now
-        groups: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
-        for key, h in self.handles.items():
-            try:
-                if not h.is_valid():
-                    continue
-                trs = h.trackers()
-                if not trs:
-                    continue
-                base, pk = _promo_endpoint(trs[0]["url"])
-                if not base or self._promo_off.get(base, 0) > now:
-                    continue
-                ih = h.info_hashes()
-                if not ih.has_v1():
-                    continue
-                groups.setdefault((base, pk, self._host(key, h)), []).append((key, str(ih.v1)))
-            except Exception:
-                continue
-        if groups:
-            threading.Thread(target=self._fetch_promos, args=(groups,), daemon=True).start()
-
-    def _fetch_promos(self, groups) -> None:
-        import urllib.request
-        from urllib.parse import urlencode
-        for (base, pk, host), items in groups.items():
-            try:
-                found: dict[str, list[str]] = {}
-                glob = None
-                for i in range(0, len(items), 150):
-                    chunk = items[i:i + 150]
-                    url = base + "/api_promo.php?" + urlencode({"passkey": pk, "h": ",".join(h for _, h in chunk)})
-                    req = urllib.request.Request(url, headers={"User-Agent": f"ArtCore/{VERSION}"})
-                    with urllib.request.urlopen(req, timeout=15) as r:
-                        data = json.loads(r.read(1 << 20).decode("utf-8"))
-                    glob = data.get("global") or glob
-                    found.update({k.lower(): v for k, v in (data.get("t") or {}).items()})
-                for key, hx in items:
-                    self.promos[key] = tuple(found.get(hx, ()))
-                self.promo_global[host] = glob or ""
-            except Exception:
-                self._promo_off[base] = time.time() + 24 * 3600     # no API there (404, HTML…)
 
     def _host(self, key: str, h: lt.torrent_handle) -> str:
         cached = self._hosts.get(key)
@@ -2364,24 +2294,6 @@ BAD_PEER_IDS = (b"-XL", b"-SD", b"-XF", b"-QD", b"-BN", b"-DL", b"-HP", b"-TT")
 BAD_NAMES = ("xunlei", "thunder", "qqdownload", "baidu", "dandelion", "offline download", "torrentstorm")
 FAKE_MIN_BYTES = 64 << 20      # judge fake progress only after sending a peer this much
 FAKE_BAN_HOURS = 24            # a fake-progress ban is lifted after this (dynamic IPs get reused)
-
-
-_GLOBAL_PROMO = {"freeleech": ("free",), "silverleech": ("silver",), "thirtypercentleech": ("30",),
-                 "doubleupload": ("2x",)}
-
-
-def _promo_endpoint(announce: str) -> tuple[str, str]:
-    """(https://host, passkey) when the announce URL carries a passkey: /name-a-<32 hex> (the
-    tracker's pretty URL) or ?passkey=<32 hex>; ("", "") otherwise."""
-    import re
-    from urllib.parse import urlsplit
-    m = re.search(r"(?:-a-|[?&]passkey=)([0-9a-fA-F]{32})(?![0-9A-Za-z])", announce)
-    if not m:
-        return "", ""
-    u = urlsplit(announce)
-    if u.scheme not in ("http", "https") or not u.netloc:
-        return "", ""
-    return f"{u.scheme}://{u.netloc}", m.group(1).lower()
 
 
 def _ban_record(v) -> dict:
