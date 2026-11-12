@@ -22,6 +22,7 @@ DEFAULTS = {
     "language":         "ru",
     "theme":            "system",   # system | light | dark
     "ui_style":         "soft",     # muted (gray, like the site) | soft | vivid
+    "name_icon":        "state",    # name-column icon: state (BitComet arrows) | type (file kind)
     "progress_style":   "classic",  # classic (flat, like qBittorrent) | rounded (pill with gradient)
     "show_add_dialog":  True,
     "stop_ratio":       0.0,        # pause seeding at this ratio, 0 = off

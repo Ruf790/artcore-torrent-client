@@ -59,6 +59,99 @@ def torrent_icon(kind: str) -> QIcon:
     return _icon(name, col)
 
 
+# ---- BitComet-style status arrows for the name column ------------------------------
+# (light, dark, outline) of the glossy arrow body
+_ARROW_TONES = {
+    "green":  ("#8fe36a", "#2e9a1c", "#1d6b10"),
+    "orange": ("#ffc061", "#ec5b0b", "#a83e04"),
+    "grey":   ("#dcdcdc", "#8c8c8c", "#5f5f5f"),
+    "amber":  ("#ffe77a", "#eaa400", "#9c6c00"),
+    "blue":   ("#8cd0ff", "#1f7fd8", "#0d4f8c"),
+}
+_state_cache: dict[tuple, QIcon] = {}
+
+
+def _arrow_pixmap(size: int, direction: str, tone: str):
+    """A thick 3-D block arrow (as BitComet draws its task icons), drawn in a 16-unit box."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QLinearGradient, QPainterPath, QPen, QPixmap, QTransform
+    light, dark, edge = _ARROW_TONES[tone]
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.scale(size / 16.0, size / 16.0)
+    # pointing down; other directions are rotations of it
+    path = QPainterPath()
+    for i, (x, y) in enumerate(((5.2, 1.0), (10.8, 1.0), (10.8, 7.2), (14.8, 7.2), (8.0, 15.0),
+                                (1.2, 7.2), (5.2, 7.2))):
+        path.moveTo(x, y) if i == 0 else path.lineTo(x, y)
+    path.closeSubpath()
+    rot = {"down": 0, "up": 180, "right": -90, "left": 90}[direction]
+    if rot:
+        path = QTransform().translate(8, 8).rotate(rot).translate(-8, -8).map(path)
+    g = QLinearGradient(QPointF(2, 0), QPointF(14, 0))      # light left side, dark right: rounded look
+    g.setColorAt(0.0, QColor(light))
+    g.setColorAt(0.45, QColor(light).darker(108))
+    g.setColorAt(1.0, QColor(dark))
+    p.setPen(QPen(QColor(edge), 1.0))
+    p.setBrush(g)
+    p.drawPath(path)
+    gloss = QLinearGradient(QPointF(0, 0), QPointF(0, 16))   # glossy highlight on the upper half
+    gloss.setColorAt(0.0, QColor(255, 255, 255, 120))
+    gloss.setColorAt(0.6, QColor(255, 255, 255, 0))
+    p.setPen(Qt.NoPen)
+    p.setBrush(gloss)
+    p.drawPath(path)
+    p.end()
+    return pm
+
+
+def _error_pixmap(size: int):
+    from PySide6.QtGui import QFont, QLinearGradient, QPen, QPixmap
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.scale(size / 16.0, size / 16.0)
+    g = QLinearGradient(0, 1, 0, 15)
+    g.setColorAt(0.0, QColor("#ff8a7a")); g.setColorAt(1.0, QColor("#c92a1a"))
+    p.setPen(QPen(QColor("#8a1a0e"), 1.0))
+    p.setBrush(g)
+    p.drawEllipse(QRectF(1.5, 1.5, 13, 13))
+    p.setPen(QPen(QColor("#ffffff"), 2.2, Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(5.4, 5.4, 10.6, 10.6)
+    p.drawLine(10.6, 5.4, 5.4, 10.6)
+    p.end()
+    return pm
+
+
+def state_icon(state: str, complete: bool) -> QIcon:
+    """Name-column icon by task state, like BitComet: green ↓ downloading, orange ↑ seeding,
+    grey when stopped, amber while checking, blue while moving, red ✕ on errors."""
+    if state in ("error", "missing"):
+        spec = ("error", "")
+    elif state == "tracker_error":                 # data is fine, only the announce failed
+        spec = ("up" if complete else "down", "orange" if complete else "green")
+    elif state in ("downloading", "metadata"):
+        spec = ("down", "green")
+    elif state == "seeding":
+        spec = ("up", "orange")
+    elif state == "checking":
+        spec = ("up" if complete else "down", "amber")
+    elif state == "moving":
+        spec = ("right", "blue")
+    else:                                          # paused, stopped, queued, finished
+        spec = ("up" if complete else "down", "grey")
+    ic = _state_cache.get(spec)
+    if ic is None:
+        ic = QIcon()
+        for sz in (16, 20, 24, 32, 40, 48):
+            ic.addPixmap(_error_pixmap(sz) if spec[0] == "error" else _arrow_pixmap(sz, *spec))
+        _state_cache[spec] = ic
+    return ic
+
+
 def icon(name: str, key: str = "secondary") -> QIcon:
     return _icon(name, key)
 
