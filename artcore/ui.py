@@ -3086,6 +3086,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.lang_btn)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
         ibtn("fa6s.circle-info", t("about") + " (F1)", self.about_dialog)
+        # the window's ✕ only hides it to the tray — a visible way to really quit
+        qb = ibtn("fa6s.power-off", t("quit") + " (Ctrl+Q)", lambda: self.quit())
+        self._themed_icon(qb.setIcon, "fa6s.power-off", "danger")
         a = QAction(self); a.setShortcut(QKeySequence("F1")); a.triggered.connect(self.about_dialog)
         self.addAction(a)
         for seq, where in (("Ctrl+Shift+Up", "up"), ("Ctrl+Shift+Down", "down"),
