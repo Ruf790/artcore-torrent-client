@@ -153,6 +153,8 @@ class Engine:
                 self.history: list[dict] = json.load(f)
         except (FileNotFoundError, ValueError):
             self.history = []
+        self.disk: dict = {}             # live disk numbers (see _disk_stats)
+        self._perf_seen: dict[str, float] = {}
         self.port_check: dict = {}       # last result of check_port(): {"port", "open", "ip", "error", "at"}
 
         self.ses = lt.session(self._settings())
@@ -199,6 +201,7 @@ class Engine:
             "enable_outgoing_utp": bool(c.get("utp", True)),
             "enable_incoming_utp": bool(c.get("utp", True)),
             **_proxy_settings(c),
+            **_disk_settings(c),
             "download_rate_limit": int(c.get("dl_limit", 0)) * 1024,
             "upload_rate_limit":   int(c.get("ul_limit", 0)) * 1024,
             "active_downloads": int(c.get("active_downloads", 5)),
@@ -663,6 +666,8 @@ class Engine:
 
     def _add(self, atp: lt.add_torrent_params, save_path: str | None, paused: bool) -> str:
         atp.save_path = save_path or self.cfg.get("save_path") or os.path.expanduser("~/Downloads")
+        if self.cfg.get("preallocate"):     # reserve the whole size at once: no fragmentation, no "disk full" later
+            atp.storage_mode = lt.storage_mode_t.storage_mode_allocate
         if paused:
             atp.flags |= lt.torrent_flags.paused
             atp.flags &= ~lt.torrent_flags.auto_managed
@@ -1120,6 +1125,10 @@ class Engine:
                 self._log("tracker", a.message())
             elif isinstance(a, lt.listen_succeeded_alert):
                 self._log("network", a.message())
+            elif isinstance(a, lt.session_stats_alert):
+                self._disk_stats(a.values)
+            elif isinstance(a, lt.performance_alert):
+                self._perf_warning(a)
             elif isinstance(a, lt.external_ip_alert):
                 self.wan_ip = str(a.external_address)
                 self._log("network", a.message())
@@ -1147,6 +1156,8 @@ class Engine:
                 self._log("error", f"missing-files scan: {e}")
         if self._polls % 10 == 0:
             self._count_days()
+        if self._polls % 2 == 0:
+            self.ses.post_session_stats()      # → session_stats_alert → self.disk
         if self._polls % 5 == 0:
             self._track_peers()
         if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
@@ -1156,6 +1167,40 @@ class Engine:
                 self._log("error", f"peer scan: {e}")
         if time.time() - self._stats_flushed > 300:     # survive a crash: flush totals every 5 min
             self._flush_stats()
+
+    def _disk_stats(self, v: dict) -> None:
+        """Live disk numbers for Settings → Disk & cache (rates from the counters' deltas)."""
+        now = time.time()
+        prev, at = getattr(self, "_disk_prev", None), getattr(self, "_disk_at", 0.0)
+        cur = {k: int(v.get("disk." + k, 0)) for k in ("num_blocks_written", "num_blocks_read",
+                                                       "num_blocks_hashed", "disk_write_time")}
+        d = {"queued": int(v.get("disk.queued_write_bytes", 0)),
+             "jobs": int(v.get("disk.queued_disk_jobs", 0)),
+             "blocked": int(v.get("disk.blocked_disk_jobs", 0)),
+             "files": int(v.get("disk.file_pool_size", 0)),
+             "write": 0, "read": 0, "hash": 0}
+        if prev and now > at:
+            dt = now - at
+            d["write"] = max(0, cur["num_blocks_written"] - prev["num_blocks_written"]) * 16384 / dt
+            d["read"] = max(0, cur["num_blocks_read"] - prev["num_blocks_read"]) * 16384 / dt
+            d["hash"] = max(0, cur["num_blocks_hashed"] - prev["num_blocks_hashed"]) * 16384 / dt
+        self._disk_prev, self._disk_at = cur, now
+        self.disk = d
+
+    def _perf_warning(self, a) -> None:
+        try:
+            code = lt.performance_warning_t.values[int(a.warning_code)].name
+        except Exception:
+            code = str(a.warning_code)
+        last = self._perf_seen.get(code, 0)
+        if time.time() - last < 600:
+            return
+        self._perf_seen[code] = time.time()
+        if code in _PERF_HINTS:
+            from .i18n import t
+            self._log("error", t("perf_" + code))
+        else:
+            self._log("system", a.message())
 
     def _tracker_failed(self, a) -> None:
         reason = ""
@@ -2195,6 +2240,54 @@ def _buckets(bits, n: int) -> list[float]:
         chunk = bits[a:z]
         out.append(sum(1 for x in chunk if x) / len(chunk))
     return out
+
+
+# Settings → Advanced → Disk & cache. Presets fill these values in the dialog.
+DISK_PRESETS = {
+    "hdd": {"preallocate": True,  "disk_write_mode": "auto",   "disk_os_cache": "enable",
+            "disk_queue_mb": 256, "aio_threads": 4,  "hashing_threads": 1, "checking_mem_mb": 32,
+            "file_pool": 100, "send_buffer_kb": 1024},
+    "ssd": {"preallocate": False, "disk_write_mode": "mmap",   "disk_os_cache": "enable",
+            "disk_queue_mb": 128, "aio_threads": 16, "hashing_threads": max(1, min(4, os.cpu_count() or 1)),
+            "checking_mem_mb": 64, "file_pool": 200, "send_buffer_kb": 1024},
+    "lowram": {"preallocate": False, "disk_write_mode": "pwrite", "disk_os_cache": "enable",
+               "disk_queue_mb": 32, "aio_threads": 4, "hashing_threads": 1, "checking_mem_mb": 8,
+               "file_pool": 40, "send_buffer_kb": 500},
+}
+
+_LT_DEFAULTS = lt.default_settings()
+
+
+def _disk_settings(c: dict) -> dict:
+    """libtorrent disk / cache settings. Only keys this libtorrent build knows are sent
+    (the Windows wheels lag behind the Linux ones)."""
+    wm = getattr(lt, "mmap_write_mode_t", None)
+    modes = {"pwrite": 0, "mmap": 1, "auto": 2}
+    if wm is not None:
+        modes = {"pwrite": int(wm.always_pwrite), "mmap": int(wm.always_mmap_write),
+                 "auto": int(wm.auto_mmap_write)}
+    io = lt.io_buffer_mode_t
+    cache = {"enable": (int(io.enable_os_cache), int(io.enable_os_cache)),
+             "disable": (int(io.disable_os_cache), int(io.disable_os_cache)),
+             "write_through": (int(io.enable_os_cache), int(io.write_through))
+             }.get(c.get("disk_os_cache", "enable"), (0, 0))
+    out = {
+        "disk_write_mode":      modes.get(c.get("disk_write_mode", "mmap"), modes["mmap"]),
+        "disk_io_read_mode":    cache[0],
+        "disk_io_write_mode":   cache[1],
+        "max_queued_disk_bytes": max(1, int(c.get("disk_queue_mb", 100))) << 20,
+        "aio_threads":          max(1, int(c.get("aio_threads", 10))),
+        "hashing_threads":      max(1, int(c.get("hashing_threads", 1))),
+        "checking_mem_usage":   max(1, int(c.get("checking_mem_mb", 4)) * 64),   # 16 KiB blocks
+        "file_pool_size":       max(4, int(c.get("file_pool", 40))),
+        "send_buffer_watermark": max(16, int(c.get("send_buffer_kb", 500))) * 1024,
+    }
+    return {k: v for k, v in out.items() if k in _LT_DEFAULTS}
+
+
+# performance_alert kinds with an explanation in i18n ("perf_<name>"); at most once / 10 min each
+_PERF_HINTS = ("outstanding_disk_buffer_limit_reached", "too_high_disk_queue_limit",
+               "send_buffer_watermark_too_low", "too_few_file_descriptors")
 
 
 def _proxy_settings(c: dict) -> dict:

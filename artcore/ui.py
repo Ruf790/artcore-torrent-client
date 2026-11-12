@@ -1473,6 +1473,57 @@ class SettingsDialog(QDialog):
         self.min_free = spin(cfg.get("min_free_gb", 0), 0, 100_000, " GB", t("pm_off"))
         form.addRow(t("set_min_free"), self.min_free)
 
+        # ── Advanced → Disk & cache
+        form = page("sp_disk", "fa6s.hard-drive", "teal", "sp_adv")
+        prow = QHBoxLayout()
+        for key, ic in (("hdd", "fa6s.compact-disc"), ("ssd", "fa6s.bolt"),
+                        ("lowram", "fa6s.memory"), ("default", "fa6s.rotate-left")):
+            b = QPushButton(icon(ic, "primary"), t("dk_" + key))
+            b.clicked.connect(lambda _=False, k=key: self._disk_preset(k))
+            prow.addWidget(b)
+        prow.addStretch()
+        form.addRow(_section(t("dk_presets"), None))
+        form.addRow(prow)
+        form.addRow(note(t("dk_preset_note")))
+        form.addRow(_section(t("dk_files"), None))
+        self.prealloc = QCheckBox(t("dk_prealloc")); self.prealloc.setChecked(cfg.get("preallocate", False))
+        form.addRow(self.prealloc)
+        form.addRow(note(t("dk_prealloc_note")))
+        self.file_pool = spin(cfg.get("file_pool", 40), 4, 5000)
+        form.addRow(t("dk_file_pool"), self.file_pool)
+        form.addRow(_section(t("dk_write"), None))
+        self.wmode = QComboBox()
+        for k in ("mmap", "auto", "pwrite"):
+            self.wmode.addItem(t("dk_mode_" + k), k)
+        form.addRow(t("dk_mode"), self.wmode)
+        form.addRow(note(t("dk_mode_note")))
+        self.oscache = QComboBox()
+        for k, lab in (("enable", "dk_cache_enable"), ("disable", "dk_cache_disable"), ("write_through", "dk_cache_wt")):
+            self.oscache.addItem(t(lab), k)
+        form.addRow(t("dk_cache"), self.oscache)
+        self.dqueue = spin(cfg.get("disk_queue_mb", 100), 1, 4096, " MiB")
+        form.addRow(t("dk_queue"), self.dqueue)
+        form.addRow(note(t("dk_queue_note")))
+        self.sendbuf = spin(cfg.get("send_buffer_kb", 500), 16, 65536, " KiB")
+        form.addRow(t("dk_sendbuf"), self.sendbuf)
+        form.addRow(_section(t("dk_threads"), None))
+        self.aio = spin(cfg.get("aio_threads", 10), 1, 64)
+        form.addRow(t("dk_aio"), self.aio)
+        self.hthreads = spin(cfg.get("hashing_threads", 1), 1, 32)
+        form.addRow(t("dk_hash"), self.hthreads)
+        form.addRow(note(t("dk_hash_note")))
+        self.checkmem = spin(cfg.get("checking_mem_mb", 4), 1, 1024, " MiB")
+        form.addRow(t("dk_checkmem"), self.checkmem)
+        self._disk_fill(cfg)
+        if self._engine is not None:
+            form.addRow(_section(t("dk_now"), "fa6s.chart-line", "teal"))
+            self.disk_live = note(t("dk_live_none"))
+            self.disk_live.setTextFormat(Qt.RichText)
+            form.addRow(self.disk_live)
+            self._disk_timer = QTimer(self)
+            self._disk_timer.timeout.connect(self._disk_refresh)
+            self._disk_timer.start(1000)
+
         self.nav.expandAll()
         self.nav.currentItemChanged.connect(
             lambda it, _: it is not None and self.stack.setCurrentIndex(it.data(0, Qt.UserRole)))
@@ -1500,6 +1551,31 @@ class SettingsDialog(QDialog):
     def _apply(self):
         if self.on_apply is not None:
             self.on_apply(self.result_cfg())
+
+    def _disk_fill(self, v: dict):
+        self.prealloc.setChecked(bool(v.get("preallocate", False)))
+        self.wmode.setCurrentIndex(max(0, self.wmode.findData(v.get("disk_write_mode", "mmap"))))
+        self.oscache.setCurrentIndex(max(0, self.oscache.findData(v.get("disk_os_cache", "enable"))))
+        self.dqueue.setValue(int(v.get("disk_queue_mb", 100)))
+        self.aio.setValue(int(v.get("aio_threads", 10)))
+        self.hthreads.setValue(int(v.get("hashing_threads", 1)))
+        self.checkmem.setValue(int(v.get("checking_mem_mb", 4)))
+        self.file_pool.setValue(int(v.get("file_pool", 40)))
+        self.sendbuf.setValue(int(v.get("send_buffer_kb", 500)))
+
+    def _disk_preset(self, key: str):
+        from .engine import DISK_PRESETS
+        self._disk_fill(DISK_PRESETS.get(key) or config.DEFAULTS)
+
+    def _disk_refresh(self):
+        d = getattr(self._engine, "disk", None)
+        if not d:
+            return
+        txt = t("dk_live", fmt_size(d["write"]), fmt_size(d["read"]), fmt_size(d["hash"]),
+                fmt_size(d["queued"]), d["jobs"], d["blocked"], d["files"])
+        if d["queued"] >= self.dqueue.value() * (1 << 20) * 0.9 or d["blocked"]:
+            txt += f'<br><span style="color:{C["danger"]}">{html.escape(t("dk_live_busy"))}</span>'
+        self.disk_live.setText(txt)
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, t("choose_folder"), self.path.text())
@@ -1569,6 +1645,11 @@ class SettingsDialog(QDialog):
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
                  compact_list=self.compact.isChecked(),
+                 preallocate=self.prealloc.isChecked(), disk_write_mode=self.wmode.currentData(),
+                 disk_os_cache=self.oscache.currentData(), disk_queue_mb=self.dqueue.value(),
+                 aio_threads=self.aio.value(), hashing_threads=self.hthreads.value(),
+                 checking_mem_mb=self.checkmem.value(), file_pool=self.file_pool.value(),
+                 send_buffer_kb=self.sendbuf.value(),
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
 
