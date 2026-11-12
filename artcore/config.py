@@ -11,6 +11,10 @@ DEFAULTS = {
     "ul_limit":         0,
     "active_downloads": 5,
     "active_seeds":     20,
+    "max_connections":  200,        # all torrents together, 0 = no limit
+    "conn_per_torrent": 0,          # default for every torrent, 0 = no limit
+    "upload_slots":     8,          # peers we upload to at once, all torrents, 0 = no limit
+    "slots_per_torrent": 0,         # … per torrent, 0 = no limit
     "dht":              True,   # private torrents never use DHT/PEX anyway
     "lsd":              True,
     "upnp":             True,

@@ -67,30 +67,130 @@ class TrackersDialog(QDialog):
         return out
 
 
+def replace_url(url: str, old: str, new: str, case: bool) -> str:
+    """Find & replace inside one tracker URL (case-insensitive unless asked)."""
+    if not old:
+        return url
+    if case:
+        return url.replace(old, new)
+    import re
+    return re.sub(re.escape(old), lambda _m: new, url, flags=re.IGNORECASE)
+
+
 class ReplaceTrackersDialog(QDialog):
-    """Find & replace in tracker URLs of selected or all torrents (changed passkey)."""
-    def __init__(self, n_selected: int, n_all: int, parent=None):
+    """Find & replace in tracker URLs of selected or all torrents (changed passkey, new domain,
+    http → https) with a live preview: which torrents and which URLs change, and how."""
+    def __init__(self, engine, selected: list[str], parent=None):
         super().__init__(parent)
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QCheckBox, QTreeWidget
         ui = _ui()
         ui._theme_title_bar(self)
+        self.engine = engine
+        self.selected = selected
         self.setWindowTitle(t("rep_title"))
-        self.setMinimumWidth(560)
-        form = QFormLayout(self)
-        form.setContentsMargins(20, 12, 20, 16)
-        form.addRow(ui._section(t("rep_title")))
+        self.resize(900, 640)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 12, 20, 14)
+        lay.setSpacing(8)
+        lay.addWidget(ui._section(t("rep_title"), "fa6s.right-left", "primary"))
         hint = QLabel(t("rep_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
-        form.addRow(hint)
+        lay.addWidget(hint)
+        form = QFormLayout()
         self.find = QLineEdit()
         self.repl = QLineEdit()
         form.addRow(t("rep_find"), self.find)
         form.addRow(t("rep_with"), self.repl)
-        self.sel = QRadioButton(t("rep_scope_sel", n_selected))
-        self.all = QRadioButton(t("rep_scope_all", n_all))
-        (self.sel if n_selected else self.all).setChecked(True)
-        self.sel.setEnabled(n_selected > 0)
-        form.addRow(self.sel)
-        form.addRow(self.all)
-        form.addRow(_buttons(self))
+        lay.addLayout(form)
+        opts = QHBoxLayout()
+        self.case = QCheckBox(t("rep_case"))
+        opts.addWidget(self.case)
+        https = QPushButton(ui.icon("fa6s.lock", "success"), "http:// → https://")
+        https.clicked.connect(lambda: (self.find.setText("http://"), self.repl.setText("https://")))
+        opts.addWidget(https)
+        opts.addStretch()
+        self.sel = QRadioButton(t("rep_scope_sel", len(selected)))
+        self.all = QRadioButton(t("rep_scope_all", len(engine.handles)))
+        (self.sel if selected else self.all).setChecked(True)
+        self.sel.setEnabled(bool(selected))
+        opts.addWidget(self.sel)
+        opts.addWidget(self.all)
+        lay.addLayout(opts)
+
+        lay.addWidget(ui._section(t("rep_preview"), "fa6s.eye", "info"))
+        self.summary = QLabel(); self.summary.setTextFormat(Qt.RichText)
+        lay.addWidget(self.summary)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels([t("rep_col_was"), t("rep_col_now")])
+        self.tree.setColumnWidth(0, 420)
+        self.tree.setUniformRowHeights(True)
+        lay.addWidget(self.tree, 1)
+        self.bb = _buttons(self, t("rep_apply"))
+        lay.addWidget(self.bb)
+
+        self._timer = QTimer(self); self._timer.setSingleShot(True); self._timer.setInterval(250)
+        self._timer.timeout.connect(self._preview)
+        for w in (self.find, self.repl):
+            w.textChanged.connect(lambda _=None: self._timer.start())
+        for w in (self.case, self.sel, self.all):
+            w.toggled.connect(lambda _=None: self._timer.start())
+        self.changes: dict[str, list[tuple[str, int]]] = {}
+        self._preview()
+
+    def keys(self) -> list[str]:
+        return list(self.selected) if self.sel.isChecked() else list(self.engine.handles)
+
+    def _preview(self):
+        from PySide6.QtWidgets import QTreeWidgetItem
+        from PySide6.QtGui import QColor
+        ui = _ui()
+        C = ui.C
+        old, new, case = self.find.text(), self.repl.text(), self.case.isChecked()
+        self.tree.clear()
+        self.changes = {}
+        n_urls = n_dups = 0
+        if old:
+            for key in self.keys():
+                try:
+                    trs = self.engine.trackers_raw(key)
+                    name = self.engine.handles[key].status().name or key
+                except Exception:
+                    continue
+                out, seen, diff = [], set(), []
+                for url, tier in trs:
+                    nu = replace_url(url, old, new, case)
+                    if nu in seen:                    # became the same as another tracker: keep one
+                        n_dups += 1
+                        diff.append((url, None))
+                        continue
+                    seen.add(nu)
+                    out.append((nu, tier))
+                    if nu != url:
+                        diff.append((url, nu))
+                if not diff:
+                    continue
+                self.changes[key] = out
+                top = QTreeWidgetItem([name, t("rep_n_urls", len(diff))])
+                top.setIcon(0, ui.widgets.torrent_icon("folder"))
+                f = top.font(0); f.setBold(True); top.setFont(0, f)
+                for was, now in diff:
+                    ch = QTreeWidgetItem([was, now if now is not None else t("rep_dup")])
+                    ch.setToolTip(0, was)
+                    ch.setToolTip(1, now or "")
+                    ch.setForeground(0, QColor(C["danger_text"] if ui.theme.current_name == "dark" else C["danger"]))
+                    ch.setForeground(1, QColor(C["success_text"] if ui.theme.current_name == "dark" else C["success"]))
+                    top.addChild(ch)
+                    n_urls += 1
+                self.tree.addTopLevelItem(top)
+                top.setExpanded(len(self.changes) <= 30)
+        if not old:
+            self.summary.setText(t("rep_type"))
+        elif not self.changes:
+            self.summary.setText(t("rep_nothing"))
+        else:
+            self.summary.setText(t("rep_summary", n_urls, len(self.changes)) +
+                                 (("  ·  " + t("rep_dups", n_dups)) if n_dups else ""))
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(bool(self.changes))
 
 
 class CategoriesEditor(QWidget):

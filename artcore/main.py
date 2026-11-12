@@ -51,7 +51,8 @@ def selftest() -> int:
         import importlib
         import libtorrent as lt
         for mod in ("maxminddb", "psutil", "qtawesome", "artcore.widgets", "artcore.netx",
-                    "artcore.importers", "artcore.updater", "artcore.dialogs"):
+                    "artcore.importers", "artcore.updater", "artcore.dialogs",
+                    "artcore.panels", "artcore.backup", "artcore.trackertest"):
             importlib.import_module(mod)
         from . import theme, VERSION
         from .engine import Engine

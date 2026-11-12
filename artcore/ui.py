@@ -1306,6 +1306,22 @@ class SettingsDialog(QDialog):
         self.act_seed = spin(cfg["active_seeds"], 1, 1000)
         form.addRow(t("set_active_dl"), self.act_dl)
         form.addRow(t("set_active_seed"), self.act_seed)
+        form.addRow(_section(t("sp_conn_limits"), None))
+        self.max_conn = spin(cfg.get("max_connections", 200), 0, 65535)
+        self.conn_pt = spin(cfg.get("conn_per_torrent", 0), 0, 65535)
+        self.up_slots = spin(cfg.get("upload_slots", 8), 0, 1000)
+        self.slots_pt = spin(cfg.get("slots_per_torrent", 0), 0, 1000)
+        for w in (self.max_conn, self.conn_pt, self.up_slots, self.slots_pt):
+            w.setSpecialValueText(t("set_nolimit"))
+        form.addRow(t("set_max_conn"), self.max_conn)
+        form.addRow(t("set_conn_pt"), self.conn_pt)
+        form.addRow(t("set_up_slots"), self.up_slots)
+        form.addRow(t("set_slots_pt"), self.slots_pt)
+        weak = QPushButton(icon("fa6s.wifi", "warning"), t("set_weak_router"))
+        weak.clicked.connect(lambda: (self.max_conn.setValue(100), self.conn_pt.setValue(30),
+                                      self.up_slots.setValue(8), self.slots_pt.setValue(4)))
+        form.addRow("", weak)
+        form.addRow(note(t("set_conn_hint")))
 
         # ── Tasks → BitTorrent
         form = page("sp_bt", "fa6s.magnet", "danger", "sp_tasks")
@@ -1519,6 +1535,8 @@ class SettingsDialog(QDialog):
         c = self.cfg
         c.update(save_path=self.path.text(), port=self.port.value(), dl_limit=self.dl.value(),
                  ul_limit=self.ul.value(), active_downloads=self.act_dl.value(),
+                 max_connections=self.max_conn.value(), conn_per_torrent=self.conn_pt.value(),
+                 upload_slots=self.up_slots.value(), slots_per_torrent=self.slots_pt.value(),
                  active_seeds=self.act_seed.value(), dht=self.dht.isChecked(),
                  lsd=self.lsd.isChecked(), upnp=self.upnp.isChecked(),
                  random_port=self.random_port.isChecked(), utp=bool(self.utp.currentData()),
@@ -2167,6 +2185,13 @@ class PropertiesDialog(QDialog):
         form.addRow(t("pr_hours"), self.hours)
         hint = QLabel(t("pr_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
         form.addRow(hint)
+        form.addRow(_section(t("sp_conn_limits"), "fa6s.network-wired", "info"))
+        self.max_conn = QSpinBox(); self.max_conn.setRange(0, 65535); self.max_conn.setValue(props.get("max_conn", 0))
+        self.max_up = QSpinBox(); self.max_up.setRange(0, 1000); self.max_up.setValue(props.get("max_up", 0))
+        for w in (self.max_conn, self.max_up):
+            w.setSpecialValueText(t("pr_conn_default"))
+        form.addRow(t("set_conn_pt"), self.max_conn)
+        form.addRow(t("set_slots_pt"), self.max_up)
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self._mode_changed()
         self.adv.layout().addWidget(stop)
@@ -2204,7 +2229,8 @@ class PropertiesDialog(QDialog):
         return {"dl_limit": a["dl_limit"] if own else 0, "ul_limit": a["ul_limit"] if own else 0,
                 "super_seed": a["super_seed"],
                 "stop_mode": ("global", "custom", "never")[self.mode.currentIndex()],
-                "stop_ratio": self.ratio.value(), "stop_hours": self.hours.value()}
+                "stop_ratio": self.ratio.value(), "stop_hours": self.hours.value(),
+                "max_conn": self.max_conn.value(), "max_up": self.max_up.value()}
 
     def result_task(self) -> dict:
         """Tracker list, peer sources, web seeds, download order (limits / super-seed go via result_props)."""
@@ -3442,6 +3468,8 @@ class MainWindow(QMainWindow):
         self.files_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_tbl.customContextMenuRequested.connect(self.files_menu)
         self.tr_tbl = widgets.TrackersView()
+        self.tr_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tr_tbl.customContextMenuRequested.connect(self.trackers_menu)
 
         self.peers_tbl = self._mk_table(PEER_COLS, stretch=2)
         for c, w in enumerate((170, 150, 0, 80, 130, 95, 105, 105, 95, 90, 100, 100, 80, 100, 95)):
@@ -4281,6 +4309,7 @@ class MainWindow(QMainWindow):
             m.addAction(icon("fa6s.location-dot"), t("loc_menu"), lambda: self.locate_keys(self.selected_keys()))
         m.addAction(icon("fa6s.server"), t("edit_trackers"), self.edit_trackers)
         m.addAction(icon("fa6s.right-left"), t("replace_trackers"), self.replace_trackers)
+        m.addAction(icon("fa6s.stethoscope", "info"), t("tt_menu"), lambda: self.test_announce())
         m.addSeparator()
         m.addAction(icon("fa6s.trash-can", "danger"), t("remove") + "\tDelete", self.remove_selected)
         m.addAction(icon("fa6s.dumpster", "danger"), t("kb_remove_files") + "\tShift+Delete",
@@ -4543,6 +4572,35 @@ class MainWindow(QMainWindow):
                 self.log_event("torrent", t("mv_started", r.name, dest))
         self.tick()
 
+    def trackers_menu(self, pos):
+        keys = self.selected_keys()
+        if not keys:
+            return
+        it = self.tr_tbl.itemAt(pos)
+        url = ""
+        while it is not None:
+            v = it.data(0, Qt.UserRole)
+            if isinstance(v, str) and "://" in v:
+                url = v
+                break
+            it = it.parent()
+        m = QMenu(self)
+        a = m.addAction(icon("fa6s.stethoscope", "info"), t("tt_menu"), lambda: self.test_announce(url))
+        f = a.font(); f.setBold(True); a.setFont(f)
+        m.addAction(icon("fa6s.bullhorn"), t("reannounce") + "\tF5", lambda: self._each(self.engine.reannounce))
+        if url:
+            m.addAction(icon("fa6s.copy"), t("tt_copy_url"), lambda: QGuiApplication.clipboard().setText(url))
+        m.addSeparator()
+        m.addAction(icon("fa6s.server"), t("edit_trackers"), self.edit_trackers)
+        m.addAction(icon("fa6s.right-left"), t("replace_trackers"), self.replace_trackers)
+        m.exec(self.tr_tbl.viewport().mapToGlobal(pos))
+
+    def test_announce(self, url: str = ""):
+        from .panels import TrackerTestDialog
+        keys = self.selected_keys()
+        if keys:
+            TrackerTestDialog(self.engine, keys[0], url, self).exec()
+
     def edit_trackers(self):
         from .dialogs import TrackersDialog
         keys = self.selected_keys()
@@ -4556,12 +4614,13 @@ class MainWindow(QMainWindow):
 
     def replace_trackers(self):
         from .dialogs import ReplaceTrackersDialog
-        sel = self.selected_keys()
-        d = ReplaceTrackersDialog(len(sel), len(self.engine.handles), self)
-        if d.exec() and d.find.text():
-            keys = sel if d.sel.isChecked() else list(self.engine.handles)
-            n = self.engine.replace_in_trackers(keys, d.find.text(), d.repl.text())
-            self.log_event("tracker", t("rep_done", n))
+        d = ReplaceTrackersDialog(self.engine, self.selected_keys(), self)
+        if d.exec() and d.changes:
+            for key, trs in d.changes.items():          # exactly what the preview showed
+                self.engine.set_trackers(key, trs)
+                self.engine.reannounce(key)
+            n = len(d.changes)
+            self.log_event("tracker", t("rep_done", n) + f": «{d.find.text()}» → «{d.repl.text()}»")
             QMessageBox.information(self, t("rep_title"), t("rep_done", n))
             self.tick()
 
