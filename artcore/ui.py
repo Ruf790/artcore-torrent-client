@@ -789,19 +789,24 @@ class LogView(QWidget):
             self.tbl.setColumnWidth(c, w)
         self.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tbl.customContextMenuRequested.connect(self._menu)
+        self.tbl.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)   # smooth wheel, pixel units
         lay.addWidget(self.tbl, 1)
 
     def add(self, kind: str, text: str):
+        from .details import _trim_rows
         self.counter += 1
         e = (self.counter, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), kind, text)
         self.entries.append(e)
         if len(self.entries) > self.MAX:
             del self.entries[: len(self.entries) - self.MAX]
-            if self.tbl.rowCount() > self.MAX:
-                self.tbl.removeRow(0)
         want = self.filter.currentData()
         if not want or want == kind:
+            sb = self.tbl.verticalScrollBar()
+            follow = sb.value() >= sb.maximum() - 4      # decided before the row changes the range
             self._append_row(e)
+            _trim_rows(self.tbl, self.MAX, follow)
+            if follow:
+                self.tbl.scrollToBottom()
 
     def _append_row(self, e):
         no, ts, kind, text = e
@@ -819,9 +824,6 @@ class LogView(QWidget):
             if c == 3:
                 it.setToolTip(text)
             self.tbl.setItem(r, c, it)
-        sb = self.tbl.verticalScrollBar()
-        if sb.value() >= sb.maximum() - 30:      # follow the tail unless the user scrolled up
-            self.tbl.scrollToBottom()
 
     def rebuild(self):
         want = self.filter.currentData()
@@ -829,6 +831,7 @@ class LogView(QWidget):
         for e in self.entries:
             if not want or want == e[2]:
                 self._append_row(e)
+        self.tbl.scrollToBottom()
 
     def clear(self):
         self.entries.clear()
@@ -5106,7 +5109,7 @@ class MainWindow(QMainWindow):
         elif cur is self.peers_page:
             self._refresh_peers(row)
         elif cur is self.task_log:
-            self.task_log.show_log(row.key, self.engine.task_log(row.key))
+            self.task_log.show_log(row.key, self.engine.task_log(row.key), self.engine.task_log_seq(row.key))
         elif cur is self.piece_map:
             self.piece_map.show_map(self.engine.piece_map(row.key), row.progress >= 1.0)
 

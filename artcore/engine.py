@@ -94,6 +94,7 @@ class Engine:
         self.tr_status: dict[str, dict[tuple, str]] = {}
         self.tr_peers: dict[str, dict[tuple, int]] = {}     # same key → peers in the last tracker reply
         self.task_logs: dict[str, list[tuple[str, str, str]]] = {}   # key → [(time, kind, text)] for "Task logs"
+        self.task_seq: dict[str, int] = {}     # key → entries ever written (the list itself is capped at 500)
         self._cur_key = ""                    # torrent of the alert being handled (for _log)
         self._peer_seen: dict[tuple, float] = {}   # (key, ip:port) → when we first saw the connection
         self.stats_path = os.path.join(data_dir, "stats.json")
@@ -1303,9 +1304,13 @@ class Engine:
         log = self.task_logs.setdefault(key, [])
         log.append((time.strftime("%Y-%m-%d %H:%M:%S"), kind, text))
         del log[:-500]
+        self.task_seq[key] = self.task_seq.get(key, 0) + 1
 
     def task_log(self, key: str) -> list[tuple[str, str, str]]:
         return self.task_logs.get(key, [])
+
+    def task_log_seq(self, key: str) -> int:
+        return self.task_seq.get(key, 0)
 
     # ── statistics ─────────────────────────────────────────────
     def _count_days(self) -> None:
