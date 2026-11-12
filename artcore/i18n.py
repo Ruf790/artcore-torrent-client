@@ -993,6 +993,8 @@ STRINGS = {
     "compact_tip":     ("Компактный список: больше торрентов на экране (Ctrl+Shift+L)",
                         "Compact list: more torrents on screen (Ctrl+Shift+L)"),
     "compact_menu":    ("Компактный список",                 "Compact list"),
+    "grid_menu":       ("Сетка в списке",                    "Grid lines"),
+    "grid_set":        ("Сетка в списке торрентов, как в BitComet", "Grid lines in the torrent list, like BitComet"),
     "exp_menu":        ("Сохранить .torrent…",               "Save .torrent…"),
     "exp_done":        ("Сохранено .torrent: {0} → {1}",     "Saved .torrent: {0} → {1}"),
     "exp_skipped":     ("Пропущено без метаданных (magnet): {0}", "Skipped without metadata (magnet): {0}"),
