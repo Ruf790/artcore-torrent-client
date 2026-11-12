@@ -1249,3 +1249,108 @@ class TrackerTestDialog(QDialog):
         lines += ["", trackertest.body_preview(r.get("body", b"") or b"", 3000)]
         import re
         QGuiApplication.clipboard().setText(re.sub(r"<[^>]+>", "", "\n".join(lines)))
+
+
+
+class _TimeItem(QTableWidgetItem):
+    """Sorts by the unix time in UserRole, so "—" (no date) is the oldest, not the newest."""
+    def __lt__(self, other):
+        return (self.data(Qt.UserRole) or 0) < (other.data(Qt.UserRole) or 0)
+
+
+class BansDialog(QDialog):
+    """Banned peers: who, why, when, until when; unban selected or all."""
+    KIND_ICON = {"leech": ("fa6s.robot", "danger"), "fake": ("fa6s.mask", "orange"),
+                 "manual": ("fa6s.hand", "secondary")}
+
+    def __init__(self, engine, geo=None, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
+        self._Item = QTableWidgetItem
+        _theme_title_bar(self)
+        self.engine, self.geo = engine, geo
+        self.setWindowTitle(t("bans_title"))
+        self.setWindowIcon(app_icon())
+        self.resize(1000, 560)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 12)
+        lay.setSpacing(8)
+        lay.addWidget(_section(t("bans_title"), "fa6s.ban", "danger"))
+        self.hint = QLabel(); self.hint.setObjectName("meta"); self.hint.setWordWrap(True)
+        lay.addWidget(self.hint)
+        self.tbl = QTableWidget(0, 6)
+        self.tbl.setHorizontalHeaderLabels([t("bans_ip"), t("bans_country"), t("bans_client"),
+                                            t("bans_reason"), t("bans_when"), t("bans_until")])
+        self.tbl.verticalHeader().hide()
+        self.tbl.verticalHeader().setDefaultSectionSize(28)
+        self.tbl.setShowGrid(False)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tbl.setSortingEnabled(True)
+        self.tbl.setIconSize(QSize(20, 15))
+        hh = self.tbl.horizontalHeader()
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        for c, w in ((0, 150), (1, 150), (2, 170), (4, 130), (5, 130)):
+            self.tbl.setColumnWidth(c, w)
+        self.tbl.itemSelectionChanged.connect(self._sel)
+        lay.addWidget(self.tbl, 1)
+        row = QHBoxLayout()
+        self.b_unban = QPushButton(widgets.icon("fa6s.unlock", "success"), t("bans_unban"))
+        self.b_unban.clicked.connect(self._unban)
+        self.b_all = QPushButton(widgets.icon("fa6s.broom", "danger"), t("bans_clear"))
+        self.b_all.clicked.connect(self._clear)
+        close = QPushButton(t("close")); close.setObjectName("primary"); close.clicked.connect(self.accept)
+        row.addWidget(self.b_unban); row.addWidget(self.b_all); row.addStretch(); row.addWidget(close)
+        lay.addLayout(row)
+        self._fill()
+
+    def _fill(self):
+        Item = self._Item
+        self.tbl.setSortingEnabled(False)
+        self.tbl.setRowCount(0)
+        bans = self.engine.bans
+        for ip, b in sorted(bans.items(), key=lambda kv: -kv[1].get("time", 0)):
+            r = self.tbl.rowCount()
+            self.tbl.insertRow(r)
+            code, cname = self.geo.lookup(ip) if self.geo is not None and getattr(self.geo, "status", "") == "ready" else ("", "")
+            when = datetime.fromtimestamp(b["time"]).strftime("%Y-%m-%d %H:%M") if b.get("time") else "—"
+            until = (datetime.fromtimestamp(b["expires"]).strftime("%Y-%m-%d %H:%M") if b.get("expires")
+                     else t("bans_forever"))
+            kind = b.get("kind", "manual")
+            reason = {"leech": t("bans_k_leech"), "fake": t("bans_k_fake"), "manual": t("bans_k_manual")}.get(kind, kind)
+            if kind == "fake" and b.get("reason"):
+                reason += " — " + b["reason"].removeprefix("fake progress: ")
+            cells = [ip, cname or code or "—", b.get("client") or "—", reason, when, until]
+            for c, v in enumerate(cells):
+                it = _TimeItem(v) if c == 4 else Item(v)
+                it.setToolTip(v)
+                if c == 0:
+                    it.setData(Qt.UserRole, ip)
+                    it.setIcon(widgets.icon(*self.KIND_ICON.get(kind, ("fa6s.ban", "danger"))))
+                elif c == 1 and code:
+                    it.setIcon(widgets.flag_icon(code) or QIcon())
+                elif c == 4:
+                    it.setData(Qt.UserRole, b.get("time", 0))
+                self.tbl.setItem(r, c, it)
+        self.tbl.setSortingEnabled(True)
+        self.tbl.sortItems(4, Qt.DescendingOrder)          # newest first ("—" = from before 1.0.39 last)
+        n = len(bans)
+        self.hint.setText(t("bans_hint", n, sum(1 for b in bans.values() if b.get("expires"))))
+        self.b_all.setEnabled(n > 0)
+        self._sel()
+
+    def _sel(self):
+        self.b_unban.setEnabled(bool(self.tbl.selectionModel().selectedRows()))
+
+    def _unban(self):
+        ips = [self.tbl.item(i.row(), 0).data(Qt.UserRole) for i in self.tbl.selectionModel().selectedRows()]
+        self.engine.unban(ips)
+        self._fill()
+
+    def _clear(self):
+        from PySide6.QtWidgets import QMessageBox
+        if QMessageBox.question(self, t("bans_title"), t("bans_clear_q", len(self.engine.bans))) == QMessageBox.Yes:
+            self.engine.clear_bans()
+            self._fill()

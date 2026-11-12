@@ -1506,7 +1506,11 @@ class SettingsDialog(QDialog):
         self.unban = QPushButton(icon("fa6s.broom"), t("set_unban", nb))
         self.unban.setEnabled(nb > 0)
         self.unban.clicked.connect(self._clear_bans)
-        brow = QHBoxLayout(); brow.addWidget(self.unban); brow.addStretch()
+        blist = QPushButton(icon("fa6s.list"), t("bans_list"))
+        blist.setEnabled(parent is not None)
+        blist.clicked.connect(lambda: (parent.bans_dialog(), self.unban.setText(t("set_unban", len(self._engine.bans))),
+                                       self.unban.setEnabled(bool(self._engine.bans))))
+        brow = QHBoxLayout(); brow.addWidget(blist); brow.addWidget(self.unban); brow.addStretch()
         form.addRow(brow)
         form.addRow(note(t("sp_clientf_hint")))
 
@@ -3013,6 +3017,11 @@ class MainWindow(QMainWindow):
         self.compact_btn.setChecked(on)
         self.table.viewport().update()
 
+    def bans_dialog(self):
+        from .panels import BansDialog
+        BansDialog(self.engine, self.geo, self).exec()
+        self.tick()
+
     def set_grid(self, on: bool):
         """BitComet-style grid in the torrent list."""
         self.cfg["list_grid"] = on
@@ -3067,6 +3076,7 @@ class MainWindow(QMainWindow):
         col = QVBoxLayout(); col.setSpacing(2)
         title = QLabel(APP_TITLE); title.setObjectName("title")
         self.meta = QLabel(); self.meta.setObjectName("meta"); self.meta.setTextFormat(Qt.RichText)
+        self.meta.linkActivated.connect(lambda link: self.bans_dialog() if link == "bans" else None)
         col.addWidget(title)
         col.addWidget(self.meta)
         lay.addLayout(col)
@@ -4788,6 +4798,7 @@ class MainWindow(QMainWindow):
             m.addAction(icon("fa6s.copy"), t("peer_copy_ip"), lambda: QGuiApplication.clipboard().setText(ip))
             m.addAction(icon("fa6s.ban", "danger"), t("peer_ban", ip),
                         lambda: (self.engine.ban(ip, t("peer_ban_manual")), self.tick()))
+        m.addAction(icon("fa6s.list"), t("bans_list") + f" ({len(self.engine.bans)})", self.bans_dialog)
         m.exec(self.peers_tbl.viewport().mapToGlobal(pos))
 
     def add_peer_dialog(self, key: str):
@@ -5108,7 +5119,8 @@ class MainWindow(QMainWindow):
         if config.is_portable():
             parts.insert(2, t("meta_portable"))
         if self.engine.bans:
-            parts.append(t("meta_bans", len(self.engine.bans)))
+            parts.append(f'<a href="bans" style="color:{C["secondary"]};text-decoration:none">'
+                         f'{t("meta_bans", len(self.engine.bans))}</a>')
         if sched:
             parts.append(f'<span style="color:{C["warning_text"]}">&#9200; {t("meta_sched")}</span>')
         bind = self.cfg.get("bind_interface", "")
