@@ -113,6 +113,7 @@ class Engine:
         self.moved_names: list[tuple[str, str, str]] = []      # (name, key, "" | error) for the UI
         self.checked_names: list[tuple[str, str, float]] = []  # (name, key, progress) after a hash check
         self.missing_names: list[tuple[str, str, str]] = []    # (name, key, folder) data found missing
+        self._export_pending: set[str] = set()   # .torrent copies to make after the next resume write
         # per-tracker totals: host → [uploaded, downloaded]; seen = last counted all_time values per torrent
         self.tr_totals: dict[str, list[int]] = self.stats_saved.get("trackers", {})
         self._tr_seen: dict[str, list[int]] = self.stats_saved.get("seen", {})
@@ -613,6 +614,9 @@ class Engine:
         with open(tmp, "wb") as f:
             f.write(lt.write_resume_data_buf(p))
         os.replace(tmp, self._resume_path(key))
+        if key in self._export_pending:
+            self._export_pending.discard(key)
+            self._auto_export(key, "export_dir")
 
     # ── adding / removing ──────────────────────────────────────
     def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False,
@@ -648,6 +652,8 @@ class Engine:
         self.handles[key] = h
         self.count_event("added")
         self._add_auto_trackers(h)
+        if h.status().has_metadata:
+            self._export_pending.add(key)     # once its resume data is written (v2 piece layers)
         h.save_resume_data(lt.torrent_handle.save_info_dict)
         return key
 
@@ -1035,6 +1041,7 @@ class Engine:
                     self.finished_names.append((st.name, _key(a.handle)))
                     if st.total_payload_download > 0:      # really downloaded, not found complete on disk
                         self.count_event("completed")
+                        self._auto_export(_key(a.handle), "export_done_dir")
                     self._move_when_done(a.handle, st)
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, lt.storage_moved_alert):
@@ -1062,6 +1069,8 @@ class Engine:
                     self._save_opts()
             elif isinstance(a, lt.metadata_received_alert):
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
+                if self._cur_key in self.handles:          # a magnet got its metadata
+                    self._export_pending.add(self._cur_key)
             elif isinstance(a, lt.tracker_error_alert) and _is_skip_notice(a):
                 pass   # libtorrent skipped a local endpoint (127.0.0.1, ::1, fe80::) that can't reach the tracker
             elif isinstance(a, lt.tracker_error_alert):
@@ -1551,6 +1560,96 @@ class Engine:
             target = os.path.join(target, cat)
         self.move(_key(h), target)
 
+    # ── .torrent export ────────────────────────────────────────
+    def _piece_layers(self, key: str, atp=None) -> bytes | None:
+        """v2 / hybrid torrents need "piece layers" next to the info dict; libtorrent drops them from
+        the loaded torrent, but they can be rebuilt from the merkle trees in the resume data
+        (or from the add params right when the torrent is added)."""
+        for src in ("atp", "resume"):
+            try:
+                if src == "atp":
+                    if atp is None:
+                        continue
+                    p = atp
+                else:
+                    with open(self._resume_path(key), "rb") as f:
+                        p = lt.read_resume_data(f.read())
+                ent = lt.write_torrent_file(p)
+                layers = ent.get(b"piece layers") if isinstance(ent, dict) else None
+                if layers:
+                    return lt.bencode(layers)
+            except Exception:
+                pass
+        return None
+
+    def torrent_bytes(self, key: str, atp=None) -> bytes | None:
+        """The .torrent of a torrent in the client: the original info dict byte for byte (same
+        info-hash), the current trackers (edited ones, with passkey), comment, creator, date,
+        web seeds, publisher. None while a magnet has no metadata yet."""
+        h = self.handles.get(key)
+        if not h or not h.is_valid() or not h.status().has_metadata:
+            return None
+        ti = h.torrent_file()
+        root: dict[bytes, bytes] = {b"info": bytes(ti.info_section())}     # raw, not re-encoded
+        if ti.info_hashes().has_v2():
+            layers = self._piece_layers(key, atp)
+            if layers:
+                root[b"piece layers"] = layers
+            else:
+                self._log("error", f"{ti.name()}: v2 piece layers not available yet, the .torrent is incomplete")
+        tiers: dict[int, list[str]] = {}
+        for tr in h.trackers():
+            tiers.setdefault(int(tr.get("tier", 0)), []).append(tr["url"])
+        urls = [u for _, us in sorted(tiers.items()) for u in us]
+        if urls:
+            root[b"announce"] = lt.bencode(urls[0].encode())
+            if len(urls) > 1:
+                root[b"announce-list"] = lt.bencode([[u.encode() for u in us] for _, us in sorted(tiers.items())])
+        if ti.comment():
+            root[b"comment"] = lt.bencode(ti.comment().encode())
+        if ti.creator():
+            root[b"created by"] = lt.bencode(ti.creator().encode())
+        if ti.creation_date():
+            root[b"creation date"] = lt.bencode(int(ti.creation_date()))
+        seeds = [w["url"] for w in ti.web_seeds() if w.get("type", 0) == 0]
+        if seeds:
+            root[b"url-list"] = lt.bencode([u.encode() for u in seeds])
+        o = self.opts.get(key, {})
+        for k, ok in ((b"publisher", "publisher"), (b"publisher-url", "publisher_url")):
+            if o.get(ok):
+                root[k] = lt.bencode(str(o[ok]).encode())
+        # bencoded dictionary: keys sorted as raw bytes, values already encoded
+        return b"d" + b"".join(lt.bencode(k) + v for k, v in sorted(root.items())) + b"e"
+
+    def export_torrent(self, key: str, folder: str, name: str | None = None, atp=None) -> str:
+        """Write <folder>/<name>.torrent (a free name: "x (2).torrent" if it exists). Returns the path."""
+        data = self.torrent_bytes(key, atp)
+        if data is None:
+            raise ValueError("no metadata yet")
+        base = _safe_name(name or self.handles[key].status().name or key)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, base + ".torrent")
+        n = 2
+        while os.path.exists(path):
+            with open(path, "rb") as f:
+                if f.read() == data:          # this very file is already there
+                    return path
+            path = os.path.join(folder, f"{base} ({n}).torrent")
+            n += 1
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def _auto_export(self, key: str, cfg_key: str, atp=None) -> None:
+        """Settings → Folders: copy the .torrent of every added / every finished torrent."""
+        folder = self.cfg.get(cfg_key, "")
+        if not folder:
+            return
+        try:
+            self.export_torrent(key, folder, atp=atp)
+        except Exception as e:
+            self._log("error", f".torrent → {folder}: {e}")
+
     def trackers_raw(self, key: str) -> list[tuple[str, int]]:
         """Full tracker URLs (with passkey) for the editor."""
         h = self.handles.get(key)
@@ -1895,18 +1994,59 @@ class Engine:
         return st.payload_download_rate, st.payload_upload_rate
 
     def shutdown(self) -> None:
-        self.ses.pause()
+        self.ses.pause()                 # every torrent sends "stopped" to its trackers
         self.save_all()
         try:
             self._flush_stats()
         except OSError:
             pass
+        self._wait_stopped_announces()
+
+    def _wait_stopped_announces(self, wait: float = 3.0) -> None:
+        """Give the trackers a moment to get our 'stopped' (a private tracker would otherwise list
+        us as a seeder until its timeout) — until each torrent with a tracker got an answer."""
+        waiting = set()
+        for k, h in self.handles.items():
+            try:
+                if h.is_valid() and h.trackers():
+                    waiting.add(k)
+            except Exception:
+                pass
+        deadline = time.time() + wait
+        while waiting and time.time() < deadline:
+            self.ses.wait_for_alert(200)
+            for a in self.ses.pop_alerts():
+                if isinstance(a, (lt.tracker_reply_alert, lt.tracker_error_alert)):
+                    try:
+                        waiting.discard(_key(a.handle))
+                    except Exception:
+                        pass
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Destroy the libtorrent session (it flushes the disk and closes sockets) without letting
+        it hang the exit: done in a thread, and given up on after `timeout` seconds."""
+        import threading
+        ses, self.ses = self.ses, None
+        self.handles = {}
+
+        def destroy(s=[ses]):
+            s.pop()                      # the last reference: the session destructor runs here
+        t = threading.Thread(target=destroy, daemon=True)
+        t.start()
+        t.join(timeout)
 
 
 # Leech-only clients (take, never give back) — matched by peer-id prefix or client name
 BAD_PEER_IDS = (b"-XL", b"-SD", b"-XF", b"-QD", b"-BN", b"-DL", b"-HP", b"-TT")
 BAD_NAMES = ("xunlei", "thunder", "qqdownload", "baidu", "dandelion", "offline download", "torrentstorm")
 FAKE_MIN_BYTES = 64 << 20      # judge fake progress only after sending a peer this much
+
+
+def _safe_name(name: str) -> str:
+    """A Windows-safe file name from a torrent name."""
+    bad = '<>:"/\\|?*'
+    out = "".join("_" if ch in bad or ord(ch) < 32 else ch for ch in name).strip().rstrip(". ")
+    return (out or "torrent")[:150]
 
 
 def _data_missing(save_path: str, fs, renamed: dict, prios: list) -> bool:
@@ -2109,15 +2249,105 @@ def _ratio(uploaded: int, downloaded: int, done: int) -> float:
 PIECE_SIZES = [0] + [1 << n for n in range(14, 26)]     # 0 = auto, 16 KiB … 32 MiB
 
 
+# files nobody wants in a release: Windows / macOS folder litter, unfinished downloads
+JUNK_NAMES = {"thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", "desktop.ini", ".ds_store", "icon\r",
+              ".localized", "folder.lock"}
+JUNK_PREFIX = ("._", "~$", ".~lock.")
+JUNK_EXT = (".!ut", ".!qb", ".bc!", ".crdownload", ".part", ".partial")
+JUNK_DIRS = {"__macosx", ".spotlight-v100", ".trashes", ".fseventsd", "$recycle.bin",
+             "system volume information", ".temporaryitems"}
+
+
+def is_junk(name: str, is_dir: bool = False) -> bool:
+    n = name.lower()
+    if is_dir:
+        return n in JUNK_DIRS
+    return n in JUNK_NAMES or n.startswith(JUNK_PREFIX) or n.endswith(JUNK_EXT)
+
+
+def _junk_pred(src: str):
+    """add_files() filter: False for junk files and anything inside a junk folder."""
+    root = os.path.abspath(src)
+
+    def pred(path: str) -> bool:
+        rel = os.path.relpath(os.path.abspath(path), os.path.dirname(root))
+        parts = rel.replace("\\", "/").split("/")
+        if any(is_junk(p, True) for p in parts[:-1]):
+            return False
+        return not is_junk(parts[-1], os.path.isdir(path))
+    return pred
+
+
+def recommended_piece(total: int) -> int:
+    """About 1000–2000 pieces: small enough for a quick start of seeding, few enough for a small
+    .torrent. 32 KiB … 16 MiB."""
+    size = 32 << 10
+    while size < (16 << 20) and total / size > 2000:
+        size <<= 1
+    return size
+
+
+def analyze_source(src: str, exclude_junk: bool = True, fmt: str = "v1") -> dict:
+    """What a new torrent of <src> would contain: files, size, junk, empty / zero-byte, and the piece
+    size libtorrent's 'Auto' would take."""
+    src = os.path.abspath(src)
+    junk, zero, empty, files = [], [], [], 0
+    total = 0
+    base = os.path.dirname(src)
+    if os.path.isfile(src):
+        size = os.path.getsize(src)
+        files, total = 1, size
+        if size == 0:
+            zero.append(os.path.basename(src))
+    else:
+        for root, dirs, names in os.walk(src):
+            rel_root = os.path.relpath(root, base)
+            bad_dir = any(is_junk(p, True) for p in rel_root.replace("\\", "/").split("/"))
+            if not dirs and not names:
+                empty.append(rel_root)
+            for n in names:
+                full = os.path.join(root, n)
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    continue
+                rel = os.path.join(rel_root, n)
+                if bad_dir or is_junk(n):
+                    junk.append((rel, size))
+                    if exclude_junk:
+                        continue
+                files += 1
+                total += size
+                if size == 0:
+                    zero.append(rel)
+    auto = 0
+    try:
+        fs = lt.file_storage()
+        if exclude_junk and os.path.isdir(src):
+            lt.add_files(fs, src, _junk_pred(src))
+        else:
+            lt.add_files(fs, src)
+        if fs.num_files():
+            flags = {"v1": lt.create_torrent.v1_only, "v2": lt.create_torrent.v2_only, "hybrid": 0}[fmt]
+            auto = lt.create_torrent(fs, 0, flags=flags).piece_length()
+    except Exception:
+        pass
+    return {"files": files, "total": total, "junk": junk, "zero": zero, "empty": empty,
+            "auto_piece": auto, "recommended": recommended_piece(total)}
+
+
 def create_torrent(src: str, announce: str, out_path: str, private: bool = True, comment: str = "",
                    piece_size: int = 0, fmt: str = "v1", web_seeds: list[str] | None = None,
-                   source: str = "", progress=None) -> str:
+                   source: str = "", progress=None, exclude_junk: bool = False) -> str:
     """Make a .torrent for uploading to a tracker.
     announce: one URL per line, each line its own tier. fmt: v1 | hybrid | v2.
     source: info['source'] tag (private trackers use it for cross-seeding).
     progress(done, total) is called while hashing."""
     fs = lt.file_storage()
-    lt.add_files(fs, src)
+    if exclude_junk and os.path.isdir(src):
+        lt.add_files(fs, src, _junk_pred(src))
+    else:
+        lt.add_files(fs, src)
     if fs.num_files() == 0:
         raise ValueError("Нет файлов для торрента")
     flags = {"v1": lt.create_torrent.v1_only, "v2": lt.create_torrent.v2_only, "hybrid": 0}[fmt]

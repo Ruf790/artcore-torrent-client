@@ -625,11 +625,11 @@ SHORTCUTS = [
     ("kb_g_torrent", [("Ctrl+S", "start"), ("Ctrl+P", "pause"), ("Ctrl+Shift+S", "stop"),
                       ("Ctrl+Shift+F", "force_start"), ("Delete", "remove"), ("Shift+Delete", "kb_remove_files"),
                       ("Ctrl+R", "recheck"), ("F5", "reannounce"), ("Ctrl+Shift+M", "move_to"),
-                      ("Ctrl+M", "copy_magnet"), ("Enter", "open_folder"), ("Alt+Enter", "properties")]),
+                      ("Ctrl+M", "copy_magnet"), ("Ctrl+E", "exp_menu"), ("Enter", "open_folder"), ("Alt+Enter", "properties")]),
     ("kb_g_queue", [("Ctrl+Shift+Up", "queue_up"), ("Ctrl+Shift+Down", "queue_down"),
                     ("Ctrl+Shift+Home", "queue_top"), ("Ctrl+Shift+End", "queue_bottom")]),
     ("kb_g_view", [("Ctrl+A", "select_all"), ("Ctrl+F", "kb_search"), ("Esc", "kb_esc"),
-                   ("Ctrl+B", "kb_sidebar"), ("Ctrl+I", "sw_title"), ("Ctrl+H", "kb_history"),
+                   ("Ctrl+B", "kb_sidebar"), ("Ctrl+Shift+L", "compact_menu"), ("Ctrl+I", "sw_title"), ("Ctrl+H", "kb_history"),
                    ("Ctrl+,", "settings"), ("F1", "about"), ("Ctrl+/", "kb_title"), ("Ctrl+Q", "quit")]),
 ]
 
@@ -751,3 +751,93 @@ class TorrentFetcher(QThread):
             self.done.emit(self.url, path, "")
         except Exception as e:
             self.done.emit(self.url, "", str(e))
+
+
+# ============================================================
+#  Restore from backup
+# ============================================================
+
+class RestoreDialog(QDialog):
+    """What is in the archive + where the torrents' folders are on this PC (old → new)."""
+    def __init__(self, manifest: dict, parent=None):
+        super().__init__(parent)
+        _theme_title_bar(self)
+        self.setWindowTitle(t("bk_restore_title"))
+        self.setWindowIcon(app_icon())
+        self.setMinimumWidth(760)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 14)
+        lay.setSpacing(10)
+        lay.addWidget(_section(t("bk_in_archive"), "fa6s.box-archive", "orange"))
+        when = datetime.fromtimestamp(manifest.get("created", 0)).strftime("%d.%m.%Y %H:%M")
+        info = QLabel(t("bk_info", when, manifest.get("version", "?"), manifest.get("torrents", 0),
+                        manifest.get("pc", "—")))
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        lay.addWidget(_section(t("bk_folders"), "fa6s.folder-tree", "warning"))
+        hint = QLabel(t("bk_folders_hint")); hint.setObjectName("meta"); hint.setWordWrap(True)
+        lay.addWidget(hint)
+        folders = sorted(manifest.get("folders", {}).items(), key=lambda kv: -kv[1])
+        dflt = manifest.get("save_path", "")
+        if dflt and dflt not in dict(folders):
+            folders.append((dflt, 0))
+        self.tbl = QTableWidget(len(folders), 3)
+        self.tbl.setHorizontalHeaderLabels([t("bk_old"), t("bk_n"), t("bk_new")])
+        self.tbl.verticalHeader().hide()
+        self.tbl.setShowGrid(False)
+        self.tbl.setSelectionMode(QAbstractItemView.NoSelection)
+        self.tbl.verticalHeader().setDefaultSectionSize(34)
+        hh = self.tbl.horizontalHeader()
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.edits = []
+        for r, (old, n) in enumerate(folders):
+            it = QTableWidgetItem(old)
+            it.setFlags(Qt.ItemIsEnabled)
+            it.setToolTip(old)
+            self.tbl.setItem(r, 0, it)
+            c = QTableWidgetItem(str(n) if n else "—")
+            c.setFlags(Qt.ItemIsEnabled)
+            self.tbl.setItem(r, 1, c)
+            w = QWidget()
+            hl = QHBoxLayout(w); hl.setContentsMargins(4, 2, 4, 2); hl.setSpacing(4)
+            from PySide6.QtWidgets import QLineEdit
+            e = QLineEdit(old)
+            ok = QLabel()
+            b = QPushButton(icon("fa6s.folder-open", "warning"), ""); b.setFixedWidth(38)
+            b.setToolTip(t("set_browse"))
+            b.clicked.connect(lambda _=False, e=e: self._browse(e))
+            e.textChanged.connect(lambda _=None, e=e, ok=ok: self._mark(e, ok))
+            hl.addWidget(ok); hl.addWidget(e, 1); hl.addWidget(b)
+            self.tbl.setCellWidget(r, 2, w)
+            self.edits.append((old, e))
+            self._mark(e, ok)
+        self.tbl.setMinimumHeight(min(260, 40 + 34 * max(1, len(folders))))
+        lay.addWidget(self.tbl)
+
+        warn = QLabel(t("bk_replace_note")); warn.setWordWrap(True); warn.setObjectName("meta")
+        lay.addWidget(warn)
+        btns = QHBoxLayout(); btns.addStretch()
+        cancel = QPushButton(t("cancel")); cancel.clicked.connect(self.reject)
+        ok = QPushButton(icon("fa6s.rotate-left", "#ffffff"), t("bk_restore_go"))
+        ok.setObjectName("primary"); ok.setDefault(True); ok.clicked.connect(self.accept)
+        btns.addWidget(cancel); btns.addWidget(ok)
+        lay.addLayout(btns)
+
+    def _browse(self, e):
+        d = QFileDialog.getExistingDirectory(self, t("bk_new"), e.text() if os.path.isdir(e.text()) else "")
+        if d:
+            e.setText(os.path.normpath(d))
+
+    @staticmethod
+    def _mark(e, lab):
+        there = os.path.isdir(e.text().strip())
+        lab.setPixmap(widgets.icon("fa6s.circle-check" if there else "fa6s.circle-xmark",
+                                   "success" if there else "danger").pixmap(14, 14))
+        lab.setToolTip(t("bk_exists") if there else t("bk_not_exists"))
+
+    def mapping(self) -> list[tuple[str, str]]:
+        return [(old, e.text().strip()) for old, e in self.edits if e.text().strip() and e.text().strip() != old]
