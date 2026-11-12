@@ -168,7 +168,7 @@ class TorrentModel(QAbstractTableModel):
                 C_DONE: fmt_size(r.done), C_LEFT: fmt_size(max(0, r.size - r.done)) if r.size > r.done else "",
                 C_TDOWN: fmt_size(r.downloaded), C_TUP: fmt_size(r.uploaded),
                 C_SDOWN: fmt_size(r.sess_down) if r.sess_down else "", C_SUP: fmt_size(r.sess_up) if r.sess_up else "",
-                C_QUEUE: str(r.queue) if r.queue > 0 else ("⚡" if r.forced else ""),
+                C_QUEUE: str(r.order) + (" ⚡" if r.forced else ""),
             }[c]
         if role == Qt.UserRole:  # sort key
             return {
@@ -179,7 +179,7 @@ class TorrentModel(QAbstractTableModel):
                 C_CAT: r.category.lower(), C_TAGS: ", ".join(r.tags).lower(),
                 C_DONE: r.done, C_LEFT: max(0, r.size - r.done), C_TDOWN: r.downloaded, C_TUP: r.uploaded,
                 C_SDOWN: r.sess_down, C_SUP: r.sess_up,
-                C_QUEUE: r.queue if r.queue > 0 else 1e9,
+                C_QUEUE: r.order,
             }[c]
         if role == Qt.ForegroundRole:
             dark = theme.current_name == "dark"
@@ -3312,7 +3312,7 @@ class MainWindow(QMainWindow):
         self.table.setItemDelegateForColumn(C_PROG, ProgressDelegate(self.table))
         self.table.setItemDelegateForColumn(C_STATE, BadgeDelegate(self.table))
         hh = self.table.horizontalHeader()
-        hh.setSortIndicator(-1, Qt.AscendingOrder)   # insertion order until a header is clicked
+        hh.setSortIndicator(C_QUEUE, Qt.AscendingOrder)   # the user's order (Up / Down) until a header is clicked
         hh.setHighlightSections(False)
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hh.setSectionResizeMode(C_NAME, QHeaderView.Stretch)
@@ -4290,7 +4290,12 @@ class MainWindow(QMainWindow):
         keys = self.selected_keys()
         if keys:
             self.engine.queue_move(keys, where)
+            # sorted by another column the move would be invisible — show the list in "#" order
+            hh = self.table.horizontalHeader()
+            if hh.sortIndicatorSection() != C_QUEUE or hh.sortIndicatorOrder() != Qt.AscendingOrder:
+                self.table.sortByColumn(C_QUEUE, Qt.AscendingOrder)
             self.tick()
+            self.table.scrollTo(self.table.selectionModel().currentIndex())
 
     def open_folder(self):
         for k in self.selected_keys()[:1]:
@@ -4503,6 +4508,8 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(ba("geometry"))
         if ba("header") is not None and st.get("columns") == len(COLS):   # a new column = start fresh
             self.table.horizontalHeader().restoreState(ba("header"))
+            if self.table.horizontalHeader().sortIndicatorSection() < 0:     # saved before "#" order existed
+                self.table.sortByColumn(C_QUEUE, Qt.AscendingOrder)
         if ba("splitter") is not None:
             self.split.restoreState(ba("splitter"))
         if ba("files_header") is not None:
