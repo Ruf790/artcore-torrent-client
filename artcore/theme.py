@@ -376,6 +376,16 @@ QToolButton#sbItem {{ color: {c['secondary']}; font-size: 8.5pt; padding: 2px 8p
     border-left: 1px solid {c['border']}; border-radius: 0; background: transparent; }}
 QToolButton#sbItem:hover {{ background: {c['primary_subtle']}; color: {c['primary_text']}; }}
 QMessageBox QLabel {{ color: {c['body']}; }}
+
+/* details tabs as pills, like the site's pill tabs (.st-tabs) */
+QTabWidget#pillTabs::pane {{ border: none; border-top: 1px solid {c['border']}; }}
+QTabWidget#pillTabs QTabBar::tab {{
+  background: transparent; color: {c['secondary']}; border: 1px solid transparent; border-radius: 15px;
+  padding: 6px 14px; margin: 7px 4px 7px 0; font-weight: 600;
+}}
+QTabWidget#pillTabs QTabBar::tab:first {{ margin-left: 8px; }}
+QTabWidget#pillTabs QTabBar::tab:hover {{ background: {c['tertiary_bg']}; color: {c['emphasis']}; }}
+QTabWidget#pillTabs QTabBar::tab:selected {{ background: {c['primary']}; color: #ffffff; border-color: {c['primary']}; }}
 """
 
 
