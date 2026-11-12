@@ -459,14 +459,42 @@ def card() -> QFrame:
     return f
 
 
+class KpiLine(QWidget):
+    """Thin coloured bar under a KPI value (site style): how full the value is (speed vs. peak …)."""
+    def __init__(self, tone: str):
+        super().__init__()
+        self.tone, self.frac = tone, 0.0
+        self.setFixedHeight(5)
+        self.setMinimumWidth(60)
+
+    def set_fraction(self, f: float):
+        f = max(0.0, min(1.0, f))
+        if abs(f - self.frac) > 0.005:
+            self.frac = f
+            self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        r = self.rect()
+        p.setBrush(QColor(C["border_soft"]))
+        p.drawRoundedRect(r, 2.5, 2.5)
+        if self.frac > 0:
+            p.setBrush(QColor(C[theme.TONES[self.tone]]))
+            p.drawRoundedRect(QRectF(0, 0, max(5.0, r.width() * self.frac), r.height()), 2.5, 2.5)
+
+
 class Kpi(QFrame):
     """KPI tile. muted: gray with a faint corner icon (.st-kpi--muted);
-    soft: coloured icon square + coloured value; vivid: gradient tile."""
+    soft: coloured icon square + coloured value; vivid: gradient tile;
+    site: like the profile page — icon square, big value, coloured line, large faded icon in the corner."""
     def __init__(self, icon_name: str, tone: str):
         super().__init__()
         self.setObjectName("kpi")
         self.setProperty("tone", tone)
         self.icon_name, self.tone = icon_name, tone
+        self._wm = None
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 10, 12, 10)
         lay.setSpacing(12)
@@ -475,15 +503,17 @@ class Kpi(QFrame):
         self.ico_box.setProperty("tone", tone)
         self.ico_box.setFixedSize(44, 44)
         self.ico_box.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self.ico_box)
+        lay.addWidget(self.ico_box, 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(1)
         self.val = QLabel("—"); self.val.setObjectName("kpiVal")
         self.lbl = QLabel(); self.lbl.setObjectName("kpiLbl")
+        self.line = KpiLine(tone)
         col.addWidget(self.val)
         col.addWidget(self.lbl)
-        lay.addLayout(col)
-        lay.addStretch()
+        col.addSpacing(4)
+        col.addWidget(self.line)
+        lay.addLayout(col, 1)
         self.ico = QLabel()
         self.ico.setStyleSheet("background: transparent;")
         lay.addWidget(self.ico)
@@ -492,23 +522,41 @@ class Kpi(QFrame):
     def retheme(self):
         style = theme.current_style
         fam = theme.TONES[self.tone]
-        self.ico_box.setVisible(style == "soft")
-        self.ico.setVisible(style != "soft")
-        if style == "soft":
+        site = style == "site"
+        self.ico_box.setVisible(style in ("soft", "site"))
+        self.ico.setVisible(style not in ("soft", "site"))
+        self.line.setVisible(site)
+        self.layout().setContentsMargins(*((16, 14, 16, 14) if site else (14, 10, 12, 10)))
+        if style in ("soft", "site"):
             col = C[fam + "_text"] if theme.current_name == "dark" else C[fam]
             self.ico_box.setPixmap(qta.icon(self.icon_name, color=col).pixmap(20, 20))
         else:
             c = QColor("#ffffff" if style == "vivid" else C["secondary"])
             c.setAlpha(110 if style == "vivid" else 70)
             self.ico.setPixmap(qta.icon(self.icon_name, color=c).pixmap(34, 34))
+        self._wm = None
+        if site:      # big faded icon, cut by the bottom-right corner
+            c = QColor(C["secondary"])
+            c.setAlpha(28 if theme.current_name == "dark" else 22)
+            self._wm = qta.icon(self.icon_name, color=c).pixmap(96, 96)
         # dynamic-property selectors need a re-polish after a stylesheet change
         for w in (self, self.ico_box, self.val, self.lbl):
             w.style().unpolish(w)
             w.style().polish(w)
+        self.update()
 
-    def set(self, val: str, lbl: str):
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self._wm is not None:
+            p = QPainter(self)
+            p.setClipRect(self.rect().adjusted(1, 1, -1, -1))
+            p.drawPixmap(self.width() - 80, self.height() - 62, self._wm)
+
+    def set(self, val: str, lbl: str, frac: float | None = None):
         self.val.setText(val)
         self.lbl.setText(lbl)
+        if frac is not None:
+            self.line.set_fraction(frac)
 
 
 class SpeedGraph(QWidget):
@@ -1423,7 +1471,7 @@ class SettingsDialog(QDialog):
         self.theme.setCurrentIndex({"system": 0, "light": 1, "dark": 2}.get(cfg.get("theme", "system"), 0))
         form.addRow(t("set_theme"), self.theme)
         self.style_combo = QComboBox()
-        for k in ("muted", "soft", "vivid"):
+        for k in ("site", "soft", "vivid", "muted"):
             self.style_combo.addItem(t("style_" + k), k)
         self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(cfg.get("ui_style", "soft"))))
         form.addRow(t("set_style"), self.style_combo)
@@ -3245,12 +3293,14 @@ class MainWindow(QMainWindow):
     def _build_list(self) -> QFrame:
         box = card()
         lay = QVBoxLayout(box)
-        lay.setContentsMargins(1, 10, 1, 1)
-        lay.setSpacing(8)
+        lay.setContentsMargins(1, 1, 1, 1)
+        lay.setSpacing(0)
 
         self.pill_bar = QWidget()
+        self.pill_bar.setObjectName("listHead")       # gray header strip in the site style
+        self.pill_bar.setAttribute(Qt.WA_StyledBackground, True)
         pills = QHBoxLayout(self.pill_bar)
-        pills.setContentsMargins(12, 0, 12, 0)
+        pills.setContentsMargins(12, 9, 12, 9)
         pills.setSpacing(6)
         self.pill_group = QButtonGroup(self)
         self.pills: dict[str, QPushButton] = {}
@@ -4914,10 +4964,15 @@ class MainWindow(QMainWindow):
             del self.t_hist[k]
         self._tick_extras(rows, down, up)
         active = sum(1 for r in rows if r.state in ("downloading", "seeding", "metadata", "checking", "tracker_error"))
-        self.k_down.set(fmt_size(down) + "/s", t("kpi_down"))
-        self.k_up.set(fmt_size(up) + "/s", t("kpi_up"))
-        self.k_active.set(str(active), t("kpi_active", len(rows)))
-        self.k_session.set(fmt_size(st.total_payload_upload - self._session_up0), t("kpi_session"))
+        # site style: lines under the values — speed vs. this session's peak, active share, session ratio
+        self._kpi_peak = (max(getattr(self, "_kpi_peak", (1, 1))[0], down, 1),
+                          max(getattr(self, "_kpi_peak", (1, 1))[1], up, 1))
+        s_up = st.total_payload_upload - self._session_up0
+        s_down = max(1, st.total_payload_download - getattr(self, "_session_down0", 0))
+        self.k_down.set(fmt_size(down) + "/s", t("kpi_down"), down / self._kpi_peak[0])
+        self.k_up.set(fmt_size(up) + "/s", t("kpi_up"), up / self._kpi_peak[1])
+        self.k_active.set(str(active), t("kpi_active", len(rows)), active / max(1, len(rows)))
+        self.k_session.set(fmt_size(s_up), t("kpi_session"), s_up / s_down)
         self._tick_statusbar(st, down, up)
 
         dht = t("meta_dht", st.dht_nodes) if self.cfg.get("dht") else t("meta_dht_off")
