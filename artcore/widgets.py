@@ -63,7 +63,7 @@ def torrent_icon(kind: str) -> QIcon:
 # (light, dark, outline) of the glossy arrow body
 _ARROW_TONES = {
     "green":  ("#8fe36a", "#2e9a1c", "#1d6b10"),
-    "orange": ("#ffc061", "#ec5b0b", "#a83e04"),
+    "orange": ("#ffab2e", "#ff5e00", "#b83a00"),
     "grey":   ("#dcdcdc", "#8c8c8c", "#5f5f5f"),
     "amber":  ("#ffe77a", "#eaa400", "#9c6c00"),
     "blue":   ("#8cd0ff", "#1f7fd8", "#0d4f8c"),
