@@ -787,6 +787,12 @@ STRINGS = {
     "queue_up":        ("Выше",                              "Move up"),
     "queue_down":      ("Ниже",                              "Move down"),
     "queue_top":       ("В начало",                          "Move to top"),
+    "tb_up":           ("Вверх",                             "Up"),
+    "tb_down":         ("Вниз",                              "Down"),
+    "tb_up_tip":       ("Поднять выбранные торренты в очереди (Ctrl+Shift+↑, в начало — Ctrl+Shift+Home)",
+                        "Move the selected torrents up the queue (Ctrl+Shift+Up, to the top — Ctrl+Shift+Home)"),
+    "tb_down_tip":     ("Опустить выбранные торренты в очереди (Ctrl+Shift+↓, в конец — Ctrl+Shift+End)",
+                        "Move the selected torrents down the queue (Ctrl+Shift+Down, to the bottom — Ctrl+Shift+End)"),
     "queue_bottom":    ("В конец",                           "Move to bottom"),
     # history
     "history":         ("История торрентов",                 "Torrent history"),
