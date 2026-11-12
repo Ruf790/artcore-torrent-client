@@ -882,45 +882,6 @@ def _country_strip(by_country: dict[str, list], total: int, top: int = 10) -> st
     return f"{head} &nbsp;&nbsp; " + " &nbsp;·&nbsp; ".join(parts) + tail
 
 
-class NameDelegate(QStyledItemDelegate):
-    """Name column: the usual icon + name, and the tracker's promotion badges right after the
-    name (FREE, 50%, 30%, 2× UP) like on the torrent page of the site."""
-    BADGES = {"free": ("FREE", "success"), "silver": ("50%", "info"), "30": ("30%", "orange"), "2x": ("2× UP", "purple")}
-
-    def paint(self, painter, option, index):
-        r = _row_of(index)
-        tags = [self.BADGES[x] for x in (r.promo if r is not None else ()) if x in self.BADGES]
-        if not tags:
-            return super().paint(painter, option, index)
-        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
-        o = QStyleOptionViewItem(option)
-        self.initStyleOption(o, index)
-        bf = QFont(o.font); bf.setPointSizeF(max(6.5, o.font.pointSizeF() * 0.78)); bf.setBold(True)
-        bfm = QFontMetrics(bf)
-        widths = [bfm.horizontalAdvance(text) + 14 for text, _ in tags]
-        need = sum(widths) + 5 * len(widths) + 10
-        style = o.widget.style() if o.widget is not None else QApplication.style()
-        tr = style.subElementRect(QStyle.SE_ItemViewItemText, o, o.widget)
-        fm = QFontMetrics(o.font)
-        o.text = fm.elidedText(o.text, Qt.ElideRight, max(24, tr.width() - need))
-        style.drawControl(QStyle.CE_ItemViewItem, o, painter, o.widget)
-        x = tr.left() + fm.horizontalAdvance(o.text) + 10
-        painter.save()
-        painter.setClipRect(option.rect)          # a narrow column cuts the badges, not the next column
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setFont(bf)
-        h = 18
-        for (text, tone), w in zip(tags, widths):
-            rect = QRectF(x, option.rect.center().y() - h / 2, w, h)
-            bg = QColor(C[tone]); bg.setAlpha(40)
-            painter.setPen(Qt.NoPen); painter.setBrush(bg)
-            painter.drawRoundedRect(rect, h / 2, h / 2)
-            painter.setPen(QColor(C[tone + "_text"] if theme.current_name == "dark" else C[tone]))
-            painter.drawText(rect, Qt.AlignCenter, text)
-            x += w + 5
-        painter.restore()
-
-
 class GridTableView(QTableView):
     """Torrent list with an optional BitComet-style grid: column separators and row lines drawn
     over the whole view, also in the empty area below the last torrent."""
@@ -1706,8 +1667,6 @@ class SettingsDialog(QDialog):
         form.addRow("", self.compact)
         self.grid = QCheckBox(t("grid_set")); self.grid.setChecked(bool(cfg.get("list_grid")))
         form.addRow("", self.grid)
-        self.promos = QCheckBox(t("promo_set")); self.promos.setChecked(cfg.get("tracker_promos", True))
-        form.addRow("", self.promos)
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
@@ -1969,7 +1928,6 @@ class SettingsDialog(QDialog):
                  ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
                  name_icon=self.name_icon.currentData(), mica=self.mica.isChecked(),
                  compact_list=self.compact.isChecked(), list_grid=self.grid.isChecked(),
-                 tracker_promos=self.promos.isChecked(),
                  preallocate=self.prealloc.isChecked(), disk_write_mode=self.wmode.currentData(),
                  disk_os_cache=self.oscache.currentData(), disk_queue_mb=self.dqueue.value(),
                  aio_threads=self.aio.value(), hashing_threads=self.hthreads.value(),
@@ -3662,7 +3620,6 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setItemDelegateForColumn(C_PROG, ProgressDelegate(self.table))
-        self.table.setItemDelegateForColumn(C_NAME, NameDelegate(self.table))
         self.table.setItemDelegateForColumn(C_STATE, BadgeDelegate(self.table))
         hh = self.table.horizontalHeader()
         hh.setSortIndicator(C_QUEUE, Qt.AscendingOrder)   # the user's order (Up / Down) until a header is clicked
@@ -5189,7 +5146,6 @@ class MainWindow(QMainWindow):
             GridTableView.grid = bool(self.cfg.get("list_grid"))
             self.table.viewport().update()
             self.engine.apply_settings(self.cfg)
-            self.engine.refresh_promos(force=True)
             self.set_mini(bool(self.cfg.get("mini_widget")))
             self._sched_state = None             # re-apply schedule limits on next tick
             self.refresh_category_combo()

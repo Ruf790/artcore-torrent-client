@@ -459,8 +459,6 @@ STRINGS = {
     "toast_removed_kept":  ("Файлы на диске остались", "Files stay on disk"),
     "remove_btn":      ("Удалить",    "Remove"),
     "sb_save":         ("Сохранить",  "Save"),
-    "promo_set":       ("Показывать акции трекера: FREE, 50%, 30%, 2× UP (ArtCore Gangsta)",
-                        "Show tracker promotions: FREE, 50%, 30%, 2× UP (ArtCore Gangsta)"),
     "sb_reset":        ("Сбросить",   "Reset"),
     "sb_dirty":        ("Изменено: {0} — не сохранено", "Changed: {0} — not saved"),
     "quit_title":      ("Выход",      "Quit"),

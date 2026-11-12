@@ -58,8 +58,7 @@ DEFAULTS = {
     "mini_widget":      False,      # floating speed window
     "mini_pos":         None,
     "speed_in_title":   True,       # speeds in the window title = taskbar button tooltip
-    "recent_paths":     [],
-    "tracker_promos":   True,       # FREE / 50% / 30% / 2× badges from trackers with api_promo.php         # save folders used lately (add dialog drop-down)
+    "recent_paths":     [],         # save folders used lately (add dialog drop-down)
     "random_port":      False,      # pick a new listen port on every start
     "utp":              True,       # uTP (µTP) peer connections besides TCP
     "proxy_type":       "none",     # none | socks4 | socks5 | http
