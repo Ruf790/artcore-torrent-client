@@ -44,6 +44,70 @@ PALETTES = {
 current: dict = dict(PALETTES["light"])
 current_name = "light"
 current_style = "soft"        # muted (gray) | soft (coloured accents) | vivid (gradients) | site (like the site's profile page)
+                              # | fluent (Windows 11)
+STYLES = ("muted", "soft", "vivid", "site", "fluent")
+
+# Windows 11 (Fluent) colours: neutral layers, 4 px controls, 8 px cards; accent comes from Windows
+FLUENT = {
+    "light": {
+        "body_bg": "#ffffff", "body": "#1b1b1b", "emphasis": "#000000", "secondary": "#5f5f5f",
+        "tertiary_bg": "#f9f9f9", "secondary_bg": "#e8e8e8", "page_bg": "#f3f3f3",
+        "border": "#e5e5e5", "border_soft": "#f0f0f0", "control_edge": "#cccccc", "input_edge": "#868686",
+        "muted_subtle": "#f9f9f9", "hover": "#f5f5f5",
+        "success": "#0f7b0f", "danger": "#c42b1c", "success_text": "#0f5a0f", "danger_text": "#8f1e14",
+    },
+    "dark": {
+        "body_bg": "#2b2b2b", "body": "#ffffff", "emphasis": "#ffffff", "secondary": "#c8c8c8",
+        "tertiary_bg": "#323232", "secondary_bg": "#3d3d3d", "page_bg": "#202020",
+        "border": "#3a3a3a", "border_soft": "#333333", "control_edge": "#454545", "input_edge": "#9a9a9a",
+        "muted_subtle": "#2f2f2f", "hover": "#353535",
+        "success": "#6ccb5f", "danger": "#ff99a4", "success_text": "#6ccb5f", "danger_text": "#ff99a4",
+    },
+}
+DEFAULT_ACCENT = "#0078d4"     # Windows default blue, if the system accent can't be read
+
+
+def system_accent() -> tuple[str, str, str]:
+    """(base, darker for light mode, lighter for dark mode) of the Windows accent colour."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent") as k:
+                raw = winreg.QueryValueEx(k, "AccentPalette")[0]      # 8 × RGBA, light → dark
+            cols = ["#%02x%02x%02x" % tuple(raw[i * 4:i * 4 + 3]) for i in range(8)]
+            return cols[3], cols[4], cols[1]
+        except (OSError, IndexError, TypeError):
+            pass
+    base = QColor(DEFAULT_ACCENT)
+    return DEFAULT_ACCENT, "#005fb8", base.lighter(150).name()
+
+
+def _fluent_colours(c: dict, dark: bool) -> None:
+    c.update(FLUENT["dark" if dark else "light"])
+    base, deep, light = system_accent()
+    acc = QColor(base if dark else deep)
+    c["primary"] = acc.name()
+    c["primary_hover"] = acc.lighter(112).name()
+    tint = QColor(acc)
+    if dark:
+        c["primary_text"] = light
+        tint.setAlpha(60)
+        c["primary_subtle"] = _blend(c["body_bg"], tint)
+        c["selection"] = _blend(c["body_bg"], QColor(255, 255, 255, 22))
+    else:
+        c["primary_text"] = acc.darker(140).name()
+        tint.setAlpha(30)
+        c["primary_subtle"] = _blend(c["body_bg"], tint)
+        c["selection"] = _blend(c["body_bg"], QColor(acc.red(), acc.green(), acc.blue(), 22))
+
+
+def _blend(bg: str, over: QColor) -> str:
+    """Solid colour of `over` (with alpha) laid on `bg` — QSS colours here must be opaque."""
+    b = QColor(bg)
+    a = over.alphaF()
+    return QColor(round(b.red() * (1 - a) + over.red() * a), round(b.green() * (1 - a) + over.green() * a),
+                  round(b.blue() * (1 - a) + over.blue() * a)).name()
 
 # KPI tile → colour family
 TONES = {"down": "primary", "up": "success", "active": "orange", "session": "purple"}
@@ -52,6 +116,8 @@ GRADIENTS = {   # vivid style: tile gradients (light and dark use the same satur
     "active": ("#fd7e14", "#f5b70a"), "session": ("#6f42c1", "#d63384"),
 }
 TITLE_FONT = "Oswald"
+_OSWALD = "Oswald"
+FLUENT_TITLE = "Segoe UI Variable Display"
 
 
 def asset(*parts: str) -> str:
@@ -63,7 +129,11 @@ def load_fonts() -> None:
     global TITLE_FONT
     fid = QFontDatabase.addApplicationFont(asset("fonts", "Oswald.ttf"))
     fams = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
-    TITLE_FONT = fams[0] if fams else "Arial"
+    TITLE_FONT = _OSWALD = fams[0] if fams else "Arial"
+    # Windows 10 has no Segoe UI Variable: fall back to plain Segoe UI
+    from PySide6.QtGui import QFont
+    QFont.insertSubstitution(FLUENT_TITLE, "Segoe UI")
+    QFont.insertSubstitution("Segoe UI Variable Text", "Segoe UI")
 
 
 def system_is_dark() -> bool:
@@ -90,9 +160,9 @@ def resolve(mode: str) -> str:
 
 def apply(app: QApplication, mode: str, style: str | None = None) -> str:
     """mode: 'system' | 'light' | 'dark'; style: muted | soft | vivid. Returns the resolved name."""
-    global current_name, current_style
+    global current_name, current_style, TITLE_FONT
     current_name = resolve(mode)
-    if style in ("muted", "soft", "vivid", "site"):
+    if style in STYLES:
         current_style = style
     current.clear()
     current.update(PALETTES[current_name])
@@ -103,6 +173,9 @@ def apply(app: QApplication, mode: str, style: str | None = None) -> str:
         c["page_bg"] = "#eef2f8"            # a hint of blue instead of plain gray
     if current_style == "site":
         c["page_bg"] = c["body_bg"]         # white page, gray cards — like the profile page
+    TITLE_FONT = FLUENT_TITLE if current_style == "fluent" else _OSWALD
+    if current_style == "fluent":
+        _fluent_colours(c, dark)
     # icon colours that depend on the style (looked up by key like any palette colour)
     c["ic_magnet"] = c["purple"] if colourful else c["body"]
     c["ic_create"] = c["orange"] if colourful else c["body"]
@@ -334,6 +407,8 @@ QFrame#kpi[tone="session"] QLabel#kpiVal, QFrame#kpi[tone="active"] QLabel#kpiVa
 QFrame#kpi[tone="{tone}"] QLabel#kpiVal {{ color: {c['emphasis']}; }}
 QLabel#kpiIco[tone="{tone}"] {{ background: {c[fam + '_subtle']}; border-radius: 12px; }}
 """
+    if current_style == "fluent":
+        out += fluent_qss(c, dark)
     if current_style == "vivid":
         out += """
 QFrame#headCard { border: none; border-radius: 14px;
@@ -352,3 +427,87 @@ QFrame#kpi[tone="{tone}"] QLabel#kpiVal {{ color: #ffffff; }}
 QFrame#kpi[tone="{tone}"] QLabel#kpiLbl {{ color: rgba(255,255,255,215); }}
 """
     return out
+
+
+def fluent_qss(c: dict, dark: bool) -> str:
+    """Windows 11 look: Segoe UI Variable, 4 px controls with a darker bottom edge, 8 px cards,
+    neutral selection, accent only where something is chosen."""
+    on_acc = "#ffffff"
+    shade = "rgba(255,255,255,15)" if dark else "rgba(0,0,0,10)"
+    press = "rgba(255,255,255,8)" if dark else "rgba(0,0,0,6)"
+    return f"""
+* {{ font-family: "Segoe UI Variable Text", "Segoe UI", "Noto Sans", Arial; font-size: 10pt; }}
+QFrame#card, QFrame#headCard {{ background: {c['body_bg']}; border: 1px solid {c['border']}; border-radius: 8px; }}
+QLabel#title {{ font-family: "{FLUENT_TITLE}"; font-size: 16pt; font-weight: 600; color: {c['emphasis']}; }}
+QLabel#headIcon {{ background: {c['primary']}; border-radius: 8px; }}
+QFrame#kpi {{ background: {c['body_bg']}; border: 1px solid {c['border']}; border-radius: 8px; }}
+QLabel#kpiVal {{ font-family: "{FLUENT_TITLE}"; font-size: 15pt; font-weight: 600; }}
+
+QPushButton {{
+  background: {c['tertiary_bg'] if dark else '#fbfbfb'}; color: {c['body']};
+  border: 1px solid {c['border']}; border-bottom-color: {c['control_edge']};
+  border-radius: 4px; padding: 5px 12px; font-weight: 400;
+}}
+QPushButton:hover {{ background: {c['hover']}; border-color: {c['border']}; border-bottom-color: {c['control_edge']}; }}
+QPushButton:pressed {{ background: {c['page_bg']}; color: {c['secondary']}; border-bottom-color: {c['border']}; }}
+QPushButton#primary {{ background: {c['primary']}; color: {on_acc}; border: 1px solid {c['primary']};
+  border-bottom-color: {QColor(c['primary']).darker(125).name()}; font-weight: 600; }}
+QPushButton#primary:hover {{ background: {c['primary_hover']}; }}
+QPushButton#danger:hover {{ background: {c['hover']}; border-color: {c['border']}; }}
+
+QToolButton#iconBtn {{ background: transparent; border-radius: 4px; }}
+QToolButton#iconBtn:hover {{ background: {shade}; }}
+QToolButton#iconBtn:pressed {{ background: {press}; }}
+
+QPushButton#pill {{ background: transparent; color: {c['secondary']}; border: 1px solid transparent;
+  border-radius: 4px; padding: 4px 11px; font-weight: 400; }}
+QPushButton#pill:hover {{ background: {shade}; color: {c['body']}; border-color: transparent; }}
+QPushButton#pill:checked {{ background: {c['body_bg']}; color: {c['primary_text']}; font-weight: 600;
+  border: 1px solid {c['border']}; border-bottom: 2px solid {c['primary']}; }}
+
+QLineEdit, QSpinBox, QDoubleSpinBox, QTimeEdit, QComboBox {{
+  background: {c['tertiary_bg'] if dark else '#fdfdfd'}; border: 1px solid {c['border']};
+  border-bottom: 1px solid {c['input_edge']}; border-radius: 4px; padding: 5px 9px;
+}}
+QLineEdit#search {{ border-radius: 4px; padding-left: 10px; }}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QComboBox:focus {{
+  background: {c['body_bg']}; border-color: {c['border']}; border-bottom: 2px solid {c['primary']}; }}
+QComboBox QAbstractItemView {{ border-radius: 8px; padding: 4px;
+  selection-background-color: {c['hover']}; selection-color: {c['body']}; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{ background: transparent; border-left: none; }}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{ background: {shade}; }}
+QCheckBox::indicator, QTreeView::indicator, QTableView::indicator {{ border-radius: 4px; border-color: {c['input_edge']}; }}
+
+QTableView, QTableWidget {{ selection-background-color: {c['selection']}; }}
+QTableView::item, QTableWidget::item {{ border-bottom: 1px solid {c['border_soft']}; }}
+QTableView::item:hover {{ background: {c['hover']}; }}
+QTableView::item:selected, QTableWidget::item:selected {{ background: {c['selection']}; color: {c['emphasis']}; }}
+QHeaderView::section {{ font-weight: 400; color: {c['secondary']}; padding: 7px 6px;
+  border-right: 1px solid {c['border_soft']}; }}
+
+QTreeWidget#sidebar {{ background: transparent; border-right: none; padding: 4px; }}
+QTreeWidget#sidebar::item {{ padding: 5px 6px; border-radius: 4px; margin: 1px 0; border-left: 3px solid transparent; }}
+QTreeWidget#sidebar::item:hover {{ background: {shade}; }}
+QTreeWidget#sidebar::item:selected {{ background: {c['hover'] if not dark else c['secondary_bg']}; color: {c['emphasis']};
+  border-left: 3px solid {c['primary']}; }}
+
+QTabWidget::pane {{ border-top: 1px solid {c['border']}; }}
+QTabBar::tab {{ color: {c['secondary']}; font-weight: 400; padding: 8px 12px; border-radius: 4px;
+  border-bottom: 3px solid transparent; }}
+QTabBar::tab:hover {{ color: {c['body']}; background: {shade}; }}
+QTabBar::tab:selected {{ color: {c['emphasis']}; font-weight: 600; border-bottom: 3px solid {c['primary']}; }}
+
+QScrollBar:vertical {{ width: 8px; margin: 3px 1px; }}
+QScrollBar::handle:vertical {{ background: {c['input_edge']}; border-radius: 3px; min-height: 30px; }}
+QScrollBar:horizontal {{ height: 8px; margin: 1px 3px; }}
+QScrollBar::handle:horizontal {{ background: {c['input_edge']}; border-radius: 3px; min-width: 30px; }}
+
+QMenu {{ background: {c['body_bg'] if not dark else '#2c2c2c'}; border: 1px solid {c['border']};
+  border-radius: 8px; padding: 4px; }}
+QMenu::item {{ padding: 6px 22px 6px 10px; border-radius: 4px; margin: 1px 0; }}
+QMenu::item:selected {{ background: {shade}; color: {c['body']}; }}
+QToolTip {{ border-radius: 4px; }}
+QStatusBar {{ background: {c['page_bg']}; border-top: 1px solid {c['border']}; }}
+QToolButton#sbItem {{ border-left: none; border-radius: 4px; margin: 1px; }}
+QToolButton#sbItem:hover {{ background: {shade}; color: {c['body']}; }}
+"""
