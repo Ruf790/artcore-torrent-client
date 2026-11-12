@@ -133,13 +133,15 @@ class Engine:
         except (FileNotFoundError, ValueError):
             self.opts = {}
 
-        # bans: ip → reason; user's IP-filter ranges are kept so both can be combined
+        # bans: ip → {reason, kind, client, time, expires}; user's IP-filter ranges are kept so both
+        # can be combined. Old files stored ip → reason text: converted on load.
         self.bans_path = os.path.join(data_dir, "bans.json")
         try:
             with open(self.bans_path, encoding="utf-8") as f:
-                self.bans: dict[str, str] = json.load(f)
+                raw = json.load(f)
         except (FileNotFoundError, ValueError):
-            self.bans = {}
+            raw = {}
+        self.bans: dict[str, dict] = {ip: _ban_record(v) for ip, v in raw.items()}
         self._user_ranges: list[tuple[str, str]] = []
         self._peer_prog: dict[tuple, tuple] = {}      # (key, ip) → (uploaded to it, its progress) at first sight
         self._miss_hits: dict[str, int] = {}          # missing-files scans in a row that found nothing
@@ -278,13 +280,33 @@ class Engine:
         self.ses.set_ip_filter(f)      # libtorrent drops connected peers that became blocked
 
     # ── bans ───────────────────────────────────────────────────
-    def ban(self, ip: str, reason: str) -> None:
+    def ban(self, ip: str, reason: str, kind: str = "manual", client: str = "") -> None:
+        """kind: leech (client by peer-id / name, permanent) | fake (fake progress, expires after
+        FAKE_BAN_HOURS — addresses get reused) | manual (from the Peers tab, permanent)."""
         if ip in self.bans:
             return
-        self.bans[ip] = reason
+        now = int(time.time())
+        self.bans[ip] = {"reason": reason, "kind": kind, "client": client, "time": now,
+                         "expires": now + FAKE_BAN_HOURS * 3600 if kind == "fake" else 0}
         self._save_bans()
         self._apply_filter()
         self._log("network", f"ban {ip}: {reason}")
+
+    def unban(self, ips) -> int:
+        n = 0
+        for ip in list(ips):
+            if self.bans.pop(ip, None) is not None:
+                n += 1
+                self._log("network", f"unban {ip}")
+        if n:
+            self._save_bans()
+            self._apply_filter()
+        return n
+
+    def expire_bans(self) -> int:
+        now = time.time()
+        old = [ip for ip, b in self.bans.items() if b.get("expires") and b["expires"] <= now]
+        return self.unban(old)
 
     def clear_bans(self) -> None:
         self.bans.clear()
@@ -331,7 +353,7 @@ class Engine:
                 pid = p.pid.to_bytes()[:8]
                 bad = _bad_client(client, pid)
                 if bad:
-                    self.ban(ip, f"{bad} ({client or pid[:8].decode('latin-1', 'replace')})")
+                    self.ban(ip, bad, "leech", client or pid[:8].decode("latin-1", "replace"))
                     continue
                 seen = self._peer_prog.get((key, ip))
                 if seen is None:
@@ -340,7 +362,8 @@ class Engine:
                 sent = p.total_upload - seen[0]
                 gained = (p.progress - seen[1]) * size
                 if sent > max(FAKE_MIN_BYTES, size * 0.05) and gained < sent * 0.1:
-                    self.ban(ip, f"fake progress: got {sent >> 20} MiB, progress +{max(gained, 0) / size:.1%} ({client})")
+                    self.ban(ip, f"fake progress: got {sent >> 20} MiB, progress +{max(gained, 0) / size:.1%}",
+                             "fake", client)
         if len(self._peer_prog) > 20000:
             self._peer_prog.clear()
 
@@ -1225,6 +1248,8 @@ class Engine:
             self.ses.post_session_stats()      # → session_stats_alert → self.disk
         if self._polls % 5 == 0:
             self._track_peers()
+        if self._polls % 60 == 0 and self.bans:
+            self.expire_bans()
         if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
             try:
                 self._scan_peers()
@@ -2205,6 +2230,23 @@ class Engine:
 BAD_PEER_IDS = (b"-XL", b"-SD", b"-XF", b"-QD", b"-BN", b"-DL", b"-HP", b"-TT")
 BAD_NAMES = ("xunlei", "thunder", "qqdownload", "baidu", "dandelion", "offline download", "torrentstorm")
 FAKE_MIN_BYTES = 64 << 20      # judge fake progress only after sending a peer this much
+FAKE_BAN_HOURS = 24            # a fake-progress ban is lifted after this (dynamic IPs get reused)
+
+
+def _ban_record(v) -> dict:
+    """bans.json entry → record. Before 1.0.39 the value was just the reason text."""
+    if isinstance(v, dict):
+        return {"reason": str(v.get("reason", "")), "kind": v.get("kind", "manual"),
+                "client": str(v.get("client", "")), "time": int(v.get("time", 0) or 0),
+                "expires": int(v.get("expires", 0) or 0)}
+    text = str(v)
+    kind = "fake" if text.startswith("fake progress") else "leech" if text.startswith("leech") else "manual"
+    client = ""
+    if "(" in text and text.endswith(")"):            # "leech client (Xunlei 0.0.1.2)"
+        text, client = text[:text.rindex("(")].strip(), text[text.rindex("(") + 1:-1]
+    # old fake-progress bans had no date: give them a fresh day instead of keeping them forever
+    exp = int(time.time()) + FAKE_BAN_HOURS * 3600 if kind == "fake" else 0
+    return {"reason": text, "kind": kind, "client": client, "time": 0, "expires": exp}
 
 
 def _safe_name(name: str) -> str:
