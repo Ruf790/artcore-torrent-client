@@ -94,6 +94,60 @@ def set_title_bar(win_id: int, dark: bool, caption: str | None = None, text: str
         pass
 
 
+def mica_supported() -> bool:
+    """Mica backdrop needs Windows 11 (build 22000+)."""
+    if not IS_WIN:
+        return False
+    try:
+        return sys.getwindowsversion().build >= 22000
+    except Exception:
+        return False
+
+
+def set_mica(win_id: int, dark: bool, on: bool = True) -> bool:
+    """Windows 11 Mica behind a window created with Qt.WA_TranslucentBackground: the frame is
+    extended over the whole client area and DWM paints the wallpaper-tinted backdrop there.
+    Returns False when Windows refused it (the caller then keeps an opaque background)."""
+    if not mica_supported():
+        return False
+    import ctypes
+    from ctypes import wintypes
+    hwnd = wintypes.HWND(int(win_id))
+    dwm = ctypes.windll.dwmapi
+
+    def setattr_(attr: int, value: int) -> bool:
+        v = ctypes.c_int(value)
+        try:
+            return dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v)) == 0
+        except Exception:
+            return False
+
+    class MARGINS(ctypes.Structure):
+        _fields_ = [("l", ctypes.c_int), ("r", ctypes.c_int), ("t", ctypes.c_int), ("b", ctypes.c_int)]
+
+    m = -1 if on else 0
+    try:
+        dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(MARGINS(m, m, m, m)))
+    except Exception:
+        return False
+    setattr_(20, 1 if dark else 0)                     # dark Mica tint follows the app theme
+    if on:
+        setattr_(35, 0xFFFFFFFF)                       # DWMWA_COLOR_DEFAULT: title bar shows Mica too
+        setattr_(36, 0xFFFFFFFF)
+    build = sys.getwindowsversion().build
+    if build >= 22621:                                 # 22H2+: DWMWA_SYSTEMBACKDROP_TYPE, 2 = Mica, 1 = none
+        ok = setattr_(38, 2 if on else 1)
+    else:                                              # 21H2: undocumented DWMWA_MICA_EFFECT
+        ok = setattr_(1029, 1 if on else 0)
+    SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
+    try:
+        ctypes.windll.user32.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                                          SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+    except Exception:
+        pass
+    return ok
+
+
 # ── autostart ───────────────────────────────────────────────────
 def autostart_enabled() -> bool:
     if not IS_WIN:

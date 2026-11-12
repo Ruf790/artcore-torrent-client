@@ -1515,6 +1515,14 @@ class SettingsDialog(QDialog):
             self.style_combo.addItem(t("style_" + k), k)
         self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(cfg.get("ui_style", "soft"))))
         form.addRow(t("set_style"), self.style_combo)
+        self.mica = QCheckBox(t("mica_set")); self.mica.setChecked(bool(cfg.get("mica", True)))
+        if not winint.mica_supported():
+            self.mica.setEnabled(False); self.mica.setToolTip(t("mica_na"))
+        else:
+            self.style_combo.currentIndexChanged.connect(
+                lambda _i: self.mica.setEnabled(self.style_combo.currentData() == "fluent"))
+            self.mica.setEnabled(self.style_combo.currentData() == "fluent")
+        form.addRow("", self.mica)
         self.pbar = QComboBox()
         self.pbar.addItem(t("pb_classic"), "classic")
         self.pbar.addItem(t("pb_rounded"), "rounded")
@@ -1738,7 +1746,7 @@ class SettingsDialog(QDialog):
                  ip_filter=self.ipf.text().strip(), geoip=self.geoip.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
-                 name_icon=self.name_icon.currentData(),
+                 name_icon=self.name_icon.currentData(), mica=self.mica.isChecked(),
                  compact_list=self.compact.isChecked(),
                  preallocate=self.prealloc.isChecked(), disk_write_mode=self.wmode.currentData(),
                  disk_os_cache=self.oscache.currentData(), disk_queue_mb=self.dqueue.value(),
@@ -2866,6 +2874,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
         self.resize(1200, 780)
+        # Mica (Windows 11 style): the window must be translucent from the start, before its handle exists
+        if theme.mica_wanted and theme.current_style == "fluent":
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            theme.mica_window = True
+            theme.apply(QApplication.instance(), cfg.get("theme", "system"), cfg.get("ui_style", "soft"))
         self.setMinimumSize(1060, 600)
         self.setAcceptDrops(True)
 
@@ -3995,12 +4008,24 @@ class MainWindow(QMainWindow):
         self.empty_ico.setStyleSheet(f"background:{C['tertiary_bg']}; border-radius: 16px;")
         dark = theme.current_name == "dark"
         self.theme_btn.setIcon(icon("fa6s.sun" if dark else "fa6s.moon", "head_ic"))
-        winint.set_title_bar(int(self.winId()), dark, C["page_bg"], C["emphasis"])
+        self._apply_backdrop(dark)
         self.table.viewport().update()
         self.sidebar._keys = {k: [] for k in self.sidebar._keys}     # rebuild with icons in the new colours
         self.sidebar.retheme()
         self.sidebar.refresh(self.model.rows, [c["name"] for c in self.cfg.get("categories", [])],
                              self.engine.all_tags())
+
+    def _apply_backdrop(self, dark: bool):
+        """Mica behind the window in the Windows 11 style, otherwise the title bar in the page colour."""
+        if theme.mica_window:
+            on = theme.mica_active()
+            if winint.set_mica(int(self.winId()), dark, on) and on:
+                return
+            if on:                                   # Windows refused Mica: keep an opaque page
+                theme.mica_wanted = False
+                theme.apply(QApplication.instance(), self.cfg.get("theme", "system"),
+                            self.cfg.get("ui_style", "soft"))
+        winint.set_title_bar(int(self.winId()), dark, C["page_bg"], C["emphasis"])
 
     def toggle_theme(self):
         self.cfg["theme"] = "light" if theme.current_name == "dark" else "dark"
@@ -4874,7 +4899,7 @@ class MainWindow(QMainWindow):
 
     def _apply_settings(self, new_cfg: dict):
         if True:
-            old_theme = (self.cfg.get("theme"), self.cfg.get("ui_style"))
+            old_theme = (self.cfg.get("theme"), self.cfg.get("ui_style"), self.cfg.get("mica"))
             old_net = (self.cfg.get("ip_filter"), self.cfg.get("geoip"))
             old_lang = self.cfg.get("language", "ru")
             self.cfg.update(new_cfg)
@@ -4889,8 +4914,9 @@ class MainWindow(QMainWindow):
             self.refresh_category_combo()
             if (self.cfg.get("ip_filter"), self.cfg.get("geoip")) != old_net:
                 self.start_network_extras()
-            if (self.cfg.get("theme"), self.cfg.get("ui_style")) != old_theme:
-                theme.apply(QApplication.instance(), self.cfg["theme"], self.cfg.get("ui_style", "soft"))
+            if (self.cfg.get("theme"), self.cfg.get("ui_style"), self.cfg.get("mica")) != old_theme:
+                theme.apply(QApplication.instance(), self.cfg["theme"], self.cfg.get("ui_style", "soft"),
+                            mica=bool(self.cfg.get("mica", True)) and winint.mica_supported())
                 self.retheme()
             if self.cfg.get("language", "ru") != old_lang:
                 self._mark_lang()

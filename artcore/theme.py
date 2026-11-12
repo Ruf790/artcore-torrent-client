@@ -46,6 +46,12 @@ current_name = "light"
 current_style = "soft"        # muted (gray) | soft (coloured accents) | vivid (gradients) | site (like the site's profile page)
                               # | fluent (Windows 11)
 STYLES = ("muted", "soft", "vivid", "site", "fluent")
+mica_wanted = False    # Settings → "Mica" on and Windows 11
+mica_window = False    # the main window was created translucent (only at start-up)
+
+
+def mica_active() -> bool:
+    return mica_wanted and mica_window and current_style == "fluent"
 
 # Windows 11 (Fluent) colours: neutral layers, 4 px controls, 8 px cards; accent comes from Windows
 FLUENT = {
@@ -158,10 +164,12 @@ def resolve(mode: str) -> str:
     return "dark" if system_is_dark() else "light"
 
 
-def apply(app: QApplication, mode: str, style: str | None = None) -> str:
+def apply(app: QApplication, mode: str, style: str | None = None, mica: bool | None = None) -> str:
     """mode: 'system' | 'light' | 'dark'; style: muted | soft | vivid. Returns the resolved name."""
-    global current_name, current_style, TITLE_FONT
+    global current_name, current_style, TITLE_FONT, mica_wanted
     current_name = resolve(mode)
+    if mica is not None:
+        mica_wanted = mica
     if style in STYLES:
         current_style = style
     current.clear()
@@ -510,4 +518,8 @@ QToolTip {{ border-radius: 4px; }}
 QStatusBar {{ background: {c['page_bg']}; border-top: 1px solid {c['border']}; }}
 QToolButton#sbItem {{ border-left: none; border-radius: 4px; margin: 1px; }}
 QToolButton#sbItem:hover {{ background: {shade}; color: {c['body']}; }}
-"""
+""" + (f"""
+/* Mica: DWM paints the backdrop wherever the main window itself draws nothing */
+QMainWindow, QMainWindow > QWidget#page, QStatusBar {{ background: transparent; }}
+QFrame#card, QFrame#headCard, QFrame#kpi {{ background: {'rgba(43,43,43,235)' if dark else 'rgba(255,255,255,225)'}; }}
+""" if mica_active() else "")
