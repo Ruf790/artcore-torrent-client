@@ -3190,6 +3190,14 @@ class MainWindow(QMainWindow):
         a = QAction(self); a.setShortcut(QKeySequence.SelectAll); a.triggered.connect(self.select_all)
         self.addAction(a)
         btn("remove", "fa6s.trash-can", self.remove_selected, "danger", color="danger", shortcut="Delete")
+        lay.addWidget(vsep())
+        # queue order, like BitComet's Up / Down (shortcuts are set up with the Queue menu)
+        self.q_up = btn("tb_up", "fa6s.circle-arrow-up", lambda: self.queue_move("up"), color="primary")
+        self.q_up.setToolTip(t("tb_up_tip"))
+        self.q_down = btn("tb_down", "fa6s.circle-arrow-down", lambda: self.queue_move("down"), color="primary")
+        self.q_down.setToolTip(t("tb_down_tip"))
+        for b in (self.q_up, self.q_down):
+            b.setEnabled(False)
         lay.addStretch()
 
         self.sb_btn = QToolButton()
@@ -3324,6 +3332,7 @@ class MainWindow(QMainWindow):
         self.table.customContextMenuRequested.connect(self.context_menu)
         self.table.doubleClicked.connect(lambda _: self.open_folder())
         self.table.selectionModel().selectionChanged.connect(lambda *_: self.refresh_details())
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._queue_btns())
 
         # empty state (.st-empty)
         empty = QWidget()
@@ -4270,6 +4279,12 @@ class MainWindow(QMainWindow):
             for k in keys:
                 self.engine.remove(k, delete_files=cb.isChecked())
             self.tick()
+
+    def _queue_btns(self):
+        on = bool(self.selected_keys())
+        for b in (getattr(self, "q_up", None), getattr(self, "q_down", None)):
+            if b is not None:
+                b.setEnabled(on)
 
     def queue_move(self, where: str):
         keys = self.selected_keys()
