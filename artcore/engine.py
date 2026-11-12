@@ -63,6 +63,8 @@ class TorrentRow:
     sess_up: int = 0
     queue: int = -1     # place in the download queue (1-based), -1 = not queued (seeding / forced)
     forced: bool = False   # "Force start": running outside the queue
+    moving: int = -1       # "Move…" in progress: percent of the data already at the new place, -1 = not moving
+    missing: str = ""      # the data folder / files are gone (drive unplugged, folder renamed): where they were
 
 
 def _key(h: lt.torrent_handle) -> str:
@@ -100,6 +102,17 @@ class Engine:
         except (FileNotFoundError, ValueError):
             self.stats_saved = {"all_down": 0, "all_up": 0}
         self._stats_flushed = time.time()
+        sv = self.stats_saved
+        sv.setdefault("first_run", int(time.time()))
+        sv["sessions"] = int(sv.get("sessions", 0)) + 1
+        for k in ("uptime", "added", "completed", "wasted", "peak_down", "peak_up"):
+            sv.setdefault(k, 0)
+        self.days: dict[str, list[int]] = sv.setdefault("days", {})   # "YYYY-MM-DD" → [down, up]
+        self._day_mark = (0, 0)              # session totals already put into self.days
+        self._moves: dict[str, dict] = {}    # key → {"dest", "files": [(path, size)], "total", "pct", "at"}
+        self.moved_names: list[tuple[str, str, str]] = []      # (name, key, "" | error) for the UI
+        self.checked_names: list[tuple[str, str, float]] = []  # (name, key, progress) after a hash check
+        self.missing_names: list[tuple[str, str, str]] = []    # (name, key, folder) data found missing
         # per-tracker totals: host → [uploaded, downloaded]; seen = last counted all_time values per torrent
         self.tr_totals: dict[str, list[int]] = self.stats_saved.get("trackers", {})
         self._tr_seen: dict[str, list[int]] = self.stats_saved.get("seen", {})
@@ -514,8 +527,23 @@ class Engine:
                     atp = lt.read_resume_data(f.read())
                 if atp.ti is not None and not (atp.comment or atp.created_by or atp.creation_date):
                     self._restore_meta(atp)
+                key = fn[:-len(".fastresume")]
+                if atp.ti is not None and any(atp.have_pieces) and not self.opts.get(key, {}).get("missing") \
+                        and _data_missing(atp.save_path, atp.ti.files(), dict(atp.renamed_files),
+                                          list(atp.file_priorities)):
+                    # without this libtorrent would reject the resume data, find nothing and quietly
+                    # download everything again (into a new empty folder) — stop it and say so instead
+                    self.opts.setdefault(key, {})["missing"] = atp.save_path
+                    hp = list(atp.have_pieces)
+                    self.opts[key]["missing_pct"] = sum(hp) / len(hp) if hp else 0.0
+                if self.opts.get(key, {}).get("missing"):
+                    atp.flags |= lt.torrent_flags.paused
+                    atp.flags &= ~lt.torrent_flags.auto_managed
                 h = self.ses.add_torrent(atp)
                 self.handles[_key(h)] = h
+                if self.opts.get(key, {}).get("missing"):
+                    self.missing_names.append((atp.name or (atp.ti.name() if atp.ti else key), key,
+                                               self.opts[key]["missing"]))
             except Exception as e:  # corrupt resume file — skip it, keep the rest
                 self._log("error", f"{fn}: {e}")
         self._save_opts()
@@ -618,6 +646,7 @@ class Engine:
         if key in self.handles:
             raise ValueError("Этот торрент уже добавлен")
         self.handles[key] = h
+        self.count_event("added")
         self._add_auto_trackers(h)
         h.save_resume_data(lt.torrent_handle.save_info_dict)
         return key
@@ -655,6 +684,7 @@ class Engine:
         self._limited.discard(key)
         self._cross_check.discard(key)
         self._low_space.discard(key)
+        self._moves.pop(key, None)
         self._count_trackers()           # bank its last traffic before it disappears
         self._tr_seen.pop(key, None)
         h = self.handles.pop(key, None)
@@ -880,18 +910,93 @@ class Engine:
     def is_soft_paused(self, key: str) -> bool:
         return bool(self.opts.get(key, {}).get("soft_pause"))
 
-    def resume(self, key: str) -> None:
+    def resume(self, key: str) -> bool:
+        """False when the data is still missing — the torrent stays stopped (see locate / recheck)."""
         h = self.handles.get(key)
+        if h and self.opts.get(key, {}).get("missing"):
+            if self._is_missing(key, h):
+                return False
+            self.opts[key].pop("missing", None)          # the drive is back
+            self.opts[key].pop("missing_pct", None)
+            self._save_opts()
+            self._log("torrent", f"{h.status().name}: files found again")
         if h:
             self._unfreeze(key, h)
             h.set_flags(lt.torrent_flags.auto_managed)
             h.resume()
             h.save_resume_data(lt.torrent_handle.save_info_dict)
+        return True
 
     def recheck(self, key: str) -> None:
+        """Hash check of the data on disk. A torrent with missing data is checked too — whatever is
+        found counts, the rest will be downloaded again once it is started."""
         h = self.handles.get(key)
         if h:
-            h.force_recheck()
+            o = self.opts.setdefault(key, {})
+            o.pop("missing", None)
+            o.pop("missing_pct", None)
+            o["checking"] = True
+            self._save_opts()
+            self._check_now(h)
+
+    @staticmethod
+    def _check_now(h) -> None:
+        """libtorrent doesn't check a paused torrent until it is started (and shows 0 % meanwhile):
+        a stopped torrent is started with stop_when_ready, so it checks and stops again by itself,
+        without connecting to anyone."""
+        paused = bool(h.flags() & lt.torrent_flags.paused)
+        h.force_recheck()                 # first: a torrent resumed before it would start at once
+        if paused:
+            h.unset_flags(lt.torrent_flags.auto_managed)
+            h.set_flags(lt.torrent_flags.stop_when_ready)
+            h.resume()
+
+    def locate(self, key: str, folder: str) -> None:
+        """'Set location': the files are already in <folder> (moved by hand, drive letter changed) —
+        point the torrent there without moving anything, check the data and go on."""
+        h = self.handles.get(key)
+        if not h or not folder:
+            return
+        o = self.opts.setdefault(key, {})
+        if not (h.flags() & lt.torrent_flags.paused) or o.get("missing"):
+            o["start_after_check"] = True
+        o.pop("missing", None)
+        o.pop("missing_pct", None)
+        o["checking"] = True
+        self._save_opts()
+        h.move_storage(folder, getattr(lt.move_flags_t, "reset_save_path_unchecked", lt.move_flags_t.reset_save_path))
+        self._check_now(h)
+
+    def _is_missing(self, key: str, h) -> bool:
+        s = h.status()
+        if not s.has_metadata:
+            return False
+        try:
+            prios = list(h.get_file_priorities())
+        except Exception:
+            prios = []
+        return _data_missing(s.save_path, h.torrent_file().files(),
+                             {int(k): v for k, v in self.opts.get(key, {}).get("renamed", {}).items()}, prios)
+
+    def _scan_missing(self) -> None:
+        """Every 30 s: a torrent that has data but whose files all vanished is stopped and marked,
+        instead of failing with a disk error or starting over from zero."""
+        for key, h in list(self.handles.items()):
+            o = self.opts.get(key, {})
+            if o.get("missing") or key in self._moves or not h.is_valid():
+                continue
+            s = h.status()
+            if s.total_wanted_done <= 0 or s.state in (lt.torrent_status.checking_files,
+                                                     lt.torrent_status.checking_resume_data) \
+                    or getattr(s, "moving_storage", False):
+                continue
+            if self._is_missing(key, h):
+                self.opts.setdefault(key, {})["missing"] = s.save_path
+                self._save_opts()
+                h.unset_flags(lt.torrent_flags.auto_managed)
+                h.pause()
+                self.missing_names.append((s.name, key, s.save_path))
+                self._log("error", f"{s.name}: files not found in {s.save_path}")
 
     def reannounce(self, key: str) -> None:
         h = self.handles.get(key)
@@ -928,13 +1033,33 @@ class Engine:
                 # only a download that finished during this run gets the notification / done actions
                 if _finished_now(st, self.started):
                     self.finished_names.append((st.name, _key(a.handle)))
+                    if st.total_payload_download > 0:      # really downloaded, not found complete on disk
+                        self.count_event("completed")
                     self._move_when_done(a.handle, st)
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, lt.storage_moved_alert):
                 self._log("torrent", a.message())
+                mv = self._moves.pop(self._cur_key, None)
+                if mv is not None:
+                    self.moved_names.append((a.handle.status().name, self._cur_key, ""))
+                    if mv.get("recheck"):
+                        self.opts.setdefault(self._cur_key, {})["checking"] = True
+                        self._save_opts()
+                        self._check_now(a.handle)
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, lt.storage_moved_failed_alert):
                 self._log("error", a.message())
+                if self._moves.pop(self._cur_key, None) is not None:
+                    err = a.error.message() if a.error.value() else a.message()
+                    self.moved_names.append((a.handle.status().name, self._cur_key, err))
+            elif isinstance(a, lt.torrent_checked_alert):
+                o = self.opts.get(self._cur_key, {})
+                if o.pop("checking", None):          # a check the user asked for (not the start-up one)
+                    st = a.handle.status()
+                    self.checked_names.append((st.name, self._cur_key, st.progress))
+                    if o.pop("start_after_check", None):
+                        self.resume(self._cur_key)
+                    self._save_opts()
             elif isinstance(a, lt.metadata_received_alert):
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
             elif isinstance(a, lt.tracker_error_alert) and _is_skip_notice(a):
@@ -974,6 +1099,13 @@ class Engine:
         if self._polls % 15 == 0:
             self._count_trackers()
             self._check_space()
+        if self._polls % 30 == 7:
+            try:
+                self._scan_missing()
+            except Exception as e:
+                self._log("error", f"missing-files scan: {e}")
+        if self._polls % 10 == 0:
+            self._count_days()
         if self._polls % 5 == 0:
             self._track_peers()
         if self._polls % 10 == 0 and self.cfg.get("ban_bad_peers", True):
@@ -1023,12 +1155,55 @@ class Engine:
         return self.task_logs.get(key, [])
 
     # ── statistics ─────────────────────────────────────────────
+    def _count_days(self) -> None:
+        """Traffic per calendar day (local time) for the statistics window; 400 days are kept."""
+        st = self.ses.status()
+        d, u = st.total_payload_download, st.total_payload_upload
+        dd, du = d - self._day_mark[0], u - self._day_mark[1]
+        if dd > 0 or du > 0:
+            day = self.days.setdefault(time.strftime("%Y-%m-%d"), [0, 0])
+            day[0] += max(0, dd)
+            day[1] += max(0, du)
+            self._day_mark = (d, u)
+            if len(self.days) > 400:
+                for k in sorted(self.days)[:-400]:
+                    del self.days[k]
+        sv = self.stats_saved
+        sv["peak_down"] = max(sv.get("peak_down", 0), st.payload_download_rate)
+        sv["peak_up"] = max(sv.get("peak_up", 0), st.payload_upload_rate)
+
+    def _session_wasted(self) -> int:
+        st = self.ses.status()
+        return int(getattr(st, "total_failed_bytes", 0)) + int(getattr(st, "total_redundant_bytes", 0))
+
+    def count_event(self, what: str) -> None:
+        """'added' / 'completed' — all-time counters for the statistics window."""
+        self.stats_saved[what] = int(self.stats_saved.get(what, 0)) + 1
+
+    def reset_stats(self) -> None:
+        """Statistics → Reset: totals start from zero (from now on)."""
+        st = self.ses.status()
+        self.stats_saved = {"all_down": -st.total_payload_download, "all_up": -st.total_payload_upload,
+                            "first_run": int(time.time()), "sessions": 1,
+                            "uptime": -int(time.time() - self.started),
+                            "added": 0, "completed": 0, "wasted": -self._session_wasted(),
+                            "peak_down": 0, "peak_up": 0, "days": {}}
+        self.days = self.stats_saved["days"]
+        self._day_mark = (st.total_payload_download, st.total_payload_upload)
+        self.tr_totals.clear()
+        self._flush_stats()
+
     def _flush_stats(self) -> None:
         st = self.ses.status()
         self._count_trackers()
-        data = {"all_down": self.stats_saved["all_down"] + st.total_payload_download,
-                "all_up": self.stats_saved["all_up"] + st.total_payload_upload,
-                "trackers": self.tr_totals, "seen": self._tr_seen}
+        self._count_days()
+        sv = self.stats_saved
+        data = dict(sv)
+        data.update({"all_down": sv["all_down"] + st.total_payload_download,
+                     "all_up": sv["all_up"] + st.total_payload_upload,
+                     "uptime": int(sv.get("uptime", 0)) + int(time.time() - self.started),
+                     "wasted": int(sv.get("wasted", 0)) + self._session_wasted(),
+                     "trackers": self.tr_totals, "seen": self._tr_seen})
         tmp = self.stats_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)
@@ -1049,6 +1224,16 @@ class Engine:
             "session_down": st.total_payload_download, "session_up": st.total_payload_upload,
             "all_down": self.stats_saved["all_down"] + st.total_payload_download,
             "all_up": self.stats_saved["all_up"] + st.total_payload_upload,
+            "all_uptime": int(self.stats_saved.get("uptime", 0)) + int(time.time() - self.started),
+            "sessions": int(self.stats_saved.get("sessions", 1)),
+            "first_run": int(self.stats_saved.get("first_run", self.started)),
+            "added": int(self.stats_saved.get("added", 0)),
+            "completed": int(self.stats_saved.get("completed", 0)),
+            "wasted": int(self.stats_saved.get("wasted", 0)) + self._session_wasted(),
+            "session_wasted": self._session_wasted(),
+            "peak_down": max(int(self.stats_saved.get("peak_down", 0)), st.payload_download_rate),
+            "peak_up": max(int(self.stats_saved.get("peak_up", 0)), st.payload_upload_rate),
+            "days": self.days,
         }
 
     def rows(self) -> list[TorrentRow]:
@@ -1060,7 +1245,15 @@ class Engine:
             paused = bool(s.flags & lt.torrent_flags.paused)
             auto   = bool(s.flags & lt.torrent_flags.auto_managed)
             tr_err = ""
-            if s.errc.value():
+            missing = self.opts.get(key, {}).get("missing", "")
+            moving = -1
+            if key in self._moves or getattr(s, "moving_storage", False):
+                moving = self._move_pct(key)
+            if moving >= 0:
+                state = "moving"
+            elif missing:
+                state = "missing"
+            elif s.errc.value():
                 state = "error"
             elif paused and auto:
                 state = "queued"
@@ -1080,7 +1273,8 @@ class Engine:
             dl   = max(s.all_time_download, s.total_payload_download)
             ul   = max(s.all_time_upload, s.total_payload_upload)
             out.append(TorrentRow(
-                key=key, name=s.name or key, size=s.total_wanted, progress=s.progress,
+                key=key, name=s.name or key, size=s.total_wanted,
+                progress=s.progress or (self.opts.get(key, {}).get("missing_pct", 0.0) if missing else 0.0),
                 state=state, down_rate=s.download_payload_rate, up_rate=s.upload_payload_rate,
                 seeds=s.num_seeds, peers=s.num_peers - s.num_seeds,
                 uploaded=ul, downloaded=dl,
@@ -1096,6 +1290,7 @@ class Engine:
                 done=s.total_wanted_done, sess_down=s.total_payload_download, sess_up=s.total_payload_upload,
                 queue=s.queue_position + 1 if s.queue_position >= 0 else -1,
                 forced=not paused and not auto and not s.errc.value(),
+                moving=moving, missing=missing,
             ))
         return out
 
@@ -1303,12 +1498,47 @@ class Engine:
                 return c.get("path", "")
         return ""
 
-    def move(self, key: str, path: str) -> None:
-        """Move downloaded files to another folder (no re-download)."""
+    def move(self, key: str, path: str, keep_existing: bool = False) -> bool:
+        """Move downloaded files to another folder (no re-download). keep_existing: files that are
+        already in the new folder are kept (and used) instead of being overwritten."""
         h = self.handles.get(key)
-        if h and path and os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(h.status().save_path)):
-            os.makedirs(path, exist_ok=True)
-            h.move_storage(path)
+        if not h or not path or key in self._moves:
+            return False
+        s = h.status()
+        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(s.save_path)):
+            return False
+        os.makedirs(path, exist_ok=True)
+        files = []
+        if s.has_metadata:
+            fs = h.torrent_file().files()
+            files = [(self.file_path(key, fs, i), fs.file_size(i)) for i in range(fs.num_files())
+                     if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
+        total = sum(sz for p, sz in files if os.path.exists(os.path.join(s.save_path, p)))
+        self._moves[key] = {"dest": path, "files": files, "total": total, "pct": 0, "at": 0.0,
+                            "recheck": keep_existing}     # kept files may differ — check them afterwards
+        h.move_storage(path, lt.move_flags_t.dont_replace if keep_existing else lt.move_flags_t.always_replace_files)
+        return True
+
+    def _move_pct(self, key: str) -> int:
+        """How much of the data is at the new place already (bytes there / bytes to move); refreshed
+        every 2 s. Inside one drive the move is a rename and finishes at once."""
+        m = self._moves.get(key)
+        if m is None:
+            return 0
+        if time.time() - m["at"] >= 2 and m["total"] > 0:
+            m["at"] = time.time()
+            got = 0
+            for p, sz in m["files"]:
+                try:
+                    got += min(sz, os.path.getsize(os.path.join(m["dest"], p)))
+                except OSError:
+                    pass
+            m["pct"] = max(m["pct"], min(99, int(got * 100 / m["total"])))
+        return m["pct"]
+
+    def moving(self) -> list[tuple[str, str, int]]:
+        """(key, destination, percent) of the moves in progress."""
+        return [(k, m["dest"], m["pct"]) for k, m in self._moves.items()]
 
     def _move_when_done(self, h: lt.torrent_handle, st) -> None:
         """Settings → "Move completed downloads to": only torrents that were really downloaded
@@ -1677,6 +1907,21 @@ class Engine:
 BAD_PEER_IDS = (b"-XL", b"-SD", b"-XF", b"-QD", b"-BN", b"-DL", b"-HP", b"-TT")
 BAD_NAMES = ("xunlei", "thunder", "qqdownload", "baidu", "dandelion", "offline download", "torrentstorm")
 FAKE_MIN_BYTES = 64 << 20      # judge fake progress only after sending a peer this much
+
+
+def _data_missing(save_path: str, fs, renamed: dict, prios: list) -> bool:
+    """True when not one wanted file of the torrent is on disk (folder deleted / renamed, drive
+    unplugged). A single missing file is not this — libtorrent reports that as a file error."""
+    if not save_path or not os.path.isdir(save_path):
+        return True
+    checked = 0
+    for i in range(fs.num_files()):
+        if fs.file_flags(i) & lt.file_storage.flag_pad_file or (i < len(prios) and prios[i] == 0):
+            continue
+        checked += 1
+        if os.path.exists(os.path.join(save_path, renamed.get(i) or fs.file_path(i))):
+            return False
+    return checked > 0
 
 
 def _bad_client(client: str, pid: bytes) -> str:
