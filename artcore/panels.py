@@ -8,7 +8,7 @@ import tempfile
 from datetime import date, datetime, timedelta
 
 from PySide6.QtCore import Qt, QRectF, QPointF, QThread, Signal, QSize, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QFontMetrics, QGuiApplication
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QFontMetrics, QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
                                QRadioButton, QTableWidget, QTableWidgetItem, QToolTip, QTreeWidget,
@@ -848,8 +848,9 @@ class RestoreDialog(QDialog):
 # ============================================================
 
 class BatchAddDialog(QDialog):
-    """Several .torrent files / magnets at once: a checklist, one save folder, auto-rename,
-    Download now / Download later."""
+    """Several .torrent files / magnets at once: a checklist, one save folder, Download now /
+    Download later. Torrents whose files are already in the folder are marked — if they are
+    downloaded anyway, their data is hash-checked first and only the rest is downloaded."""
     def __init__(self, cfg: dict, items: list[str], known_keys: set[str], used_paths: list[str] = (), parent=None):
         super().__init__(parent)
         import libtorrent as lt
@@ -867,8 +868,8 @@ class BatchAddDialog(QDialog):
         lay.addWidget(_section(t("ba_list"), "fa6s.list-check", "primary"))
 
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(3)
-        self.tree.setHeaderLabels([t("col_name"), t("col_size"), t("ba_src")])
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels([t("col_name"), t("col_size"), t("ba_disk"), t("ba_src")])
         self.tree.setRootIsDecorated(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setAlternatingRowColors(False)
@@ -876,7 +877,8 @@ class BatchAddDialog(QDialog):
         hh.setStretchLastSection(True)
         hh.setSectionResizeMode(0, QHeaderView.Interactive)
         hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.tree.setColumnWidth(0, 330)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tree.setColumnWidth(0, 300)
         self.entries: list[dict] = []
         seen: set[str] = set()
         for it in items:
@@ -902,11 +904,11 @@ class BatchAddDialog(QDialog):
                 e["ok"], e["note"], e["bad"] = False, t("ba_bad", ex), True
                 e["name"] = os.path.basename(it)
                 kind = "file"
-            row = QTreeWidgetItem([e["name"], fmt_size(e["size"]) if e["size"] else "—",
+            row = QTreeWidgetItem([e["name"], fmt_size(e["size"]) if e["size"] else "—", "",
                                    it if not e["note"] else f"{e['note']} — {it}"])
             row.setIcon(0, widgets.torrent_icon(kind))
             row.setToolTip(0, e["name"])
-            row.setToolTip(2, it)
+            row.setToolTip(3, it)
             row.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
             if e["ok"]:
                 row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
@@ -914,15 +916,19 @@ class BatchAddDialog(QDialog):
             else:
                 row.setFlags(Qt.ItemIsEnabled)
                 row.setCheckState(0, Qt.Unchecked)
-                for c in range(3):
+                for c in range(4):
                     row.setForeground(c, QColor(C["secondary"]))
                 if e.get("bad"):
-                    row.setForeground(2, QColor(C["danger"]))
+                    row.setForeground(3, QColor(C["danger"]))
             self.tree.addTopLevelItem(row)
             e["row"] = row
             self.entries.append(e)
         self.tree.itemChanged.connect(lambda *_: self._update())
         lay.addWidget(self.tree, 1)
+        self.exist_note = QLabel()
+        self.exist_note.setWordWrap(True)
+        self.exist_note.hide()
+        lay.addWidget(self.exist_note)
 
         from PySide6.QtWidgets import QCheckBox
         self.all_cb = QCheckBox()
@@ -944,10 +950,11 @@ class BatchAddDialog(QDialog):
         lay.addLayout(row)
         self.disk = DiskBar()
         lay.addWidget(self.disk)
-        self.rename = QCheckBox(t("ba_rename"))
-        self.rename.setToolTip(t("ba_rename_tip"))
-        self.rename.setChecked(cfg.get("batch_rename", True))
-        lay.addWidget(self.rename)
+        self._exist_timer = QTimer(self)
+        self._exist_timer.setSingleShot(True)
+        self._exist_timer.setInterval(300)
+        self._exist_timer.timeout.connect(self._scan_existing)
+        self.path.textChanged.connect(lambda *_: self._exist_timer.start())
 
         btns = QHBoxLayout()
         btns.addStretch()
@@ -962,7 +969,49 @@ class BatchAddDialog(QDialog):
         cancel.clicked.connect(self.reject)
         btns.addWidget(self.now); btns.addWidget(self.later); btns.addWidget(cancel)
         lay.addLayout(btns)
+        self._scan_existing()
         self._update()
+
+    def _scan_existing(self):
+        """Which torrents already have files in the chosen folder."""
+        from .engine import Engine
+        folder = self.folder()
+        warn = C["warning_text"] if theme.current_name == "dark" else C["orange"]
+        n = 0
+        for e in self.entries:
+            row = e["row"]
+            e["exists"] = None
+            if e["ti"] is not None and folder and os.path.isdir(folder):
+                try:
+                    have, total, got, full = Engine.existing_files(e["ti"], folder)
+                except Exception:
+                    have = 0
+                if have:
+                    e["exists"] = (have, total, got, full)
+            ex = e["exists"]
+            if ex:
+                have, total, got, full = ex
+                row.setText(2, t("ba_exists_full") if full else t("ba_exists", have, total, fmt_size(got)))
+                row.setToolTip(2, t("ba_exists_tip"))
+                row.setIcon(2, widgets.icon("fa6s.circle-check" if full else "fa6s.triangle-exclamation",
+                                            "success" if full else "orange"))
+                if e["ok"]:
+                    row.setForeground(2, QColor(C["success_text"] if full and theme.current_name == "dark"
+                                                else C["success"] if full else warn))
+                    n += 1
+            else:
+                row.setText(2, "—" if e["ti"] is not None else "")
+                row.setToolTip(2, "")
+                row.setIcon(2, QIcon())
+                row.setForeground(2, QColor(C["secondary"]))
+        if n:
+            self.exist_note.setText(f'<span style="color:{warn}">⚠ {t("ba_exists_note", n)}</span>')
+            self.exist_note.show()
+        else:
+            self.exist_note.hide()
+
+    def existing(self, e: dict) -> bool:
+        return bool(e.get("exists"))
 
     def _checked(self) -> list[dict]:
         return [e for e in self.entries if e["ok"] and e["row"].checkState(0) == Qt.Checked]
@@ -1008,36 +1057,8 @@ class BatchAddDialog(QDialog):
 
     def _done(self, paused: bool):
         self.paused = paused
-        self.cfg["batch_rename"] = self.rename.isChecked()
         self.accept()
 
     def selected(self) -> list[dict]:
         return self._checked()
 
-
-def free_name(folder: str, name: str, taken: set[str] = frozenset()) -> str:
-    """'name' if nothing is called so in <folder>, else 'name (2)', 'name (3)'… (extension kept)."""
-    stem, ext = os.path.splitext(name)
-    if not ext or len(ext) > 6 or " " in ext:          # a folder name with a dot in it
-        stem, ext = name, ""
-    cand, n = name, 2
-    while os.path.exists(os.path.join(folder, cand)) or cand.lower() in taken:
-        cand = f"{stem} ({n}){ext}"
-        n += 1
-    return cand
-
-
-def rename_root(ti, new_root: str) -> dict[int, str]:
-    """Renames that give the torrent a new top-level name (file of a single-file torrent,
-    folder of a multi-file one) — for engine.add_torrent_file(renames=…)."""
-    import libtorrent as lt
-    fs = ti.files()
-    out = {}
-    for i in range(fs.num_files()):
-        if fs.file_flags(i) & lt.file_storage.flag_pad_file:      # never on disk
-            continue
-        p = fs.file_path(i).replace("\\", "/")
-        parts = p.split("/")
-        parts[0] = new_root
-        out[i] = os.path.join(*parts)
-    return out

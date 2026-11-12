@@ -3996,29 +3996,32 @@ class MainWindow(QMainWindow):
 
     def batch_add(self, items: list[str]):
         """BitComet's "Batch download": one window for several torrents."""
-        from .panels import BatchAddDialog, free_name, rename_root
+        from .panels import BatchAddDialog
         used = sorted({r.save_path for r in self.model.rows})
         d = BatchAddDialog(self.cfg, items, set(self.engine.handles), used, self)
         self.show_normal()
         if not d.exec():
             return
         folder = d.folder()
-        added, errors, taken = 0, [], set()
+        added, errors = 0, []
         for e in d.selected():
             it = e["item"]
             try:
                 if it.startswith("magnet:"):
                     self.engine.add_magnet(it, save_path=folder, paused=d.paused)
                 else:
-                    renames = {}
-                    if d.rename.isChecked() and e["ti"] is not None:
-                        root = e["ti"].files().file_path(0).replace("\\", "/").split("/")[0]
-                        new = free_name(folder, root, taken)
-                        if new != root:
-                            renames = rename_root(e["ti"], new)
-                            self.log_event("torrent", t("ba_renamed", root, new))
-                        taken.add(new.lower())
-                    self.engine.add_torrent_file(it, save_path=folder, paused=d.paused, renames=renames)
+                    exists = d.existing(e)
+                    if exists and d.paused:
+                        # "later" = stopped; the check still runs now, and the torrent stops after it
+                        key = self.engine.add_torrent_file(it, save_path=folder, paused=False)
+                        self.engine.stop(key)
+                        self.engine.recheck(key)
+                    else:
+                        key = self.engine.add_torrent_file(it, save_path=folder, paused=d.paused)
+                    if exists:
+                        # libtorrent hash-checks the files it finds; ask for the result note
+                        self.engine.opts.setdefault(key, {})["checking"] = True
+                        self.log_event("torrent", t("ba_check_log", e["name"]))
                     if self.cfg.get("delete_torrent_file") and it.lower().endswith(".torrent"):
                         try:
                             os.remove(it)
