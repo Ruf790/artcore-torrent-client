@@ -629,7 +629,7 @@ SHORTCUTS = [
     ("kb_g_queue", [("Ctrl+Shift+Up", "queue_up"), ("Ctrl+Shift+Down", "queue_down"),
                     ("Ctrl+Shift+Home", "queue_top"), ("Ctrl+Shift+End", "queue_bottom")]),
     ("kb_g_view", [("Ctrl+A", "select_all"), ("Ctrl+F", "kb_search"), ("Esc", "kb_esc"),
-                   ("Ctrl+B", "kb_sidebar"), ("Ctrl+Shift+L", "compact_menu"), ("Ctrl+I", "sw_title"), ("Ctrl+H", "kb_history"),
+                   ("Ctrl+B", "kb_sidebar"), ("Ctrl+Shift+L", "compact_menu"), ("Ctrl+Shift+G", "grid_menu"), ("Ctrl+I", "sw_title"), ("Ctrl+H", "kb_history"),
                    ("Ctrl+,", "settings"), ("F1", "about"), ("Ctrl+/", "kb_title"), ("Ctrl+Q", "quit")]),
 ]
 

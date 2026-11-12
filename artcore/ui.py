@@ -882,6 +882,36 @@ def _country_strip(by_country: dict[str, list], total: int, top: int = 10) -> st
     return f"{head} &nbsp;&nbsp; " + " &nbsp;·&nbsp; ".join(parts) + tail
 
 
+class GridTableView(QTableView):
+    """Torrent list with an optional BitComet-style grid: column separators and row lines drawn
+    over the whole view, also in the empty area below the last torrent."""
+    grid = False
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self.grid:
+            return
+        p = QPainter(self.viewport())
+        p.setPen(QPen(QColor(C["border_soft"]), 1))
+        vp = self.viewport().rect()
+        hh = self.horizontalHeader()
+        for v in range(hh.count()):                       # column separators, full height
+            c = hh.logicalIndex(v)
+            if hh.isSectionHidden(c):
+                continue
+            x = hh.sectionViewportPosition(c) + hh.sectionSize(c) - 1
+            if 0 <= x <= vp.right():
+                p.drawLine(x, 0, x, vp.bottom())
+        step = self.verticalHeader().defaultSectionSize()  # empty rows below the last torrent
+        n = self.model().rowCount() if self.model() else 0
+        y = self.rowViewportPosition(n - 1) + self.rowHeight(n - 1) if n else 0
+        y = max(y, 0)
+        while y + step <= vp.bottom() + step:
+            y += step
+            p.drawLine(0, y - 1, vp.right(), y - 1)
+        p.end()
+
+
 class MiniWidget(QWidget):
     """Floating always-on-top speed window (BitComet-style): drag to move, double-click opens the
     client, right-click for a menu. Small graph of the last two minutes behind the numbers."""
@@ -1539,6 +1569,8 @@ class SettingsDialog(QDialog):
         form.addRow(t("ni_label"), self.name_icon)
         self.compact = QCheckBox(t("compact_set")); self.compact.setChecked(bool(cfg.get("compact_list")))
         form.addRow("", self.compact)
+        self.grid = QCheckBox(t("grid_set")); self.grid.setChecked(bool(cfg.get("list_grid")))
+        form.addRow("", self.grid)
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
@@ -1750,7 +1782,7 @@ class SettingsDialog(QDialog):
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
                  name_icon=self.name_icon.currentData(), mica=self.mica.isChecked(),
-                 compact_list=self.compact.isChecked(),
+                 compact_list=self.compact.isChecked(), list_grid=self.grid.isChecked(),
                  preallocate=self.prealloc.isChecked(), disk_write_mode=self.wmode.currentData(),
                  disk_os_cache=self.oscache.currentData(), disk_queue_mb=self.dqueue.value(),
                  aio_threads=self.aio.value(), hashing_threads=self.hthreads.value(),
@@ -2966,6 +2998,7 @@ class MainWindow(QMainWindow):
         key("Escape", self.escape)
         key("Ctrl+B", lambda: self.set_sidebar(not self.sidebar.isVisible()))
         key("Ctrl+Shift+L", lambda: self.set_compact(not ProgressDelegate.compact))
+        key("Ctrl+Shift+G", lambda: self.set_grid(not GridTableView.grid))
         key("Ctrl+I", self.stats_window)
         key("Ctrl+H", self.history_dialog)
         key("Ctrl+,", self.settings_dialog)
@@ -2978,6 +3011,13 @@ class MainWindow(QMainWindow):
         ProgressDelegate.compact = on
         self.table.verticalHeader().setDefaultSectionSize(26 if on else 38)
         self.compact_btn.setChecked(on)
+        self.table.viewport().update()
+
+    def set_grid(self, on: bool):
+        """BitComet-style grid in the torrent list."""
+        self.cfg["list_grid"] = on
+        GridTableView.grid = on
+        config.save(self.cfg)
         self.table.viewport().update()
 
     def focus_search(self):
@@ -3415,7 +3455,8 @@ class MainWindow(QMainWindow):
         self.model = TorrentModel()
         self.proxy = FilterProxy()
         self.proxy.setSourceModel(self.model)
-        self.table = QTableView()
+        self.table = GridTableView()
+        GridTableView.grid = bool(self.cfg.get("list_grid", False))
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -4676,6 +4717,10 @@ class MainWindow(QMainWindow):
         a.setCheckable(True)
         a.setChecked(ProgressDelegate.compact)
         a.toggled.connect(self.set_compact)
+        a = m.addAction(icon("fa6s.table-cells"), t("grid_menu") + "\tCtrl+Shift+G")
+        a.setCheckable(True)
+        a.setChecked(GridTableView.grid)
+        a.toggled.connect(self.set_grid)
         m.exec(hh.mapToGlobal(pos))
 
     def _reset_sort(self):
@@ -4913,6 +4958,7 @@ class MainWindow(QMainWindow):
             ProgressDelegate.style = self.cfg.get("progress_style", "classic")
             TorrentModel.name_icon = self.cfg.get("name_icon", "state")
             self.set_compact(bool(self.cfg.get("compact_list")))
+            GridTableView.grid = bool(self.cfg.get("list_grid"))
             self.table.viewport().update()
             self.engine.apply_settings(self.cfg)
             self.set_mini(bool(self.cfg.get("mini_widget")))
