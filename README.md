@@ -1,7 +1,7 @@
 # ArtCore Client
 
 Торрент-клиент под Windows.
-Python + libtorrent-rasterbar + Qt (PySide6). Качает с любых трекеров, не только с ArtCore.
+Python + libtorrent-rasterbar + Qt (PySide6).
 
 ## Возможности
 - дизайн в стиле сайта: палитра Bootstrap 5.3, Oswald, KPI-плитки, pill-фильтры, мягкие бейджи
