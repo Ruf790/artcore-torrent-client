@@ -204,6 +204,9 @@ class Engine:
             "active_downloads": int(c.get("active_downloads", 5)),
             "active_seeds":     int(c.get("active_seeds", 20)),
             "active_limit":     int(c.get("active_downloads", 5)) + int(c.get("active_seeds", 20)),
+            # connection limits — weak routers drop out with hundreds of connections
+            "connections_limit":   int(c.get("max_connections", 200)) or 65535,
+            "unchoke_slots_limit": int(c.get("upload_slots", 8)) or -1,
             # Private-tracker friendly: announce honestly to every tracker tier
             "announce_to_all_trackers": True,
             "announce_to_all_tiers":    True,
@@ -215,6 +218,20 @@ class Engine:
     def apply_settings(self, cfg: dict) -> None:
         self.cfg = cfg
         self.ses.apply_settings(self._settings())
+        for key, h in self.handles.items():
+            self._apply_conn_limits(key, h)
+
+    def _apply_conn_limits(self, key: str, h) -> None:
+        """Per-torrent connections / upload slots: its own value, else the default from Settings
+        (0 = no limit; libtorrent takes -1 for that)."""
+        try:
+            o = self.opts.get(key, {})
+            conn = int(o.get("max_conn") or self.cfg.get("conn_per_torrent", 0) or 0)
+            ups = int(o.get("max_up") or self.cfg.get("slots_per_torrent", 0) or 0)
+            h.set_max_connections(conn if conn > 0 else -1)
+            h.set_max_uploads(ups if ups > 0 else -1)
+        except Exception:
+            pass
 
     def check_binding(self) -> bool | None:
         """Re-resolve the bound interface (VPN reconnects change its IP, a drop removes it).
@@ -545,6 +562,7 @@ class Engine:
                     atp.flags &= ~lt.torrent_flags.auto_managed
                 h = self.ses.add_torrent(atp)
                 self.handles[_key(h)] = h
+                self._apply_conn_limits(key, h)
                 if self.opts.get(key, {}).get("missing"):
                     self.missing_names.append((atp.name or (atp.ti.name() if atp.ti else key), key,
                                                self.opts[key]["missing"]))
@@ -653,6 +671,7 @@ class Engine:
         if key in self.handles:
             raise ValueError("Этот торрент уже добавлен")
         self.handles[key] = h
+        self._apply_conn_limits(key, h)
         self.count_event("added")
         self._add_auto_trackers(h)
         if h.status().has_metadata:
@@ -1362,6 +1381,8 @@ class Engine:
             "stop_mode": o.get("stop_mode", "global"),          # global | custom | never
             "stop_ratio": float(o.get("stop_ratio", 0.0)),       # 0 = off
             "stop_hours": int(o.get("stop_hours", 0)),           # 0 = off
+            "max_conn": int(o.get("max_conn", 0)),               # 0 = the default from Settings
+            "max_up": int(o.get("max_up", 0)),
         }
 
     def set_props(self, key: str, p: dict) -> None:
@@ -1379,8 +1400,10 @@ class Engine:
         self._limited.discard(key)
         self.opts.setdefault(key, {}).update(
             stop_mode=p["stop_mode"], stop_ratio=float(p["stop_ratio"]), stop_hours=int(p["stop_hours"]),
-            rule_done=False, own_limits=own, dl_limit=int(p["dl_limit"]), ul_limit=int(p["ul_limit"]))
+            rule_done=False, own_limits=own, dl_limit=int(p["dl_limit"]), ul_limit=int(p["ul_limit"]),
+            max_conn=int(p.get("max_conn", 0)), max_up=int(p.get("max_up", 0)))
         self._save_opts()
+        self._apply_conn_limits(key, h)
         h.save_resume_data(lt.torrent_handle.save_info_dict)
 
     # ── task properties (BitComet's Advanced / Publisher / Download order tabs) ──

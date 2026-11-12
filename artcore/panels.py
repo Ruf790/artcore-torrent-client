@@ -1062,3 +1062,190 @@ class BatchAddDialog(QDialog):
     def selected(self) -> list[dict]:
         return self._checked()
 
+
+
+# ============================================================
+#  Test announce (tracker diagnostics)
+# ============================================================
+
+class _TestThread(QThread):
+    done = Signal(dict)
+
+    def __init__(self, engine, key, url):
+        super().__init__()
+        self.engine, self.key, self.url = engine, key, url
+
+    def run(self):
+        from . import trackertest
+        try:
+            self.done.emit(trackertest.run(self.engine, self.key, self.url))
+        except Exception as e:
+            self.done.emit({"url": self.url, "error": str(e)})
+
+
+class TrackerTestDialog(QDialog):
+    """One announce by hand and everything the tracker answered."""
+    def __init__(self, engine, key: str, url: str = "", parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QPlainTextEdit, QLineEdit
+        _theme_title_bar(self)
+        self.engine, self.key = engine, key
+        self.setWindowTitle(t("tt_title"))
+        self.setWindowIcon(app_icon())
+        self.resize(900, 720)
+        self.rep: dict = {}
+        self._th = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 12)
+        lay.setSpacing(8)
+        name = engine.handles[key].status().name if key in engine.handles else key
+        head = _section(name, "fa6s.stethoscope", "info"); head.setWordWrap(True)
+        lay.addWidget(head)
+        row = QHBoxLayout()
+        self.url = QComboBox()
+        urls = [u for u, _tier in engine.trackers_raw(key)]
+        for u in urls:
+            self.url.addItem(widgets.icon("fa6s.server", "info"), u, u)
+        if url and url in urls:
+            self.url.setCurrentIndex(urls.index(url))
+        row.addWidget(self.url, 1)
+        self.go = QPushButton(icon("fa6s.play", "#ffffff"), t("tt_go"))
+        self.go.setObjectName("primary")
+        self.go.clicked.connect(self.start)
+        row.addWidget(self.go)
+        lay.addLayout(row)
+        note = QLabel(t("tt_note")); note.setObjectName("meta"); note.setWordWrap(True)
+        lay.addWidget(note)
+
+        self.verdict = QLabel()
+        self.verdict.setWordWrap(True)
+        self.verdict.setTextFormat(Qt.RichText)
+        self.verdict.setStyleSheet("font-size: 11pt; padding: 8px 10px; border-radius: 8px;")
+        lay.addWidget(self.verdict)
+
+        self.info = QTableWidget(0, 2)
+        self.info.horizontalHeader().hide()
+        self.info.verticalHeader().hide()
+        self.info.setShowGrid(False)
+        self.info.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.info.setSelectionMode(QAbstractItemView.NoSelection)
+        self.info.verticalHeader().setDefaultSectionSize(24)
+        self.info.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.info.setColumnWidth(0, 220)
+        self.info.setMaximumHeight(230)
+        lay.addWidget(self.info)
+
+        lay.addWidget(_section(t("tt_raw"), "fa6s.file-code", "secondary"))
+        self.raw = QPlainTextEdit(); self.raw.setReadOnly(True)
+        self.raw.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        f = QFont("Consolas"); f.setStyleHint(QFont.Monospace); f.setPointSizeF(9)
+        self.raw.setFont(f)
+        lay.addWidget(self.raw, 1)
+        self.req = QLineEdit(); self.req.setReadOnly(True)
+        self.req.setPlaceholderText(t("tt_req"))
+        lay.addWidget(self.req)
+
+        btns = QHBoxLayout()
+        cp = QPushButton(icon("fa6s.copy"), t("tt_copy")); cp.clicked.connect(self._copy)
+        btns.addWidget(cp); btns.addStretch()
+        close = QPushButton(t("close")); close.clicked.connect(self.accept)
+        btns.addWidget(close)
+        lay.addLayout(btns)
+        if urls:
+            QTimer.singleShot(0, self.start)
+        else:
+            self._set_verdict("danger", t("tt_no_trackers"))
+            self.go.setEnabled(False)
+
+    def _set_verdict(self, tone: str, html_text: str):
+        bg = {"success": "success_subtle", "warning": "warning_subtle", "danger": "danger_subtle",
+              "info": "info_subtle"}[tone]
+        fg = {"success": "success_text", "warning": "warning_text", "danger": "danger_text",
+              "info": "info_text"}[tone]
+        self.verdict.setStyleSheet(f"font-size: 11pt; padding: 8px 10px; border-radius: 8px;"
+                                   f"background:{C[bg]}; color:{C[fg]};")
+        self.verdict.setText(html_text)
+
+    def start(self):
+        url = self.url.currentData()
+        if not url or (self._th is not None and self._th.isRunning()):
+            return
+        self.go.setEnabled(False)
+        self._set_verdict("info", t("tt_wait", _esc(url)))
+        self.info.setRowCount(0)
+        self.raw.clear()
+        self._th = _TestThread(self.engine, self.key, url)
+        self._th.done.connect(self._done)
+        self._th.start()
+
+    def _rows(self, rows):
+        self.info.setRowCount(len(rows))
+        for r, (k, v) in enumerate(rows):
+            a = QTableWidgetItem(k); a.setForeground(QColor(C["secondary"]))
+            b = QTableWidgetItem(str(v)); b.setToolTip(str(v))
+            self.info.setItem(r, 0, a)
+            self.info.setItem(r, 1, b)
+
+    def _done(self, rep: dict):
+        from . import trackertest
+        self.rep = rep
+        self.go.setEnabled(True)
+        self.req.setText(rep.get("request", ""))
+        self.req.setCursorPosition(0)
+        body = rep.get("body", b"") or b""
+        self.raw.setPlainText(trackertest.body_preview(body) if body else t("tt_empty_body"))
+        kind = rep.get("kind")
+        f = rep.get("fields") or {}
+        status = rep.get("status")
+        if rep.get("error"):
+            self._set_verdict("danger", t("tt_v_neterr", _esc(rep["error"])))
+        elif kind == "bencode" and "failure reason" in f:
+            self._set_verdict("warning", t("tt_v_refused", _esc(str(f["failure reason"]))))
+        elif kind == "bencode":
+            msg = t("tt_v_ok", f.get("complete", "?"), f.get("incomplete", "?"), f.get("peers", 0),
+                    _fmt_uptime(int(f.get("interval", 0))) if f.get("interval") else "—")
+            if f.get("warning message"):
+                msg += "<br>" + t("tt_v_warning", _esc(str(f["warning message"])))
+            if rep.get("trailing"):
+                msg += "<br>" + t("tt_v_trailing")
+            self._set_verdict("warning" if rep.get("trailing") or f.get("warning message") else "success", msg)
+        elif kind == "php":
+            self._set_verdict("danger", t("tt_v_php"))
+        elif kind == "html":
+            self._set_verdict("danger", t("tt_v_html", status))
+        elif kind == "empty":
+            self._set_verdict("danger", t("tt_v_empty", status))
+        elif kind == "udp_error":
+            self._set_verdict("warning", t("tt_v_refused", _esc(body.decode("utf-8", "replace"))))
+        elif rep.get("prefix_junk") is not None:
+            junk = rep["prefix_junk"]
+            self._set_verdict("danger", t("tt_v_junk", len(junk), _esc(junk[:40].hex(" "))))
+        else:
+            self._set_verdict("danger", t("tt_v_other", status))
+        if isinstance(status, int) and status >= 300 and not rep.get("error"):
+            self._set_verdict("danger", t("tt_v_http", status, _esc(rep.get("reason", ""))) +
+                              ("<br>" + t("tt_v_html_note") if kind == "html" else ""))
+        rows = []
+        if status is not None:
+            rows.append((t("tt_r_status"), f"{status} {rep.get('reason', '')}".strip()))
+        rows.append((t("tt_r_time"), f"{rep.get('ms', 0)} ms"))
+        for k, v in (rep.get("headers") or {}).items():
+            rows.append((k, v))
+        if body:
+            rows.append((t("tt_r_size"), fmt_size(len(body)) + (" +" if rep.get("truncated") else "")))
+        for k, v in f.items():
+            rows.append((f"⟶ {k}", v))
+        rows += [(t("tt_r_agent"), rep.get("agent", "")), ("peer_id", rep.get("peer_id", "")),
+                 ("info_hash", rep.get("info_hash_hex", "")), (t("tt_r_port"), rep.get("port", ""))]
+        self._rows(rows)
+
+    def _copy(self):
+        from . import trackertest
+        r = self.rep
+        lines = [f"{APP_TITLE} — {t('tt_title')}", self.verdict.text().replace("<br>", "\n"),
+                 f"URL: {r.get('url', '')}", f"Request: {r.get('request', '')}"]
+        for i in range(self.info.rowCount()):
+            lines.append(f"{self.info.item(i, 0).text()}: {self.info.item(i, 1).text()}")
+        lines += ["", trackertest.body_preview(r.get("body", b"") or b"", 3000)]
+        import re
+        QGuiApplication.clipboard().setText(re.sub(r"<[^>]+>", "", "\n".join(lines)))
