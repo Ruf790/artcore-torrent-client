@@ -227,20 +227,31 @@ class TaskLogView(QWidget):
         hh.setSectionResizeMode(2, QHeaderView.Stretch)
         self.tbl.setColumnWidth(0, 150)
         self.tbl.setColumnWidth(1, 125)
+        self.tbl.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)   # smooth wheel, pixel units
         lay.addWidget(self.tbl, 1)
-        self.key, self.shown = None, 0
+        self.key, self.seen = None, 0
 
     def _reset(self):
-        self.key, self.shown = None, 0
+        self.key, self.seen = None, 0
 
-    def show_log(self, key: str | None, entries: list[tuple[str, str, str]]):
-        if key != self.key or len(entries) < self.shown:
+    MAX_ROWS = 500
+
+    def show_log(self, key: str | None, entries: list[tuple[str, str, str]], seq: int | None = None):
+        """seq = entries ever written for this torrent; the list itself keeps only the last 500,
+        so its length stops growing and can't tell what is new."""
+        if seq is None:
+            seq = len(entries)
+        if key != self.key or seq < self.seen:
             self.tbl.setRowCount(0)
-            self.key, self.shown = key, 0
+            self.key, self.seen = key, 0
+        new = min(seq - self.seen, len(entries))
+        self.seen = seq
+        if new <= 0:
+            return
         want = self.filter.currentData()
         sb = self.tbl.verticalScrollBar()
-        follow = sb.value() >= sb.maximum() - 30
-        for ts, kind, text in entries[self.shown:]:
+        follow = sb.value() >= sb.maximum() - 4          # at the bottom → keep following
+        for ts, kind, text in entries[len(entries) - new:]:
             if want and want != kind:
                 continue
             r = self.tbl.rowCount()
@@ -257,9 +268,24 @@ class TaskLogView(QWidget):
                 if c == 2:
                     it.setToolTip(text)
                 self.tbl.setItem(r, c, it)
-        self.shown = len(entries)
+        _trim_rows(self.tbl, self.MAX_ROWS, follow)
         if follow:
             self.tbl.scrollToBottom()
+
+
+def _trim_rows(tbl, limit: int, follow: bool) -> None:
+    """Drop the oldest rows over the limit. If the user is reading higher up, shift the scroll bar
+    by the removed height so the rows they look at stay in place."""
+    extra = tbl.rowCount() - limit
+    if extra <= 0:
+        return
+    sb = tbl.verticalScrollBar()
+    removed = sum(tbl.rowHeight(i) for i in range(extra))
+    pos = sb.value()
+    for _ in range(extra):
+        tbl.removeRow(0)
+    if not follow:
+        sb.setValue(max(0, pos - removed))
 
 
 # ── peers: piece bar in a cell ────────────────────────────────────
