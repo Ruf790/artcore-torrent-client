@@ -43,7 +43,7 @@ PALETTES = {
 
 current: dict = dict(PALETTES["light"])
 current_name = "light"
-current_style = "soft"        # muted (gray, like the site) | soft (coloured accents) | vivid (gradients)
+current_style = "soft"        # muted (gray) | soft (coloured accents) | vivid (gradients) | site (like the site's profile page)
 
 # KPI tile → colour family
 TONES = {"down": "primary", "up": "success", "active": "orange", "session": "purple"}
@@ -92,7 +92,7 @@ def apply(app: QApplication, mode: str, style: str | None = None) -> str:
     """mode: 'system' | 'light' | 'dark'; style: muted | soft | vivid. Returns the resolved name."""
     global current_name, current_style
     current_name = resolve(mode)
-    if style in ("muted", "soft", "vivid"):
+    if style in ("muted", "soft", "vivid", "site"):
         current_style = style
     current.clear()
     current.update(PALETTES[current_name])
@@ -101,6 +101,8 @@ def apply(app: QApplication, mode: str, style: str | None = None) -> str:
     colourful = current_style != "muted"
     if colourful and not dark:
         c["page_bg"] = "#eef2f8"            # a hint of blue instead of plain gray
+    if current_style == "site":
+        c["page_bg"] = c["body_bg"]         # white page, gray cards — like the profile page
     # icon colours that depend on the style (looked up by key like any palette colour)
     c["ic_magnet"] = c["purple"] if colourful else c["body"]
     c["ic_create"] = c["orange"] if colourful else c["body"]
@@ -311,6 +313,25 @@ QTabBar::tab:selected {{ color: {c['primary_text'] if dark else c['primary']}; b
     for tone, fam in TONES.items():
         out += f"""
 QFrame#kpi[tone="{tone}"] QLabel#kpiVal {{ color: {c[fam + '_text'] if dark else c[fam]}; }}
+QLabel#kpiIco[tone="{tone}"] {{ background: {c[fam + '_subtle']}; border-radius: 12px; }}
+"""
+    if current_style == "site":
+        out += f"""
+QFrame#kpi {{ background: {c['tertiary_bg']}; border: 1px solid {c['border']}; border-radius: 16px; }}
+QLabel#kpiVal {{ font-size: 19pt; font-weight: 700; color: {c['emphasis']}; }}
+QLabel#kpiLbl {{ font-size: 10.5pt; }}
+QFrame#card {{ border-radius: 16px; }}
+QWidget#listHead {{ background: {c['tertiary_bg']}; border-bottom: 1px solid {c['border']};
+    border-top-left-radius: 15px; border-top-right-radius: 15px; }}
+QPushButton#pill {{ background: {c['body_bg']}; color: {c['body']}; border: 1px solid {c['border']};
+    border-radius: 13px; padding: 5px 15px; }}
+QPushButton#pill:hover {{ border-color: {c['primary']}; color: {c['primary_text'] if dark else c['primary']}; }}
+QPushButton#pill:checked {{ background: {c['primary']}; border-color: {c['primary']}; color: #ffffff; }}
+QFrame#kpi[tone="session"] QLabel#kpiVal, QFrame#kpi[tone="active"] QLabel#kpiVal {{ color: {c['emphasis']}; }}
+"""
+        for tone, fam in TONES.items():
+            out += f"""
+QFrame#kpi[tone="{tone}"] QLabel#kpiVal {{ color: {c['emphasis']}; }}
 QLabel#kpiIco[tone="{tone}"] {{ background: {c[fam + '_subtle']}; border-radius: 12px; }}
 """
     if current_style == "vivid":
