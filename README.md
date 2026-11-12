@@ -63,7 +63,7 @@ Python + libtorrent-rasterbar + Qt (PySide6).
 
 Клиент честно представляется трекерам:
 - peer_id: `-Ag1000-` + 12 случайных символов
-- User-Agent: `ArtCore/1.0.0 libtorrent/<версия>`
+- User-Agent: `ArtCore/<версия>` (короткий: на трекерах с полем agent CHAR(32) длинный ломал announce)
 
 ## Скачать
 Готовый установщик — в [Releases](https://github.com/Ruf790/artcore-torrent-client/releases).

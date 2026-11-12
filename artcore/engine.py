@@ -139,7 +139,8 @@ class Engine:
         except (FileNotFoundError, ValueError):
             self.bans = {}
         self._user_ranges: list[tuple[str, str]] = []
-        self._peer_seen: dict[tuple, tuple] = {}      # (key, ip) → (uploaded to it, its progress) at first sight
+        self._peer_prog: dict[tuple, tuple] = {}      # (key, ip) → (uploaded to it, its progress) at first sight
+        self._miss_hits: dict[str, int] = {}          # missing-files scans in a row that found nothing
         self._limited: set[str] = set()                # torrents whose limits come from a tracker rule
         self._cross_check: set[str] = set()            # cross-seeded, waiting for the hash check
         self.cross_results: list[tuple[str, str, float]] = []   # (name, key, progress) for the UI
@@ -184,7 +185,9 @@ class Engine:
         return {
             # Client identity: what the tracker sees in peer_id / User-Agent
             "peer_fingerprint": lt.generate_fingerprint(PEER_ID_CODE, VERSION_TUPLE[0], VERSION_TUPLE[1], 0, 0),
-            "user_agent":       f"{APP_NAME}/{VERSION} libtorrent/{lt.__version__}",
+            # short on purpose: TBDev / TSSE-style trackers keep the agent in CHAR(32) columns and
+            # a longer one makes their announce.php fail ("ArtCore/1.0.24 libtorrent/2.1.1.0" = 33)
+            "user_agent":       f"{APP_NAME}/{VERSION}",
             "listen_interfaces": listen,
             "outgoing_interfaces": outgoing,
             "out_enc_policy": int(enc[0]), "in_enc_policy": int(enc[0]),
@@ -300,16 +303,16 @@ class Engine:
                 if bad:
                     self.ban(ip, f"{bad} ({client or pid[:8].decode('latin-1', 'replace')})")
                     continue
-                seen = self._peer_seen.get((key, ip))
+                seen = self._peer_prog.get((key, ip))
                 if seen is None:
-                    self._peer_seen[(key, ip)] = (p.total_upload, p.progress)
+                    self._peer_prog[(key, ip)] = (p.total_upload, p.progress)
                     continue
                 sent = p.total_upload - seen[0]
                 gained = (p.progress - seen[1]) * size
                 if sent > max(FAKE_MIN_BYTES, size * 0.05) and gained < sent * 0.1:
                     self.ban(ip, f"fake progress: got {sent >> 20} MiB, progress +{max(gained, 0) / size:.1%} ({client})")
-        if len(self._peer_seen) > 20000:
-            self._peer_seen.clear()
+        if len(self._peer_prog) > 20000:
+            self._peer_prog.clear()
 
     # ── per-tracker totals ─────────────────────────────────────
     def _count_trackers(self) -> None:
@@ -996,13 +999,22 @@ class Engine:
                                                      lt.torrent_status.checking_resume_data) \
                     or getattr(s, "moving_storage", False):
                 continue
-            if self._is_missing(key, h):
-                self.opts.setdefault(key, {})["missing"] = s.save_path
-                self._save_opts()
-                h.unset_flags(lt.torrent_flags.auto_managed)
-                h.pause()
-                self.missing_names.append((s.name, key, s.save_path))
-                self._log("error", f"{s.name}: files not found in {s.save_path}")
+            # a torrent still downloading may not have its files on disk yet — only a vanished
+            # folder counts for it; a complete one counts when all its files are gone
+            gone = not os.path.isdir(s.save_path) or (s.progress >= 1.0 and self._is_missing(key, h))
+            if not gone:
+                self._miss_hits.pop(key, None)
+                continue
+            self._miss_hits[key] = self._miss_hits.get(key, 0) + 1
+            if self._miss_hits[key] < 2:          # seen twice in a row (≈1 min) — not a hiccup
+                continue
+            self._miss_hits.pop(key, None)
+            self.opts.setdefault(key, {})["missing"] = s.save_path
+            self._save_opts()
+            h.unset_flags(lt.torrent_flags.auto_managed)
+            h.pause()
+            self.missing_names.append((s.name, key, s.save_path))
+            self._log("error", f"{s.name}: files not found in {s.save_path}")
 
     def reannounce(self, key: str) -> None:
         h = self.handles.get(key)
@@ -1135,6 +1147,9 @@ class Engine:
         if not reason:
             reason = a.error.message() if a.error.value() else a.message()
         code = int(getattr(a, "status_code", 0) or 0)
+        if "bencod" in reason.lower():
+            from .i18n import t
+            reason = t("tr_bad_reply")
         if code >= 300:                              # libtorrent puts the HTTP status text in failure_reason
             reason = _http_reason(code, reason)
         self.tr_status.setdefault(_key(a.handle), {})[_alert_id(a)] = reason
@@ -1947,6 +1962,9 @@ class Engine:
                     if http:
                         st = "not_working"            # the web server answered, the tracker script didn't
                     msg = reason if http else ih.get("message") or (reason if st in ("not_working", "tracker_error") else "")
+                    if "bencod" in msg.lower():
+                        from .i18n import t as _t
+                        msg = _t("tr_bad_reply")
                     children.append({
                         "proto": "v1" if i == 0 else "v2",
                         "endpoint": f"{addr[0]}:{addr[1]}" if addr[0] else "",

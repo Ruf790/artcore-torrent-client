@@ -997,6 +997,8 @@ STRINGS = {
     "ba_later_tip":    ("Добавить остановленными — запустите, когда нужно", "Add them stopped — start them when you want"),
     "ba_done":         ("Добавлено торрентов: {0} → {1}",    "Torrents added: {0} → {1}"),
     "ba_done_later":   ("Добавлено остановленными: {0} → {1}", "Added stopped: {0} → {1}"),
+    "tr_bad_reply":    ("трекер ответил не по протоколу (не bencode) — скрипт announce на сервере упал с ошибкой",
+                        "the tracker's reply is not bencoded — its announce script failed with an error"),
     "kb_history":      ("История удалённых торрентов",       "History of removed torrents"),
     "kb_drop":         ("Перетащить",                        "Drag & drop"),
     "kb_drop_t":       (".torrent, папку с ними, magnet или ссылку на окно",
