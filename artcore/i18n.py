@@ -143,7 +143,7 @@ STRINGS = {
     "sp_view":         ("Вид",        "View"),
     "sp_window":       ("Окно",       "Window"),
     "sp_adv":          ("Дополнительно", "Advanced"),
-    "sp_adv_hint":     ("Расписание скорости и питание — в подразделах слева.", "Speed schedule and power options are in the sub-sections on the left."),
+    "sp_adv_hint":     ("Расписание скорости, питание, диск и кэш — в подразделах слева.", "Speed schedule, power, disk and cache options are in the sub-sections on the left."),
     "about":           ("О программе", "About"),
     "close":           ("Закрыть",    "Close"),
     "ab_version":      ("Версия {0}", "Version {0}"),
@@ -349,6 +349,69 @@ STRINGS = {
     "space_resumed":   ("Место освободилось ({1}) — «{0}» продолжает", "Disk space is back ({1}) — “{0}” resumed"),
     "done_cmd_run":    ("Запущено по завершении: {0}", "Run on completion: {0}"),
     "done_cmd_fail":   ("Не удалось запустить команду: {0}", "Could not run the command: {0}"),
+    # Settings → Advanced → Disk & cache
+    "sp_disk":         ("Диск и кэш", "Disk & cache"),
+    "dk_presets":      ("Готовые профили", "Presets"),
+    "dk_hdd":          ("HDD", "HDD"),
+    "dk_ssd":          ("SSD / NVMe", "SSD / NVMe"),
+    "dk_lowram":       ("Мало памяти", "Low memory"),
+    "dk_default":      ("По умолчанию", "Defaults"),
+    "dk_preset_note":  ("Профиль только заполняет поля ниже — нажмите «Применить» или OK.",
+                        "A preset only fills in the fields below — press Apply or OK."),
+    "dk_files":        ("Файлы", "Files"),
+    "dk_prealloc":     ("Резервировать место под файлы сразу при добавлении",
+                        "Pre-allocate disk space for all files when adding"),
+    "dk_prealloc_note": ("Меньше фрагментации на HDD и нет «диск переполнен» посреди загрузки. "
+                         "Действует для новых торрентов; на HDD создание больших файлов может занять время.",
+                         "Less fragmentation on HDDs and no \"disk full\" halfway through. Applies to new "
+                         "torrents; on an HDD creating big files can take a while."),
+    "dk_file_pool":    ("Открытых файлов", "Open files"),
+    "dk_write":        ("Запись", "Writing"),
+    "dk_mode":         ("Способ записи", "Write mode"),
+    "dk_mode_mmap":    ("mmap — отображение в память (стандарт libtorrent)", "mmap — memory-mapped (libtorrent default)"),
+    "dk_mode_auto":    ("Авто", "Auto"),
+    "dk_mode_pwrite":  ("pwrite — обычная запись", "pwrite — plain writes"),
+    "dk_mode_note":    ("С mmap Диспетчер задач показывает большую «память» — это кэш файлов Windows, "
+                        "но на слабых ПК он вытесняет программы. pwrite этого не делает.",
+                        "With mmap Task Manager shows a lot of \"memory\" — it is the Windows file cache, "
+                        "but on weak PCs it pushes other programs out. pwrite doesn't."),
+    "dk_cache":        ("Кэш Windows", "Windows cache"),
+    "dk_cache_enable": ("Включён", "Enabled"),
+    "dk_cache_disable": ("Отключён (чтение и запись)", "Disabled (read and write)"),
+    "dk_cache_wt":     ("Сквозная запись (write-through)", "Write-through"),
+    "dk_queue":        ("Очередь записи", "Write queue"),
+    "dk_queue_note":   ("Сколько данных может ждать записи на диск. Если диск не успевает, "
+                        "загрузка притормаживается — увеличьте для быстрого канала и медленного диска.",
+                        "How much data may wait to be written. When the disk can't keep up downloads are "
+                        "throttled — raise it for a fast line and a slow disk."),
+    "dk_sendbuf":      ("Буфер отдачи на пира", "Send buffer per peer"),
+    "dk_threads":      ("Потоки и проверка", "Threads and checking"),
+    "dk_aio":          ("Потоков ввода-вывода", "Disk I/O threads"),
+    "dk_hash":         ("Потоков хеширования", "Hashing threads"),
+    "dk_hash_note":    ("Больше потоков — быстрее проверка файлов на SSD; на HDD оставьте 1.",
+                        "More threads check files faster on an SSD; keep 1 on an HDD."),
+    "dk_checkmem":     ("Память при проверке", "Memory while checking"),
+    "dk_now":          ("Диск сейчас", "Disk right now"),
+    "dk_live":         ("Запись {0}/с · чтение {1}/с · хеширование {2}/с<br>В очереди записи {3} · заданий {4} · "
+                        "ждут {5} · открыто файлов {6}",
+                        "Write {0}/s · read {1}/s · hashing {2}/s<br>Write queue {3} · jobs {4} · "
+                        "waiting {5} · open files {6}"),
+    "dk_live_busy":    ("Диск не успевает — загрузка притормаживается.", "The disk can't keep up — downloads are throttled."),
+    "dk_live_none":    ("Данные появятся через пару секунд.", "Numbers appear in a couple of seconds."),
+    "perf_outstanding_disk_buffer_limit_reached": (
+        "Диск не успевает записывать — очередь записи заполнена. Увеличьте «Очередь записи» "
+        "в Настройки → Дополнительно → Диск и кэш.",
+        "The disk can't keep up — the write queue is full. Raise \"Write queue\" in "
+        "Settings → Advanced → Disk & cache."),
+    "perf_too_high_disk_queue_limit": (
+        "Очередь записи больше, чем позволяет память, — libtorrent её уменьшил.",
+        "The write queue is larger than memory allows — libtorrent lowered it."),
+    "perf_send_buffer_watermark_too_low": (
+        "Буфер отдачи мал для текущей скорости — увеличьте его в Настройки → Дополнительно → Диск и кэш.",
+        "The send buffer is too small for this upload speed — raise it in Settings → Advanced → Disk & cache."),
+    "perf_too_few_file_descriptors": (
+        "Не хватает дескрипторов файлов — уменьшите «Открытых файлов» в Диск и кэш.",
+        "Too few file descriptors — lower \"Open files\" in Disk & cache."),
     "set_grp_power":   ("Питание и завершение", "Power and completion"),
     "set_awake":       ("Не давать Windows засыпать, пока идёт загрузка", "Keep Windows awake while downloading"),
     "set_awake_seed":  ("…и пока идёт раздача", "…and while seeding"),

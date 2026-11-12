@@ -73,6 +73,16 @@ DEFAULTS = {
     "delete_torrent_file": False,   # remove the .torrent file after it was added
     "export_dir":       "",         # copy the .torrent of every added torrent here, "" = off
     "export_done_dir":  "",         # … of every finished download here
+    # Settings → Advanced → Disk & cache (libtorrent defaults)
+    "preallocate":      False,      # reserve full file size when a torrent is added
+    "disk_write_mode":  "mmap",     # mmap | auto | pwrite (pwrite = less "memory" in Task Manager)
+    "disk_os_cache":    "enable",   # enable | disable | write_through
+    "disk_queue_mb":    100,        # bytes waiting to be written before peers are throttled
+    "aio_threads":      10,
+    "hashing_threads":  1,
+    "checking_mem_mb":  4,          # read-ahead while checking
+    "file_pool":        40,         # open file handles
+    "send_buffer_kb":   500,        # per-peer send buffer watermark
 }
 
 
