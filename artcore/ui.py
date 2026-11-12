@@ -338,6 +338,8 @@ class ProgressDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         if ProgressDelegate.style == "classic":
             return self._paint_classic(painter, option, index)
+        if ProgressDelegate.style == "thin":
+            return self._paint_thin(painter, option, index)
         from PySide6.QtGui import QLinearGradient
         r = _row_of(index)
         painter.save()
@@ -388,6 +390,32 @@ class ProgressDelegate(QStyledItemDelegate):
             painter.setPen(QColor("#ffffff"))
             painter.drawText(bar, Qt.AlignCenter, txt)
             painter.restore()
+        painter.restore()
+
+    def _paint_thin(self, painter, option, index):
+        """Windows 11 ProgressBar: a 1 px track with a 3 px rounded fill, percentage on the right."""
+        r = _row_of(index)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        _paint_cell_bg(painter, option)
+        f = painter.font(); f.setPointSizeF(8.5); painter.setFont(f)
+        p = max(0.0, min(1.0, r.progress))
+        txt = "100%" if p >= 1 else f"{p * 100:.1f}%"
+        tw = QFontMetrics(f).horizontalAdvance("100.0%") + 6
+        rect = QRectF(option.rect).adjusted(8, 0, -8 - tw, 0)
+        y = rect.center().y()
+        painter.setPen(QPen(QColor(C["input_edge"] if "input_edge" in C else C["secondary"]), 1))
+        painter.drawLine(QPointF(rect.left(), y + 0.5), QPointF(rect.right(), y + 0.5))
+        if p > 0:
+            key = self.CLASSIC.get(_bar_state(r), "primary")
+            if key == "secondary":
+                key = "warning" if r.state == "paused" else "secondary"
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(C[key]))
+            painter.drawRoundedRect(QRectF(rect.left(), y - 1, max(3.0, rect.width() * p), 3), 1.5, 1.5)
+        painter.setPen(QColor(C["secondary"] if p < 1 else C["body"]))
+        painter.drawText(QRectF(rect.right() + 6, option.rect.top(), tw, option.rect.height()),
+                         Qt.AlignRight | Qt.AlignVCenter, txt)
         painter.restore()
 
     CLASSIC = {"error": "danger", "tracker_error": "danger", "paused": "secondary",
@@ -535,11 +563,11 @@ class Kpi(QFrame):
         style = theme.current_style
         fam = theme.TONES[self.tone]
         site = style == "site"
-        self.ico_box.setVisible(style in ("soft", "site"))
-        self.ico.setVisible(style not in ("soft", "site"))
+        self.ico_box.setVisible(style in ("soft", "site", "fluent"))
+        self.ico.setVisible(style not in ("soft", "site", "fluent"))
         self.line.setVisible(site)
         self.layout().setContentsMargins(*((16, 14, 16, 14) if site else (14, 10, 12, 10)))
-        if style in ("soft", "site"):
+        if style in ("soft", "site", "fluent"):
             col = C[fam + "_text"] if theme.current_name == "dark" else C[fam]
             self.ico_box.setPixmap(qta.icon(self.icon_name, color=col).pixmap(20, 20))
         else:
@@ -1483,13 +1511,14 @@ class SettingsDialog(QDialog):
         self.theme.setCurrentIndex({"system": 0, "light": 1, "dark": 2}.get(cfg.get("theme", "system"), 0))
         form.addRow(t("set_theme"), self.theme)
         self.style_combo = QComboBox()
-        for k in ("site", "soft", "vivid", "muted"):
+        for k in ("site", "soft", "vivid", "muted", "fluent"):
             self.style_combo.addItem(t("style_" + k), k)
         self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(cfg.get("ui_style", "soft"))))
         form.addRow(t("set_style"), self.style_combo)
         self.pbar = QComboBox()
         self.pbar.addItem(t("pb_classic"), "classic")
         self.pbar.addItem(t("pb_rounded"), "rounded")
+        self.pbar.addItem(t("pb_thin"), "thin")
         self.pbar.setCurrentIndex(max(0, self.pbar.findData(cfg.get("progress_style", "classic"))))
         form.addRow(t("pb_style"), self.pbar)
         self.name_icon = QComboBox()
