@@ -108,6 +108,11 @@ def main() -> int:
     if _send_to_running(items if items or minimized else []):
         return 0
 
+    from . import backup
+    try:
+        restored_from = backup.apply_pending(config.data_dir())      # "Restore from backup" staged it
+    except OSError:
+        restored_from = ""
     cfg = config.load()
     set_lang(cfg.get("language", "ru"))
 
@@ -130,6 +135,8 @@ def main() -> int:
 
     engine = Engine(config.data_dir(), cfg)
     win = MainWindow(engine, cfg)
+    if restored_from:
+        win.log_event("system", f"Restored from backup; the previous state is in {restored_from}")
     if not (minimized and QSystemTrayIcon.isSystemTrayAvailable()):
         win.show()
 
@@ -153,7 +160,18 @@ def main() -> int:
     for it in items:
         win.add_item(it)
 
-    return app.exec()
+    code = app.exec()
+    # Everything is saved by now (MainWindow.quit → engine.shutdown). Leave for real: closing the
+    # session is time-limited, then the process ends at once — no Python clean-up that could keep
+    # it hanging in Task Manager (WinRT toast callbacks, COM objects, the libtorrent destructor).
+    try:
+        server.close()
+        engine.close(5.0)
+    finally:
+        sys.stdout and sys.stdout.flush()
+        sys.stderr and sys.stderr.flush()
+        import os
+        os._exit(code)
 
 
 if __name__ == "__main__":

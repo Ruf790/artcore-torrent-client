@@ -321,6 +321,7 @@ class ProgressDelegate(QStyledItemDelegate):
     H = 16
 
     style = "classic"            # classic (qBittorrent) | rounded — Settings → View
+    compact = False              # compact list: lower rows, thinner bars
 
     def paint(self, painter, option, index):
         if ProgressDelegate.style == "classic":
@@ -331,7 +332,8 @@ class ProgressDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing)
         _paint_cell_bg(painter, option)
         rect = option.rect.adjusted(8, 0, -10, 0)
-        bar = QRectF(rect.left(), rect.center().y() - self.H / 2 + 0.5, rect.width(), self.H)
+        hgt = 12 if ProgressDelegate.compact else self.H
+        bar = QRectF(rect.left(), rect.center().y() - hgt / 2 + 0.5, rect.width(), hgt)
         rad = self.H / 2
         track = QPainterPath(); track.addRoundedRect(bar, rad, rad)
         painter.setPen(Qt.NoPen)
@@ -385,7 +387,8 @@ class ProgressDelegate(QStyledItemDelegate):
         r = _row_of(index)
         painter.save()
         _paint_cell_bg(painter, option)
-        bar = QRectF(option.rect).adjusted(3, 6, -3, -6)
+        pad = 3 if ProgressDelegate.compact else 6
+        bar = QRectF(option.rect).adjusted(3, pad, -3, -pad)
         p = max(0.0, min(1.0, r.progress))
         painter.setPen(QPen(QColor(C["border"]), 1))
         painter.setBrush(QColor(C["body_bg"]))
@@ -415,18 +418,20 @@ class BadgeDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing)
         _paint_cell_bg(painter, option)
         bg, fg = STATE_STYLE.get(r.state, ("muted_subtle", "secondary"))
-        f = painter.font(); f.setPointSizeF(8.5); f.setWeight(QFont.DemiBold); painter.setFont(f)
+        small = ProgressDelegate.compact
+        f = painter.font(); f.setPointSizeF(8 if small else 8.5); f.setWeight(QFont.DemiBold); painter.setFont(f)
         text = state_text(r)
         fm = QFontMetrics(f)
         room = option.rect.width() - 12 - 36          # pill never spills past the cell
         if fm.horizontalAdvance(text) > room:
             text = fm.elidedText(text, Qt.ElideRight, max(room, 10))
         w = fm.horizontalAdvance(text) + 36
-        pill = QRectF(option.rect.left() + 6, option.rect.center().y() - 10, w, 20)
+        ph = 16 if small else 20
+        pill = QRectF(option.rect.left() + 6, option.rect.center().y() - ph / 2, w, ph)
         edge = QColor(C[fg]); edge.setAlpha(45)
         painter.setPen(QPen(edge, 1))
         painter.setBrush(QColor(C[bg]))
-        painter.drawRoundedRect(pill.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        painter.drawRoundedRect(pill.adjusted(0.5, 0.5, -0.5, -0.5), ph / 2, ph / 2)
         ic = STATE_ICON.get(r.state, "fa6s.circle")
         painter.drawPixmap(int(pill.left() + 9), int(pill.center().y() - 5),
                            qta.icon(ic, color=C[fg]).pixmap(10, 10))
@@ -1253,6 +1258,12 @@ class SettingsDialog(QDialog):
         self.move_bycat = QCheckBox(t("set_move_bycat"))
         self.move_bycat.setChecked(cfg.get("move_done_by_category", True))
         form.addRow(self.move_bycat)
+        form.addRow(_section(t("sp_export"), None))
+        erow, self.export_dir = folder_row(self, cfg.get("export_dir", ""))
+        form.addRow(t("set_export"), erow)
+        edrow, self.export_done = folder_row(self, cfg.get("export_done_dir", ""))
+        form.addRow(t("set_export_done"), edrow)
+        form.addRow(note(t("set_export_hint")))
         form.addRow(_section(t("sp_watch"), None))
         wrow, self.watch = folder_row(self, cfg.get("watch_dir", ""))
         form.addRow(t("set_watch"), wrow)
@@ -1405,6 +1416,8 @@ class SettingsDialog(QDialog):
         self.pbar.addItem(t("pb_rounded"), "rounded")
         self.pbar.setCurrentIndex(max(0, self.pbar.findData(cfg.get("progress_style", "classic"))))
         form.addRow(t("pb_style"), self.pbar)
+        self.compact = QCheckBox(t("compact_set")); self.compact.setChecked(bool(cfg.get("compact_list")))
+        form.addRow("", self.compact)
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
@@ -1532,10 +1545,12 @@ class SettingsDialog(QDialog):
                  speed_in_title=self.title_speed.isChecked(),
                  watch_dir=self.watch.text().strip(), watch_category=self.watch_cat.currentData() or "",
                  move_done_dir=self.move_done.text().strip(), move_done_by_category=self.move_bycat.isChecked(),
+                 export_dir=self.export_dir.text().strip(), export_done_dir=self.export_done.text().strip(),
                  bind_interface=self.iface.currentData() or "", encryption=self.enc.currentData(),
                  ip_filter=self.ipf.text().strip(), geoip=self.geoip.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
+                 compact_list=self.compact.isChecked(),
                  language="en" if self.lang.currentIndex() == 1 else "ru")
         return c
 
@@ -2215,6 +2230,21 @@ class HashThread(QThread):
             self.done.emit("", str(e))
 
 
+class AnalyzeThread(QThread):
+    done = Signal(str, object)       # source, result dict (or None)
+
+    def __init__(self, src: str, exclude: bool, fmt: str):
+        super().__init__()
+        self.src, self.exclude, self.fmt = src, exclude, fmt
+
+    def run(self):
+        from .engine import analyze_source
+        try:
+            self.done.emit(self.src, analyze_source(self.src, self.exclude, self.fmt))
+        except Exception:
+            self.done.emit(self.src, None)
+
+
 class CreateTorrentDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
@@ -2237,6 +2267,22 @@ class CreateTorrentDialog(QDialog):
         bd = QPushButton(t("ct_folder")); bd.clicked.connect(self._pick_dir)
         row = QHBoxLayout(); row.addWidget(self.src); row.addWidget(bf); row.addWidget(bd)
         form.addRow(t("ct_source"), row)
+
+        # pre-flight check: files, size, pieces, junk (refreshed as the source / options change)
+        self.check_box = QFrame(); self.check_box.setObjectName("card")
+        cl = QVBoxLayout(self.check_box); cl.setContentsMargins(12, 8, 12, 8); cl.setSpacing(4)
+        self.check_lbl = QLabel(t("ct_chk_pick")); self.check_lbl.setTextFormat(Qt.RichText)
+        self.check_lbl.setWordWrap(True)
+        cl.addWidget(self.check_lbl)
+        self.junk_cb = QCheckBox(); self.junk_cb.setChecked(cfg.get("ct_exclude_junk", True)); self.junk_cb.hide()
+        self.junk_cb.toggled.connect(lambda _: self._schedule_check())
+        cl.addWidget(self.junk_cb)
+        form.addRow(self.check_box)
+        self._an: dict | None = None
+        self._an_threads: list = []
+        self._check_timer = QTimer(self); self._check_timer.setSingleShot(True); self._check_timer.setInterval(400)
+        self._check_timer.timeout.connect(self._run_check)
+        self.src.textChanged.connect(lambda _: self._schedule_check())
 
         def text_box(value, ph, h=58):
             e = QPlainTextEdit(value)
@@ -2261,6 +2307,8 @@ class CreateTorrentDialog(QDialog):
         opts.addWidget(QLabel(t("ct_format")))
         opts.addWidget(self.fmt, 1)
         form.addRow(t("ct_piece"), opts)
+        self.piece.currentIndexChanged.connect(lambda _: self._show_check())
+        self.fmt.currentIndexChanged.connect(lambda _: self._schedule_check())
 
         self.webseeds = text_box("", "https://mirror.example/files/", 46)
         form.addRow(t("ct_webseeds"), self.webseeds)
@@ -2282,6 +2330,67 @@ class CreateTorrentDialog(QDialog):
         self.bb.rejected.connect(self.reject)
         form.addRow(self.bb)
 
+    def _schedule_check(self):
+        self._check_timer.start()
+
+    def _run_check(self):
+        src = self.src.text().strip()
+        if not src or not os.path.exists(src):
+            self._an = None
+            self.check_lbl.setText(t("ct_chk_pick"))
+            self.junk_cb.hide()
+            return
+        self.check_lbl.setText(t("ct_chk_wait"))
+        th = AnalyzeThread(src, self.junk_cb.isChecked(), self.fmt.currentData())
+        th.done.connect(self._check_done)
+        th.finished.connect(lambda th=th: self._an_threads.remove(th) if th in self._an_threads else None)
+        self._an_threads.append(th)
+        th.start()
+
+    def _check_done(self, src: str, res):
+        if src != self.src.text().strip():
+            return                       # an older source — a newer check is coming
+        self._an = res
+        self._show_check()
+
+    def _show_check(self):
+        a = self._an
+        if not a:
+            return
+        import math
+        warn = lambda s: f'<span style="color:{C["warning_text"] if theme.current_name == "dark" else C["orange"]}">⚠ {s}</span>'
+        ok = lambda s: f'<span style="color:{C["success_text"] if theme.current_name == "dark" else C["success"]}">✓ {s}</span>'
+        piece = self.piece.currentData() or a["auto_piece"] or a["recommended"]
+        n = max(1, math.ceil(a["total"] / piece)) if a["total"] else 0
+        per_piece = {"v1": 20, "hybrid": 52, "v2": 32}[self.fmt.currentData()]
+        lines = [t("ct_chk_files", a["files"], fmt_size(a["total"])),
+                 t("ct_chk_pieces", f"{n:,}".replace(",", " "), fmt_size(piece).replace(".00", ""),
+                   fmt_size(n * per_piece + 400 * max(1, a["files"])))]
+        rec = a["recommended"]
+        rec_s = fmt_size(rec).replace(".00", "")
+        if piece == rec:
+            lines.append(ok(t("ct_chk_rec_ok", rec_s)))
+        elif n > 4000:
+            lines.append(warn(t("ct_chk_small", rec_s)))
+        elif n < 400 and piece > (32 << 10):
+            lines.append(warn(t("ct_chk_big", rec_s)))
+        else:
+            lines.append(t("ct_chk_rec", rec_s))
+        junk = a["junk"]
+        if junk:
+            names = ", ".join(sorted({os.path.basename(p) for p, _ in junk})[:6])
+            lines.append(warn(t("ct_chk_junk", len(junk), html.escape(names))))
+            self.junk_cb.setText(t("ct_chk_exclude", len(junk), fmt_size(sum(s for _, s in junk))))
+            self.junk_cb.show()
+        else:
+            self.junk_cb.hide()
+            lines.append(ok(t("ct_chk_nojunk")))
+        if a["zero"]:
+            lines.append(warn(t("ct_chk_zero", len(a["zero"]), html.escape(", ".join(os.path.basename(p) for p in a["zero"][:4])))))
+        if a["empty"]:
+            lines.append(t("ct_chk_empty", len(a["empty"])))
+        self.check_lbl.setText("<br>".join(lines))
+
     def _pick_file(self):
         f, _ = QFileDialog.getOpenFileName(self, t("ct_source"))
         if f:
@@ -2302,7 +2411,8 @@ class CreateTorrentDialog(QDialog):
             return
         announce = self.announce.toPlainText().strip()
         self.cfg.update(announce_url=announce, ct_piece=self.piece.currentData(),
-                        ct_format=self.fmt.currentData(), ct_source=self.source.text().strip())
+                        ct_format=self.fmt.currentData(), ct_source=self.source.text().strip(),
+                        ct_exclude_junk=self.junk_cb.isChecked())
         self.bb.setEnabled(False)
         self.setWindowTitle(t("ct_working"))
         self.bar.setRange(0, 0)
@@ -2311,7 +2421,8 @@ class CreateTorrentDialog(QDialog):
         self.th = HashThread(src=src, announce=announce, out_path=out, private=self.private.isChecked(),
                              comment=self.comment.text().strip(), piece_size=self.piece.currentData(),
                              fmt=self.fmt.currentData(), web_seeds=self.webseeds.toPlainText().splitlines(),
-                             source=self.source.text().strip())
+                             source=self.source.text().strip(),
+                             exclude_junk=self.junk_cb.isChecked() and self.junk_cb.isVisible())
         self.th.progress.connect(self._progress)
         self.th.done.connect(self._finished)
         self.th.start()
@@ -2628,17 +2739,27 @@ class MainWindow(QMainWindow):
         key("F5", lambda: self._each(self.engine.reannounce), plain=True)
         key("Ctrl+Shift+M", self.move_selected)
         key("Ctrl+M", self.copy_magnet)
+        key("Ctrl+E", self.export_selected)
         key("Return", self.open_folder, plain=True)
         key("Enter", self.open_folder, plain=True)
         key("Alt+Return", self.properties_dialog)
         key("Ctrl+F", self.focus_search)
         key("Escape", self.escape)
         key("Ctrl+B", lambda: self.set_sidebar(not self.sidebar.isVisible()))
+        key("Ctrl+Shift+L", lambda: self.set_compact(not ProgressDelegate.compact))
         key("Ctrl+I", self.stats_window)
         key("Ctrl+H", self.history_dialog)
         key("Ctrl+,", self.settings_dialog)
         key("Ctrl+/", self.shortcuts_dialog)
         key("Ctrl+Q", self.quit)
+
+    def set_compact(self, on: bool):
+        """Compact list: 26 px rows instead of 38 — about half as many torrents again on screen."""
+        self.cfg["compact_list"] = on
+        ProgressDelegate.compact = on
+        self.table.verticalHeader().setDefaultSectionSize(26 if on else 38)
+        self.compact_btn.setChecked(on)
+        self.table.viewport().update()
 
     def focus_search(self):
         self.search.setFocus()
@@ -2718,6 +2839,16 @@ class MainWindow(QMainWindow):
         ibtn("fa6s.chart-column", t("sw_open"), self.stats_window)
         ibtn("fa6s.clock-rotate-left", t("hist_tip") + " (Ctrl+H)", self.history_dialog)
         ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
+        bk = QToolButton(); bk.setObjectName("iconBtn"); bk.setToolTip(t("bk_tip"))
+        bk.setCursor(Qt.PointingHandCursor); bk.setIconSize(QSize(15, 15))
+        bk.setPopupMode(QToolButton.InstantPopup)
+        self._themed_icon(bk.setIcon, "fa6s.box-archive", "head_ic")
+        bm = QMenu(bk)
+        bm.addAction(icon("fa6s.floppy-disk", "primary"), t("bk_create"), self.backup_create)
+        bm.addAction(icon("fa6s.rotate-left", "orange"), t("bk_restore"), self.backup_restore)
+        bk.setMenu(bm)
+        bk.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0; }")
+        lay.addWidget(bk)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
         self.lang_btn = QToolButton()
         self.lang_btn.setObjectName("iconBtn")
@@ -2771,6 +2902,58 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() is now:
             self.quit(restart=True)
+
+    def backup_create(self):
+        """Everything in one .zip: settings, torrents, history, statistics, bans."""
+        from . import backup
+        out, _ = QFileDialog.getSaveFileName(
+            self, t("bk_create"), os.path.join(self.cfg.get("last_backup_dir") or os.path.expanduser("~/Documents"),
+                                               f"ArtCoreClient-backup-{datetime.now():%Y-%m-%d}.zip"), "ZIP (*.zip)")
+        if not out:
+            return
+        if not out.lower().endswith(".zip"):
+            out += ".zip"
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.engine.save_all(5.0)        # resume data of every torrent as it is right now
+            self.engine._flush_stats()
+            self.engine._save_opts()
+            self.cfg["last_backup_dir"] = os.path.dirname(out)
+            self.save_ui_state()             # also writes config.json
+            m = backup.create(config.data_dir(), out, {"pc": platform.node()})
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, APP_TITLE, t("bk_failed", e))
+            return
+        QApplication.restoreOverrideCursor()
+        msg = t("bk_done", m["torrents"], fmt_size(os.path.getsize(out)), out)
+        self.log_event("system", msg.replace("\n", " "))
+        QMessageBox.information(self, t("bk_create"), msg)
+
+    def backup_restore(self):
+        from . import backup
+        from .panels import RestoreDialog
+        path, _ = QFileDialog.getOpenFileName(self, t("bk_restore"),
+                                              self.cfg.get("last_backup_dir") or os.path.expanduser("~/Documents"),
+                                              "ZIP (*.zip)")
+        if not path:
+            return
+        try:
+            m = backup.read_manifest(path)
+        except Exception as e:
+            QMessageBox.warning(self, APP_TITLE, t("bk_bad", e))
+            return
+        d = RestoreDialog(m, self)
+        if not d.exec():
+            return
+        try:
+            n = backup.stage(path, config.data_dir(), d.mapping(), keep_ui=self.cfg.get("ui_state"))
+        except Exception as e:
+            QMessageBox.warning(self, APP_TITLE, t("bk_failed", e))
+            return
+        self.log_event("system", t("bk_staged", n))
+        QMessageBox.information(self, t("bk_restore"), t("bk_restart", n))
+        self.quit(restart=True)
 
     def about_dialog(self):
         AboutDialog(self).exec()
@@ -2911,6 +3094,15 @@ class MainWindow(QMainWindow):
         self.sb_btn.clicked.connect(lambda on: self.set_sidebar(on))
         self._themed_icon(self.sb_btn.setIcon, "fa6s.table-columns", "head_ic")
         lay.addWidget(self.sb_btn)
+        self.compact_btn = QToolButton()
+        self.compact_btn.setObjectName("iconBtn")
+        self.compact_btn.setCheckable(True)
+        self.compact_btn.setToolTip(t("compact_tip"))
+        self.compact_btn.setCursor(Qt.PointingHandCursor)
+        self.compact_btn.setIconSize(QSize(15, 15))
+        self.compact_btn.clicked.connect(lambda on: self.set_compact(on))
+        self._themed_icon(self.compact_btn.setIcon, "fa6s.bars", "head_ic")
+        lay.addWidget(self.compact_btn)
 
         self.search = QLineEdit()
         self.search.setObjectName("search")
@@ -3916,6 +4108,48 @@ class MainWindow(QMainWindow):
             if row:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(row.save_path))
 
+    def export_selected(self):
+        """Save .torrent: one → a file dialog, several → a folder (each as <name>.torrent)."""
+        keys = self.selected_keys()
+        if not keys:
+            return
+        rows = {r.key: r for r in self.model.rows}
+        nometa = [k for k in keys if self.engine.torrent_bytes(k) is None]
+        keys = [k for k in keys if k not in nometa]
+        if not keys:
+            QMessageBox.information(self, APP_TITLE, t("exp_nometa"))
+            return
+        last = self.cfg.get("last_export_dir") or os.path.expanduser("~")
+        saved = []
+        try:
+            if len(keys) == 1:
+                from .engine import _safe_name
+                name = _safe_name(rows[keys[0]].name if keys[0] in rows else keys[0]) + ".torrent"
+                path, _ = QFileDialog.getSaveFileName(self, t("exp_menu"), os.path.join(last, name), t("torrent_filter"))
+                if not path:
+                    return
+                if not path.lower().endswith(".torrent"):
+                    path += ".torrent"
+                with open(path, "wb") as f:
+                    f.write(self.engine.torrent_bytes(keys[0]))
+                saved.append(path)
+                folder = os.path.dirname(path)
+            else:
+                folder = QFileDialog.getExistingDirectory(self, t("exp_menu"), last)
+                if not folder:
+                    return
+                saved = [self.engine.export_torrent(k, folder) for k in keys]
+        except OSError as e:
+            QMessageBox.warning(self, APP_TITLE, t("exp_failed", e))
+            return
+        self.cfg["last_export_dir"] = folder
+        config.save(self.cfg)
+        msg = t("exp_done", len(saved), folder)
+        if nometa:
+            msg += "  " + t("exp_skipped", len(nometa))
+        self.log_event("torrent", msg)
+        self.statusBar().showMessage(msg, 8000)
+
     def copy_magnet(self):
         import libtorrent as lt
         keys = self.selected_keys()
@@ -3966,6 +4200,7 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.rotate"), t("recheck") + "\tCtrl+R", self.recheck_selected)
         m.addAction(icon("fa6s.bullhorn"), t("reannounce") + "\tF5", lambda: self._each(self.engine.reannounce))
         m.addAction(icon("fa6s.link"), t("copy_magnet") + "\tCtrl+M", self.copy_magnet)
+        m.addAction(icon("fa6s.file-export", "info"), t("exp_menu") + "\tCtrl+E", self.export_selected)
         m.addAction(icon("fa6s.sliders"), t("properties") + "\tAlt+Enter", self.properties_dialog)
         m.addSeparator()
         cm = m.addMenu(icon("fa6s.tag"), t("cat_menu"))
@@ -4088,6 +4323,7 @@ class MainWindow(QMainWindow):
         if ba("hsplit") is not None:
             self.hsplit.restoreState(ba("hsplit"))
         self.set_sidebar(self.cfg.get("sidebar", True))
+        self.set_compact(bool(self.cfg.get("compact_list")))
 
     def columns_menu(self, pos):
         hh = self.table.horizontalHeader()
@@ -4108,6 +4344,11 @@ class MainWindow(QMainWindow):
             self.table.resizeColumnToContents(c) for c in range(len(COLS)) if c != C_NAME and not hh.isSectionHidden(c)])
         m.addAction(icon("fa6s.rotate-left"), t("cols_reset"), lambda: hh.restoreState(self._default_header))
         m.addAction(icon("fa6s.arrow-down-wide-short"), t("cols_unsort"), self._reset_sort)
+        m.addSeparator()
+        a = m.addAction(icon("fa6s.bars"), t("compact_menu") + "\tCtrl+Shift+L")
+        a.setCheckable(True)
+        a.setChecked(ProgressDelegate.compact)
+        a.toggled.connect(self.set_compact)
         m.exec(hh.mapToGlobal(pos))
 
     def _reset_sort(self):
@@ -4313,6 +4554,7 @@ class MainWindow(QMainWindow):
             self.cfg.update(new_cfg)
             config.save(self.cfg)
             ProgressDelegate.style = self.cfg.get("progress_style", "classic")
+            self.set_compact(bool(self.cfg.get("compact_list")))
             self.table.viewport().update()
             self.engine.apply_settings(self.cfg)
             self.set_mini(bool(self.cfg.get("mini_widget")))

@@ -67,6 +67,8 @@ DEFAULTS = {
     "auto_trackers":    "",
     "add_subfolder":    False,      # add dialog: subfolder for a single-file torrent by default
     "delete_torrent_file": False,   # remove the .torrent file after it was added
+    "export_dir":       "",         # copy the .torrent of every added torrent here, "" = off
+    "export_done_dir":  "",         # … of every finished download here
 }
 
 
