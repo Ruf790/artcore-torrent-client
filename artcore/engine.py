@@ -63,6 +63,7 @@ class TorrentRow:
     sess_up: int = 0
     queue: int = -1     # place in the download queue (1-based), -1 = not queued (seeding / forced)
     forced: bool = False   # "Force start": running outside the queue
+    order: int = 0      # place in the list ("#" column, Up / Down buttons), 1-based
     moving: int = -1       # "Move…" in progress: percent of the data already at the new place, -1 = not moving
     missing: str = ""      # the data folder / files are gone (drive unplugged, folder renamed): where they were
 
@@ -158,7 +159,15 @@ class Engine:
         self.port_check: dict = {}       # last result of check_port(): {"port", "open", "ip", "error", "at"}
 
         self.ses = lt.session(self._settings())
+        # the user's order of the list (Up / Down); libtorrent's download queue follows it
+        self.order_path = os.path.join(data_dir, "order.json")
+        try:
+            with open(self.order_path, encoding="utf-8") as f:
+                self.order: list[str] = [str(k) for k in json.load(f)]
+        except (FileNotFoundError, ValueError, TypeError):
+            self.order = []
         self._load_state()
+        self._order_sync()
         self._low_space = {k for k, o in self.opts.items() if o.get("low_space") and k in self.handles}
         if self.bans:
             self._apply_filter()
@@ -821,20 +830,75 @@ class Engine:
         self.forget_history([e.get("key", "") for e in self.history])
 
     # ── queue ──────────────────────────────────────────────────
+    def _order_sync(self) -> bool:
+        """Drop removed torrents from the order, append new ones (downloads in their queue order
+        first time round). Returns True if it changed."""
+        have = set(self.handles)
+        new = [k for k in self.order if k in have]
+        seen = set(new)
+        if len(seen) != len(new):
+            new = list(dict.fromkeys(new))
+            seen = set(new)
+        extra = [k for k in self.handles if k not in seen]
+        if extra:
+            def qpos(k):
+                try:
+                    q = self.handles[k].status().queue_position
+                except Exception:
+                    q = -1
+                return q if q >= 0 else 1 << 30
+            extra.sort(key=qpos)
+            new += extra
+        if new != self.order:
+            self.order = new
+            self._save_order()
+            return True
+        return False
+
+    def _save_order(self) -> None:
+        try:
+            tmp = self.order_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.order, f)
+            os.replace(tmp, self.order_path)
+        except OSError:
+            pass
+
     def queue_move(self, keys: list[str], where: str) -> None:
-        """where: up | down | top | bottom. Several torrents keep their order among themselves."""
-        hs = [(self.handles[k].status().queue_position, self.handles[k]) for k in keys if k in self.handles]
-        hs = [(q, h) for q, h in hs if q >= 0]
-        # move the outer ones first so the selection shifts as a block
-        hs.sort(key=lambda x: x[0], reverse=where in ("down", "top"))
-        edge = -1 if where == "up" else max([h.status().queue_position for h in self.handles.values()] + [0]) + 1
-        for q, h in hs:
-            if where in ("up", "down"):     # already at the edge: stay, and stop the next one there
-                if q == edge + (1 if where == "up" else -1):
-                    edge = q
-                    continue
-            {"up": h.queue_position_up, "down": h.queue_position_down,
-             "top": h.queue_position_top, "bottom": h.queue_position_bottom}[where]()
+        """where: up | down | top | bottom. Moves the torrents in the list order (any state, like
+        BitComet); several keep their order among themselves. Downloads waiting in libtorrent's queue
+        are then put in the same order."""
+        self._order_sync()
+        sel = set(k for k in keys if k in self.handles)
+        if not sel:
+            return
+        o = self.order
+        if where == "top":
+            o = [k for k in o if k in sel] + [k for k in o if k not in sel]
+        elif where == "bottom":
+            o = [k for k in o if k not in sel] + [k for k in o if k in sel]
+        elif where == "up":
+            o = list(o)
+            for i in range(1, len(o)):
+                if o[i] in sel and o[i - 1] not in sel:
+                    o[i - 1], o[i] = o[i], o[i - 1]
+        elif where == "down":
+            o = list(o)
+            for i in range(len(o) - 2, -1, -1):
+                if o[i] in sel and o[i + 1] not in sel:
+                    o[i], o[i + 1] = o[i + 1], o[i]
+        if o == self.order:
+            return
+        self.order = o
+        self._save_order()
+        # libtorrent's download queue in the same order (seeds / finished have no place in it)
+        for k in o:
+            h = self.handles.get(k)
+            try:
+                if h is not None and h.status().queue_position >= 0:
+                    h.queue_position_bottom()
+            except Exception:
+                pass
 
     def force_start(self, key: str) -> None:
         """Start now, ignoring the limits on active downloads / seeds."""
@@ -1326,6 +1390,15 @@ class Engine:
         }
 
     def rows(self) -> list[TorrentRow]:
+        self._order_sync()
+        pos = {k: i + 1 for i, k in enumerate(self.order)}
+        rows = self._rows()
+        for r in rows:
+            r.order = pos.get(r.key, len(pos) + 1)
+        rows.sort(key=lambda r: r.order)
+        return rows
+
+    def _rows(self) -> list[TorrentRow]:
         out = []
         for key, h in self.handles.items():
             if not h.is_valid():
