@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QStackedWidget, QStyle,
                                QStyledItemDelegate, QSystemTrayIcon, QTableView, QTableWidget,
-                               QScrollArea, QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
+                               QScrollArea, QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget, QGraphicsDropShadowEffect,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import APP_TITLE, VERSION, config, details, theme, winint
@@ -882,6 +882,45 @@ def _country_strip(by_country: dict[str, list], total: int, top: int = 10) -> st
     return f"{head} &nbsp;&nbsp; " + " &nbsp;·&nbsp; ".join(parts) + tail
 
 
+class NameDelegate(QStyledItemDelegate):
+    """Name column: the usual icon + name, and the tracker's promotion badges right after the
+    name (FREE, 50%, 30%, 2× UP) like on the torrent page of the site."""
+    BADGES = {"free": ("FREE", "success"), "silver": ("50%", "info"), "30": ("30%", "orange"), "2x": ("2× UP", "purple")}
+
+    def paint(self, painter, option, index):
+        r = _row_of(index)
+        tags = [self.BADGES[x] for x in (r.promo if r is not None else ()) if x in self.BADGES]
+        if not tags:
+            return super().paint(painter, option, index)
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+        o = QStyleOptionViewItem(option)
+        self.initStyleOption(o, index)
+        bf = QFont(o.font); bf.setPointSizeF(max(6.5, o.font.pointSizeF() * 0.78)); bf.setBold(True)
+        bfm = QFontMetrics(bf)
+        widths = [bfm.horizontalAdvance(text) + 14 for text, _ in tags]
+        need = sum(widths) + 5 * len(widths) + 10
+        style = o.widget.style() if o.widget is not None else QApplication.style()
+        tr = style.subElementRect(QStyle.SE_ItemViewItemText, o, o.widget)
+        fm = QFontMetrics(o.font)
+        o.text = fm.elidedText(o.text, Qt.ElideRight, max(24, tr.width() - need))
+        style.drawControl(QStyle.CE_ItemViewItem, o, painter, o.widget)
+        x = tr.left() + fm.horizontalAdvance(o.text) + 10
+        painter.save()
+        painter.setClipRect(option.rect)          # a narrow column cuts the badges, not the next column
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setFont(bf)
+        h = 18
+        for (text, tone), w in zip(tags, widths):
+            rect = QRectF(x, option.rect.center().y() - h / 2, w, h)
+            bg = QColor(C[tone]); bg.setAlpha(40)
+            painter.setPen(Qt.NoPen); painter.setBrush(bg)
+            painter.drawRoundedRect(rect, h / 2, h / 2)
+            painter.setPen(QColor(C[tone + "_text"] if theme.current_name == "dark" else C[tone]))
+            painter.drawText(rect, Qt.AlignCenter, text)
+            x += w + 5
+        painter.restore()
+
+
 class GridTableView(QTableView):
     """Torrent list with an optional BitComet-style grid: column separators and row lines drawn
     over the whole view, also in the empty area below the last torrent."""
@@ -910,6 +949,98 @@ class GridTableView(QTableView):
             y += step
             p.drawLine(0, y - 1, vp.right(), y - 1)
         p.end()
+
+
+class Toast(QFrame):
+    """One in-window notification (site-style SweetAlert toast): coloured stripe, icon, title,
+    text, a shrinking timer line; click or × closes it."""
+    KINDS = {"success": ("fa6s.circle-check", "success"), "info": ("fa6s.circle-info", "primary"),
+             "warning": ("fa6s.triangle-exclamation", "warning"), "error": ("fa6s.circle-xmark", "danger")}
+    LIFE = 4500
+
+    def __init__(self, host: "ToastHost", kind: str, title: str, text: str = "", on_click=None):
+        super().__init__(host.win)
+        self.host, self.on_click = host, on_click
+        icon_name, tone = self.KINDS.get(kind, self.KINDS["info"])
+        self.tone = tone
+        self.setObjectName("toast")
+        self.setStyleSheet(f"#toast {{ background: {C['body_bg']}; border: 1px solid {C['border']};"
+                           f" border-left: 4px solid {C[tone]}; border-radius: 10px; }}"
+                           f" #toast QLabel {{ background: transparent; border: none; }}")
+        sh = QGraphicsDropShadowEffect(self)
+        sh.setBlurRadius(28); sh.setOffset(0, 6); sh.setColor(QColor(0, 0, 0, 70))
+        self.setGraphicsEffect(sh)
+        h = QHBoxLayout(self); h.setContentsMargins(14, 10, 10, 12); h.setSpacing(12)
+        ic = QLabel(); ic.setPixmap(qta.icon(icon_name, color=C[tone]).pixmap(22, 22))
+        h.addWidget(ic, 0, Qt.AlignTop)
+        v = QVBoxLayout(); v.setSpacing(2)
+        a = QLabel(title); a.setStyleSheet(f"font-weight: 600; color: {C['emphasis']};"); a.setWordWrap(True)
+        v.addWidget(a)
+        if text:
+            b = QLabel(text); b.setWordWrap(True); b.setStyleSheet(f"color: {C['secondary']}; font-size: 9pt;")
+            v.addWidget(b)
+        h.addLayout(v, 1)
+        x = QToolButton(); x.setObjectName("iconBtn"); x.setIcon(qta.icon("fa6s.xmark", color=C["secondary"]))
+        x.setIconSize(QSize(11, 11)); x.setFixedSize(22, 22); x.clicked.connect(self.close_now)
+        h.addWidget(x, 0, Qt.AlignTop)
+        self.setFixedWidth(370)
+        self.setCursor(Qt.PointingHandCursor if on_click else Qt.ArrowCursor)
+        self.left = self.LIFE
+        self.timer = QTimer(self); self.timer.timeout.connect(self._step); self.timer.start(50)
+        self.adjustSize()
+
+    def _step(self):
+        if self.underMouse():               # reading it: hold on
+            return
+        self.left -= 50
+        if self.left <= 0:
+            self.close_now()
+        else:
+            self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        w = int((self.width() - 16) * self.left / self.LIFE)
+        p.fillRect(QRectF(8, self.height() - 4, w, 2), QColor(C[self.tone]))
+
+    def mousePressEvent(self, e):
+        if self.on_click:
+            self.on_click()
+        self.close_now()
+
+    def close_now(self):
+        self.timer.stop()
+        self.hide()
+        self.host.remove(self)
+        self.deleteLater()
+
+
+class ToastHost:
+    """Stacks toasts in the top-right corner of the window, newest on top, at most 4."""
+    def __init__(self, win: QWidget):
+        self.win = win
+        self.items: list[Toast] = []
+
+    def show(self, kind: str, title: str, text: str = "", on_click=None):
+        t_ = Toast(self, kind, title, text, on_click)
+        self.items.insert(0, t_)
+        while len(self.items) > 4:
+            self.items[-1].close_now()
+        t_.show()
+        self.layout()
+
+    def remove(self, t_):
+        if t_ in self.items:
+            self.items.remove(t_)
+            self.layout()
+
+    def layout(self):
+        y = 92
+        for t_ in self.items:
+            t_.move(self.win.width() - t_.width() - 22, y)
+            t_.raise_()
+            y += t_.height() + 10
 
 
 class MiniWidget(QWidget):
@@ -1575,6 +1706,8 @@ class SettingsDialog(QDialog):
         form.addRow("", self.compact)
         self.grid = QCheckBox(t("grid_set")); self.grid.setChecked(bool(cfg.get("list_grid")))
         form.addRow("", self.grid)
+        self.promos = QCheckBox(t("promo_set")); self.promos.setChecked(cfg.get("tracker_promos", True))
+        form.addRow("", self.promos)
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
         self.lang.setCurrentIndex(1 if cfg.get("language") == "en" else 0)
         form.addRow(t("set_lang"), self.lang)
@@ -1672,19 +1805,38 @@ class SettingsDialog(QDialog):
             lambda it, _: it is not None and self.stack.setCurrentIndex(it.data(0, Qt.UserRole)))
         self.nav.setCurrentItem(self._items["sp_conn"])
 
-        btns = QHBoxLayout()
+        # bottom action bar, like the staff panel's sticky save bar: what changed + the buttons
+        bar = QFrame(); bar.setObjectName("actionBar")
+        bar.setStyleSheet(f"QFrame#actionBar {{ background: {C['body_bg']}; border-top: 1px solid {C['border']}; }}")
+        btns = QHBoxLayout(bar)
+        btns.setContentsMargins(18, 10, 18, 10)
+        self.dirty_icon = QLabel()
+        self.dirty_icon.setPixmap(qta.icon("fa6s.circle-exclamation", color=C["warning"]).pixmap(16, 16))
+        self.dirty_lbl = QLabel()
+        self.dirty_lbl.setStyleSheet(f"color: {C['warning_text']}; font-weight: 600;")
+        btns.addWidget(self.dirty_icon); btns.addWidget(self.dirty_lbl)
         btns.addStretch()
-        ok = QPushButton(t("ok")); ok.setObjectName("primary"); ok.setDefault(True)
+        self.reset_btn = QPushButton(icon("fa6s.rotate-left"), t("sb_reset"))
         cancel = QPushButton(t("cancel"))
         self.apply_btn = QPushButton(t("apply"))
-        for b in (ok, cancel, self.apply_btn):
+        ok = QPushButton(t("sb_save")); ok.setObjectName("primary"); ok.setDefault(True)
+        for b in (self.reset_btn, cancel, self.apply_btn, ok):
             b.setMinimumWidth(110)
             btns.addWidget(b)
         ok.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
+        self.reset_requested = False
+        self.reset_btn.clicked.connect(self._reset)
         self.apply_btn.clicked.connect(self._apply)
         self.apply_btn.setVisible(on_apply is not None)
-        outer.addLayout(btns)
+        outer.setContentsMargins(0, 0, 0, 0)
+        body.setContentsMargins(12, 12, 12, 10)
+        outer.addWidget(bar)
+        self._baseline = self.result_cfg(False)
+        self._dirty_timer = QTimer(self)
+        self._dirty_timer.timeout.connect(self._check_dirty)
+        self._dirty_timer.start(400)
+        self._check_dirty()
 
     def open_page(self, key: str):
         it = self._items.get(key)
@@ -1694,6 +1846,31 @@ class SettingsDialog(QDialog):
     def _apply(self):
         if self.on_apply is not None:
             self.on_apply(self.result_cfg())
+            self._baseline = self.result_cfg(False)
+            self._check_dirty()
+
+    def _check_dirty(self):
+        try:
+            cur = self.result_cfg(False)
+        except Exception:
+            return
+        n = sum(1 for k, v in cur.items() if self._baseline.get(k) != v)
+        self.dirty_lbl.setText(t("sb_dirty", n) if n else "")
+        self.dirty_icon.setVisible(bool(n))
+        self.reset_btn.setEnabled(bool(n))
+        self.apply_btn.setEnabled(bool(n))
+
+    def current_page(self) -> str:
+        it = self.nav.currentItem()
+        for k, v in self._items.items():
+            if v is it:
+                return k
+        return ""
+
+    def _reset(self):
+        """Throw away the changes: the window reopens on the same page with the saved values."""
+        self.reset_requested = True
+        self.reject()
 
     def _disk_fill(self, v: dict):
         self.prealloc.setChecked(bool(v.get("preallocate", False)))
@@ -1745,13 +1922,16 @@ class SettingsDialog(QDialog):
         except OSError as e:
             QMessageBox.warning(self, APP_TITLE, str(e))
 
-    def result_cfg(self) -> dict:
-        if self.autostart is not None:
+    def result_cfg(self, side_effects: bool = True) -> dict:
+        """The settings as edited. side_effects=False (the "changed" counter) touches nothing:
+        no autostart registry write, and a copy instead of the dialog's own dict."""
+        if side_effects and self.autostart is not None:
             try:
                 winint.set_autostart(self.autostart.isChecked())
             except OSError:
                 pass
-        c = self.cfg
+        import copy
+        c = self.cfg if side_effects else copy.deepcopy(self.cfg)
         c.update(save_path=self.path.text(), port=self.port.value(), dl_limit=self.dl.value(),
                  ul_limit=self.ul.value(), active_downloads=self.act_dl.value(),
                  max_connections=self.max_conn.value(), conn_per_torrent=self.conn_pt.value(),
@@ -1789,6 +1969,7 @@ class SettingsDialog(QDialog):
                  ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
                  name_icon=self.name_icon.currentData(), mica=self.mica.isChecked(),
                  compact_list=self.compact.isChecked(), list_grid=self.grid.isChecked(),
+                 tracker_promos=self.promos.isChecked(),
                  preallocate=self.prealloc.isChecked(), disk_write_mode=self.wmode.currentData(),
                  disk_os_cache=self.oscache.currentData(), disk_queue_mb=self.dqueue.value(),
                  aio_threads=self.aio.value(), hashing_threads=self.hthreads.value(),
@@ -2899,6 +3080,7 @@ class MainWindow(QMainWindow):
         self._quitting = False
         self._themed: list[tuple] = []        # (setter, icon name, colour key) for re-theming
         self._session_ending = False
+        self.toasts = ToastHost(self)
         QGuiApplication.instance().commitDataRequest.connect(self._on_session_end)
         self.taskbar = winint.Taskbar()
         self._tb_state = None
@@ -3171,12 +3353,10 @@ class MainWindow(QMainWindow):
             f = a.font(); f.setBold(on); a.setFont(f)
 
     def ask_restart(self):
-        box = QMessageBox(QMessageBox.Question, APP_TITLE, t("lang_restart_q"), QMessageBox.NoButton, self)
-        now = box.addButton(t("lang_restart_now"), QMessageBox.AcceptRole)
-        box.addButton(t("lang_restart_later"), QMessageBox.RejectRole)
-        box.setDefaultButton(now)
-        box.exec()
-        if box.clickedButton() is now:
+        from .swal import ask
+        ok, _ = ask(self, "question", t("lang_restart_q"), "", ok=t("lang_restart_now"),
+                    cancel=t("lang_restart_later"))
+        if ok:
             self.quit(restart=True)
 
     def backup_create(self):
@@ -3482,6 +3662,7 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setItemDelegateForColumn(C_PROG, ProgressDelegate(self.table))
+        self.table.setItemDelegateForColumn(C_NAME, NameDelegate(self.table))
         self.table.setItemDelegateForColumn(C_STATE, BadgeDelegate(self.table))
         hh = self.table.horizontalHeader()
         hh.setSortIndicator(C_QUEUE, Qt.AscendingOrder)   # the user's order (Up / Down) until a header is clicked
@@ -3722,6 +3903,8 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(box)
         lay.setContentsMargins(1, 6, 1, 1)
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("pillTabs")
+        self._tab_icons: list[str] = []
         self.tabs.setDocumentMode(True)
         self.tabs.setUsesScrollButtons(True)
 
@@ -3790,10 +3973,17 @@ class MainWindow(QMainWindow):
                            (self.stats_view, "tab_stats", "fa6s.chart-simple"),
                            (self.log, "tab_globallog", "fa6s.list")):
             i = self.tabs.addTab(w, t(key))
-            self._themed_icon(lambda q, i=i: self.tabs.setTabIcon(i, q), ic)
+            self._tab_icons.append(ic)
+            self._themed_icon(lambda q, i=i: self._tab_icon(i), ic)
         self.tabs.currentChanged.connect(lambda _: self.refresh_details())
+        self.tabs.currentChanged.connect(lambda _: [self._tab_icon(i) for i in range(len(self._tab_icons))])
         lay.addWidget(self.tabs)
         return box
+
+    def _tab_icon(self, i: int):
+        """Pill tabs: the selected one is a blue pill, so its icon turns white."""
+        on = i == self.tabs.currentIndex()
+        self.tabs.setTabIcon(i, qta.icon(self._tab_icons[i], color="#ffffff" if on else C["secondary"]))
 
     def _mk_table(self, keys, stretch):
         w = QTableWidget(0, len(keys))
@@ -3915,7 +4105,7 @@ class MainWindow(QMainWindow):
             msg = t("space_" + kind, name, fmt_size(free))
             self.log_event("error" if kind == "paused" else "torrent", msg)
             if kind == "paused":
-                self.notify(msg, "", folder=False)
+                self.notify(msg, "", folder=False, kind="warning")
         # power action once everything is downloaded
         if self.after_done != "none":
             if dl:
@@ -4127,16 +4317,13 @@ class MainWindow(QMainWindow):
         r = rows.get(failed[0])
         if r is None:
             return
-        box = QMessageBox(QMessageBox.Warning, t("miss_start_title"), t("miss_start", r.name, r.missing),
-                          QMessageBox.NoButton, self)
-        b_loc = box.addButton(t("miss_locate"), QMessageBox.AcceptRole)
-        b_re = box.addButton(t("miss_redl"), QMessageBox.DestructiveRole)
-        box.addButton(t("cancel"), QMessageBox.RejectRole)
-        box.setDefaultButton(b_loc)
-        box.exec()
-        if box.clickedButton() is b_loc:
+        from .swal import Swal
+        pick = Swal(self, "warning", t("miss_start_title"), t("miss_start", r.name, r.missing),
+                    [(t("miss_locate"), "primary"), (t("miss_redl"), "danger"), (t("cancel"), "")],
+                    default=0, cancel=2).exec()
+        if pick == 0:
             self.locate_keys([r.key])
-        elif box.clickedButton() is b_re:
+        elif pick == 1:
             # whatever is still there counts; the rest downloads again
             self.engine.recheck(r.key)
             self.engine.opts.setdefault(r.key, {})["start_after_check"] = True
@@ -4233,19 +4420,16 @@ class MainWindow(QMainWindow):
                 folder = save_path or self.cfg.get("save_path") or os.path.expanduser("~/Downloads")
                 have, total, got, full = self.engine.existing_files(ti, folder)
                 if have:
-                    box = QMessageBox(QMessageBox.Question, t("ex_title"),
-                                      t("ex_text", have, total, fmt_size(got), folder), QMessageBox.NoButton, self)
-                    b_check = box.addButton(t("ex_check"), QMessageBox.AcceptRole)
-                    b_seed = box.addButton(t("ex_seed"), QMessageBox.ActionRole) if full else None
-                    box.addButton(t("cancel"), QMessageBox.RejectRole)
-                    box.setDefaultButton(b_check)
+                    from .swal import Swal
+                    text = t("ex_text", have, total, fmt_size(got), folder)
+                    btns = [(t("ex_check"), "primary")] + ([(t("ex_seed"), "")] if full else []) + [(t("cancel"), "")]
                     if full:
-                        box.setInformativeText(t("ex_seed_hint"))
+                        text += "\n\n" + t("ex_seed_hint")
                     self.show_normal()
-                    box.exec()
-                    if box.clickedButton() is b_seed and b_seed is not None:
+                    pick = Swal(self, "question", t("ex_title"), text, btns, default=0, cancel=len(btns) - 1).exec()
+                    if full and pick == 1:
                         seed_mode = True
-                    elif box.clickedButton() is not b_check:
+                    elif pick != 0:
                         return
             if cross:
                 key = self.engine.add_cross(item, cross, paused=paused)
@@ -4266,6 +4450,7 @@ class MainWindow(QMainWindow):
             else:
                 label = os.path.basename(item)
             self.log_event("torrent", t("log_added", label))
+            self.toast("success", t("toast_added"), ti.name() if ti is not None else label)
             if not is_magnet and self.cfg.get("delete_torrent_file") and item.lower().endswith(".torrent"):
                 try:
                     os.remove(item)
@@ -4455,15 +4640,18 @@ class MainWindow(QMainWindow):
         if owe:
             lines = "\n".join(f"• {r.name[:70]} — {self.engine.hnr_left(r.key)}" for r in owe[:8])
             text += "\n\n" + t("hnr_remove_warn", lines)
-        box = QMessageBox(QMessageBox.Warning if owe else QMessageBox.Question, t("remove_title"), text,
-                          QMessageBox.Yes | QMessageBox.No, self)
-        cb = QCheckBox(t("remove_files"))
-        cb.setChecked(with_files)
-        box.setCheckBox(cb)
-        if box.exec() == QMessageBox.Yes:
+        from .swal import Swal
+        box = Swal(self, "warning" if owe else "danger", t("remove_title"), text,
+                   [(t("remove_btn"), "danger"), (t("cancel"), "")], default=0, cancel=1,
+                   checkbox=t("remove_files"))
+        box.check.setChecked(with_files)
+        if box.exec() == 0:
+            files = box.checked()
             for k in keys:
-                self.engine.remove(k, delete_files=cb.isChecked())
+                self.engine.remove(k, delete_files=files)
             self.tick()
+            self.toast("success", t("toast_removed", len(keys)),
+                       t("toast_removed_files") if files else t("toast_removed_kept"))
 
     def _queue_btns(self):
         on = bool(self.selected_keys())
@@ -4534,7 +4722,7 @@ class MainWindow(QMainWindow):
         import libtorrent as lt
         keys = self.selected_keys()
         if keys:
-            QGuiApplication.clipboard().setText(lt.make_magnet_uri(self.engine.handles[keys[0]]))
+            self.copy_text(lt.make_magnet_uri(self.engine.handles[keys[0]]), t("toast_copied_magnet"))
 
     def context_menu(self, pos):
         idx = self.table.indexAt(pos)
@@ -4633,12 +4821,17 @@ class MainWindow(QMainWindow):
             config.save(self.cfg)
             self.refresh_category_combo()
             self.log_event("torrent", t("imp_done", done, skipped))
-            QMessageBox.information(self, t("imp_title"), t("imp_done", done, skipped))
+            self.toast("success", t("imp_title"), t("imp_done", done, skipped))
             self.tick()
 
     # ── notifications ──────────────────────────────────────────
-    def notify(self, text: str, key: str, folder: bool):
-        """Windows toast with buttons; tray balloon if toasts are off or unavailable."""
+    def notify(self, text: str, key: str, folder: bool, kind: str = "info"):
+        """Window in front → toast inside it; otherwise a Windows toast with buttons, or the tray
+        balloon if toasts are off or unavailable."""
+        if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+            title, _, rest = text.partition("\n")
+            self.toast(kind, title, rest, (lambda: self.on_toast(f"show:{key}")) if key else None)
+            return
         if self.cfg.get("toasts", True) and self.notifier.available:
             buttons = ([(t("nt_open_folder"), f"open:{key}")] if folder else []) + [(t("nt_show"), f"show:{key}")]
             if self.notifier.show(APP_TITLE, text, buttons):
@@ -4802,9 +4995,10 @@ class MainWindow(QMainWindow):
             m.addSeparator()
             addr = self.peers_tbl.item(it.row(), 0).text()
             m.addAction(icon("fa6s.magnifying-glass", "primary"), t("pd_menu"), lambda: self.peer_dialog(key, addr))
-            m.addAction(icon("fa6s.copy"), t("peer_copy_ip"), lambda: QGuiApplication.clipboard().setText(ip))
+            m.addAction(icon("fa6s.copy"), t("peer_copy_ip"), lambda: self.copy_text(ip))
             m.addAction(icon("fa6s.ban", "danger"), t("peer_ban", ip),
-                        lambda: (self.engine.ban(ip, t("peer_ban_manual")), self.tick()))
+                        lambda: (self.engine.ban(ip, t("peer_ban_manual")), self.tick(),
+                                 self.toast("warning", t("toast_banned"), ip)))
         m.addAction(icon("fa6s.list"), t("bans_list") + f" ({len(self.engine.bans)})", self.bans_dialog)
         m.exec(self.peers_tbl.viewport().mapToGlobal(pos))
 
@@ -4971,11 +5165,15 @@ class MainWindow(QMainWindow):
                     self.engine.set_task_props(k, {x: task[x] for x in ("dht", "pex", "lsd") if x in task})
 
     def settings_dialog(self, page: str = ""):
-        d = SettingsDialog(self.cfg, self, on_apply=self._apply_settings)
-        if page:
-            d.open_page(page)
-        if d.exec():
-            self._apply_settings(d.result_cfg())
+        while True:
+            d = SettingsDialog(self.cfg, self, on_apply=self._apply_settings)
+            if page:
+                d.open_page(page)
+            if d.exec():
+                self._apply_settings(d.result_cfg())
+            if not d.reset_requested:
+                return
+            page = d.current_page()                 # "Reset": same page, saved values
 
     def _apply_settings(self, new_cfg: dict):
         if True:
@@ -4984,12 +5182,14 @@ class MainWindow(QMainWindow):
             old_lang = self.cfg.get("language", "ru")
             self.cfg.update(new_cfg)
             config.save(self.cfg)
+            self.toast("success", t("toast_settings"))
             ProgressDelegate.style = self.cfg.get("progress_style", "classic")
             TorrentModel.name_icon = self.cfg.get("name_icon", "state")
             self.set_compact(bool(self.cfg.get("compact_list")))
             GridTableView.grid = bool(self.cfg.get("list_grid"))
             self.table.viewport().update()
             self.engine.apply_settings(self.cfg)
+            self.engine.refresh_promos(force=True)
             self.set_mini(bool(self.cfg.get("mini_widget")))
             self._sched_state = None             # re-apply schedule limits on next tick
             self.refresh_category_combo()
@@ -5055,13 +5255,13 @@ class MainWindow(QMainWindow):
         while self.engine.finished_names:
             name, key = self.engine.finished_names.pop(0)
             self.log_event("torrent", t("finished_note", name))
-            self.notify(t("finished_note", name), key, folder=True)
+            self.notify(t("finished_note", name), key, folder=True, kind="success")
             self._run_done_action(key)
 
         bad = {r.key for r in rows if r.state == "tracker_error"}
         for r in rows:
             if r.key in bad and r.key not in self._tr_bad:
-                self.notify(f"{t('toast_tr_error')}: {r.name}\n{r.error}", r.key, folder=False)
+                self.notify(f"{t('toast_tr_error')}: {r.name}\n{r.error}", r.key, folder=False, kind="error")
         self._tr_bad = bad
 
         self.refresh_tag_combo()
@@ -5080,10 +5280,10 @@ class MainWindow(QMainWindow):
             name, key, err = self.engine.moved_names.pop(0)
             if err:
                 self.log_event("error", t("mv_failed", name, err))
-                self.notify(t("mv_failed", name, err), key, folder=False)
+                self.notify(t("mv_failed", name, err), key, folder=False, kind="error")
             else:
                 self.log_event("torrent", t("mv_done", name))
-                self.notify(t("mv_done", name), key, folder=True)
+                self.notify(t("mv_done", name), key, folder=True, kind="success")
         while self.engine.checked_names:
             name, key, prog = self.engine.checked_names.pop(0)
             msg = t("rc_done", name, f"{prog:.1%}".replace(".0%", "%"))
@@ -5383,6 +5583,21 @@ class MainWindow(QMainWindow):
         self.quit()
         e.accept()
 
+    def toast(self, kind: str, title: str, text: str = "", on_click=None):
+        """In-window notification (when the window is hidden it goes to Windows instead)."""
+        if not self.isVisible() or self.isMinimized():
+            return
+        self.toasts.show(kind, title, text, on_click)
+
+    def copy_text(self, text: str, what: str = ""):
+        QGuiApplication.clipboard().setText(text)
+        self.toast("info", t("toast_copied"), what or (text if len(text) < 80 else text[:77] + "…"))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if hasattr(self, "toasts"):
+            self.toasts.layout()
+
     def request_quit(self):
         """Quit asked for by the user (button, tray, Ctrl+Q): confirm first unless turned off."""
         if self._confirm_quit():
@@ -5395,24 +5610,13 @@ class MainWindow(QMainWindow):
         dl = sum(1 for r in rows if r.state in ("downloading", "metadata")
                  or (r.state == "tracker_error" and r.progress < 1))
         seed = sum(1 for r in rows if r.state == "seeding" or (r.state == "tracker_error" and r.progress >= 1))
-        box = QMessageBox(QMessageBox.Question, t("quit_title"), t("quit_q"), QMessageBox.NoButton,
-                          self if self.isVisible() else None)
-        if dl or seed:
-            box.setInformativeText(t("quit_active", dl, seed))
-        yes = box.addButton(t("quit"), QMessageBox.AcceptRole)
-        yes.setObjectName("danger")
-        box.addButton(t("cancel"), QMessageBox.RejectRole)
-        box.setDefaultButton(yes)
-        cb = QCheckBox(t("quit_dont_ask"))
-        box.setCheckBox(cb)
-        box.setWindowIcon(app_icon())
-        from PySide6.QtWidgets import QSizePolicy, QSpacerItem
-        g = box.layout()                        # QMessageBox is a grid: widen it so the text isn't a column
-        g.addItem(QSpacerItem(420, 0, QSizePolicy.Minimum, QSizePolicy.Expanding), g.rowCount(), 0, 1, g.columnCount())
-        box.exec()
-        if box.clickedButton() is not yes:
+        from .swal import ask
+        ok, dont_ask = ask(self if self.isVisible() else None, "quit", t("quit_q"),
+                           t("quit_active", dl, seed) if dl or seed else "",
+                           ok=t("quit"), ok_style="danger", checkbox=t("quit_dont_ask"))
+        if not ok:
             return False
-        if cb.isChecked():
+        if dont_ask:
             self.cfg["confirm_quit"] = False
             config.save(self.cfg)
         return True

@@ -134,6 +134,8 @@ def main() -> int:
     theme.apply(app, cfg.get("theme", "system"), cfg.get("ui_style", "soft"),
                 mica=bool(cfg.get("mica", True)) and winint.mica_supported())
     app.setWindowIcon(app_icon())
+    from . import swal
+    swal.install()              # site-style (SweetAlert-like) message boxes everywhere
 
     engine = Engine(config.data_dir(), cfg)
     win = MainWindow(engine, cfg)
