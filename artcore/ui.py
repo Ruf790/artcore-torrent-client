@@ -2719,6 +2719,21 @@ class MainWindow(QMainWindow):
         ibtn("fa6s.clock-rotate-left", t("hist_tip") + " (Ctrl+H)", self.history_dialog)
         ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
+        self.lang_btn = QToolButton()
+        self.lang_btn.setObjectName("iconBtn")
+        self.lang_btn.setToolTip(t("lang_tip"))
+        self.lang_btn.setCursor(Qt.PointingHandCursor)
+        self.lang_btn.setText("EN" if self.cfg.get("language") == "en" else "RU")
+        self.lang_btn.setStyleSheet("font-weight: 700; font-size: 8pt;")
+        self.lang_btn.setPopupMode(QToolButton.InstantPopup)
+        lm = QMenu(self.lang_btn)
+        for code, name, flag in (("ru", "Русский", "ru"), ("en", "English", "gb")):
+            a = lm.addAction(widgets.flag_icon(flag) or QIcon(), name)
+            a.setData(code)
+            a.triggered.connect(lambda _=False, c=code: self.set_language(c))
+        self.lang_btn.setMenu(lm)
+        self._mark_lang()
+        lay.addWidget(self.lang_btn)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
         ibtn("fa6s.circle-info", t("about") + " (F1)", self.about_dialog)
         a = QAction(self); a.setShortcut(QKeySequence("F1")); a.triggered.connect(self.about_dialog)
@@ -2729,6 +2744,33 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda _=False, w=where: self.queue_move(w))
             self.addAction(a)
         return h
+
+    def set_language(self, lang: str):
+        """RU / EN: saved at once; the window is built in one language, so offer a restart."""
+        if lang == self.cfg.get("language", "ru"):
+            return
+        self.cfg["language"] = lang
+        config.save(self.cfg)
+        self._mark_lang()
+        self.ask_restart()
+
+    def _mark_lang(self):
+        """Current language in bold with a tick (a checkable action with an icon shows no tick)."""
+        cur = self.cfg.get("language", "ru")
+        self.lang_btn.setText("EN" if cur == "en" else "RU")
+        for a in self.lang_btn.menu().actions():
+            on = a.data() == cur
+            a.setText(("Русский" if a.data() == "ru" else "English") + ("   ✓" if on else ""))
+            f = a.font(); f.setBold(on); a.setFont(f)
+
+    def ask_restart(self):
+        box = QMessageBox(QMessageBox.Question, APP_TITLE, t("lang_restart_q"), QMessageBox.NoButton, self)
+        now = box.addButton(t("lang_restart_now"), QMessageBox.AcceptRole)
+        box.addButton(t("lang_restart_later"), QMessageBox.RejectRole)
+        box.setDefaultButton(now)
+        box.exec()
+        if box.clickedButton() is now:
+            self.quit(restart=True)
 
     def about_dialog(self):
         AboutDialog(self).exec()
@@ -4267,6 +4309,7 @@ class MainWindow(QMainWindow):
         if True:
             old_theme = (self.cfg.get("theme"), self.cfg.get("ui_style"))
             old_net = (self.cfg.get("ip_filter"), self.cfg.get("geoip"))
+            old_lang = self.cfg.get("language", "ru")
             self.cfg.update(new_cfg)
             config.save(self.cfg)
             ProgressDelegate.style = self.cfg.get("progress_style", "classic")
@@ -4280,6 +4323,9 @@ class MainWindow(QMainWindow):
             if (self.cfg.get("theme"), self.cfg.get("ui_style")) != old_theme:
                 theme.apply(QApplication.instance(), self.cfg["theme"], self.cfg.get("ui_style", "soft"))
                 self.retheme()
+            if self.cfg.get("language", "ru") != old_lang:
+                self._mark_lang()
+                QTimer.singleShot(0, self.ask_restart)      # after the settings window has closed
 
     # ── refresh ────────────────────────────────────────────────
     def tick(self):
@@ -4652,7 +4698,7 @@ class MainWindow(QMainWindow):
         self.quit()
         e.accept()
 
-    def quit(self, installer: str = ""):
+    def quit(self, installer: str = "", restart: bool = False):
         if self._quitting:
             return
         self._quitting = True
@@ -4670,4 +4716,25 @@ class MainWindow(QMainWindow):
             from . import updater
             winint.release_mutex()
             updater.run_installer(installer)
+        elif restart:
+            self._relaunch()
         QApplication.quit()
+
+    def _relaunch(self):
+        """Start a new copy (it waits until this one is gone) — used after a language switch."""
+        import subprocess
+        import sys
+        srv = getattr(self, "server", None)
+        if srv is not None:
+            srv.close()
+        winint.release_mutex()
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable]
+        else:
+            cmd = [sys.executable, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "run.py")]
+        cmd.append("--restarted")
+        flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0   # DETACHED_PROCESS | NEW_PROCESS_GROUP
+        try:
+            subprocess.Popen(cmd, close_fds=True, creationflags=flags, cwd=os.path.dirname(cmd[-2]) if len(cmd) > 2 else None)
+        except OSError as e:
+            QMessageBox.warning(self, APP_TITLE, str(e))
