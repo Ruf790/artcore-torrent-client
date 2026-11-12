@@ -3193,7 +3193,7 @@ class MainWindow(QMainWindow):
             b.setObjectName("sbItem")
             b.setAutoRaise(True)
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-            b.setIconSize(QSize(12, 12))
+            b.setIconSize(QSize(14, 14))
             b.setToolTip(tip)
             if slot:
                 b.setCursor(Qt.PointingHandCursor)

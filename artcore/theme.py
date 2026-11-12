@@ -516,10 +516,13 @@ QMenu::item {{ padding: 6px 22px 6px 10px; border-radius: 4px; margin: 1px 0; }}
 QMenu::item:selected {{ background: {shade}; color: {c['body']}; }}
 QToolTip {{ border-radius: 4px; }}
 QStatusBar {{ background: {c['page_bg']}; border-top: 1px solid {c['border']}; }}
-QToolButton#sbItem {{ border-left: none; border-radius: 4px; margin: 1px; }}
+QToolButton#sbItem {{ border-left: none; border-radius: 4px; margin: 1px; font-size: 9pt; color: {c['body']};
+  padding: 3px 9px; }}
 QToolButton#sbItem:hover {{ background: {shade}; color: {c['body']}; }}
 """ + (f"""
 /* Mica: DWM paints the backdrop wherever the main window itself draws nothing */
-QMainWindow, QMainWindow > QWidget#page, QStatusBar {{ background: transparent; }}
+QMainWindow, QMainWindow > QWidget#page {{ background: transparent; }}
+/* small text right on the backdrop turns soft (grayscale AA over DWM): the status bar stays opaque */
+QStatusBar {{ background: {c['page_bg']}; }}
 QFrame#card, QFrame#headCard, QFrame#kpi {{ background: {'rgba(43,43,43,235)' if dark else 'rgba(255,255,255,225)'}; }}
 """ if mica_active() else "")
