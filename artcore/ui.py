@@ -114,20 +114,27 @@ STATE_STYLE = {
     "queued":      ("muted_subtle",   "secondary"),
     "error":       ("danger_subtle",  "danger_text"),
     "tracker_error": ("danger_subtle", "danger_text"),
+    "moving":      ("info_subtle",    "info_text"),
+    "missing":     ("danger_subtle",  "danger_text"),
 }
 STATE_ICON = {
     "downloading": "fa6s.arrow-down", "metadata": "fa6s.magnet", "checking": "fa6s.rotate",
     "seeding": "fa6s.arrow-up", "finished": "fa6s.check", "paused": "fa6s.pause", "stopped": "fa6s.stop",
     "queued": "fa6s.clock", "error": "fa6s.triangle-exclamation",
-    "tracker_error": "fa6s.server",
+    "tracker_error": "fa6s.server", "moving": "fa6s.truck-moving", "missing": "fa6s.folder-closed",
 }
 FILTER_STATES = {
     "all":         None,
     "downloading": {"downloading", "metadata", "checking"},
     "seeding":     {"seeding", "finished"},
-    "paused":      {"paused", "stopped", "queued"},
-    "error":       {"error", "tracker_error"},
+    "paused":      {"paused", "stopped", "queued", "missing"},
+    "error":       {"error", "tracker_error", "missing"},
 }
+
+
+def state_text(r) -> str:
+    text = t("st_moving_pct", r.moving) if r.state == "moving" and r.moving > 0 else t("st_" + r.state)
+    return t("forced_mark", text) if r.forced else text
 
 
 class TorrentModel(QAbstractTableModel):
@@ -152,7 +159,7 @@ class TorrentModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return {
                 C_NAME: r.name, C_SIZE: fmt_size(r.size), C_PROG: f"{r.progress * 100:.1f}%",
-                C_STATE: t("forced_mark", t("st_" + r.state)) if r.forced else t("st_" + r.state),
+                C_STATE: state_text(r),
                 C_DOWN: ("↓ " + fmt_speed(r.down_rate)) if r.down_rate > 0 else "",
                 C_UP: ("↑ " + fmt_speed(r.up_rate)) if r.up_rate > 0 else "",
                 C_SEEDS: str(r.seeds), C_PEERS: str(r.peers), C_RATIO: fmt_ratio(r.ratio),
@@ -203,6 +210,8 @@ class TorrentModel(QAbstractTableModel):
             f.setWeight(QFont.DemiBold)
             return f
         if role == Qt.ToolTipRole:
+            if r.missing and c in (C_STATE, C_NAME, C_PROG):
+                return t("missing_tip", r.missing)
             if c == C_STATE and r.hnr and not r.error:
                 return t("hnr_tip", r.hnr)
             if c in (C_STATE, C_QUEUE) and r.forced and not r.error:
@@ -243,6 +252,7 @@ class FilterProxy(QSortFilterProxyModel):
         self.category = ""
         self.tag = ""
         self.text = ""
+        self.sidebar: dict | None = None     # FilterSidebar.active while the sidebar is on
         self.setSortRole(Qt.UserRole)
 
     def set_filter(self, state=None, tracker=None, text=None, category=None, tag=None):
@@ -258,14 +268,30 @@ class FilterProxy(QSortFilterProxyModel):
             self.text = text.lower().strip()
         self.invalidateFilter()
 
+    def set_sidebar(self, active: dict | None):
+        self.sidebar = active
+        self.invalidateFilter()
+
+    def _text_ok(self, r) -> bool:
+        """Name (every word, any order) or the start of the info-hash."""
+        if not self.text:
+            return True
+        name = r.name.lower()
+        if all(w in name for w in self.text.split()):
+            return True
+        return len(self.text) >= 6 and r.key.startswith(self.text)
+
     def filterAcceptsRow(self, row, parent):
         r = self.sourceModel().rows[row]
+        if self.sidebar is not None:
+            from .panels import sidebar_match
+            return sidebar_match(r, self.sidebar) and self._text_ok(r)
         states = FILTER_STATES[self.state]
         return ((states is None or r.state in states)
                 and (not self.tracker or r.tracker_host == self.tracker)
                 and (not self.category or r.category == ("" if self.category == NO_CATEGORY else self.category))
                 and (not self.tag or (not r.tags if self.tag == NO_TAG else self.tag in r.tags))
-                and (not self.text or self.text in r.name.lower()))
+                and self._text_ok(r))
 
 
 def _row_of(index) -> TorrentRow:
@@ -390,9 +416,7 @@ class BadgeDelegate(QStyledItemDelegate):
         _paint_cell_bg(painter, option)
         bg, fg = STATE_STYLE.get(r.state, ("muted_subtle", "secondary"))
         f = painter.font(); f.setPointSizeF(8.5); f.setWeight(QFont.DemiBold); painter.setFont(f)
-        text = t("st_" + r.state)
-        if r.forced:
-            text = t("forced_mark", text)
+        text = state_text(r)
         fm = QFontMetrics(f)
         room = option.rect.width() - 12 - 36          # pill never spills past the cell
         if fm.horizontalAdvance(text) > room:
@@ -1015,6 +1039,10 @@ class StatsView(QTableWidget):
             (t("st_all_down"), f"{fmt_size(all_dl)}  {t('st_session', fmt_size(st['session_down']))}"),
             (t("st_all_up"), f"{fmt_size(all_ul)}  {t('st_session', fmt_size(st['session_up']))}"),
             (t("st_ratio"), f"{ratio:.3f}"),
+            (t("st_all_uptime"), t("st_all_uptime_v", _fmt_uptime(st["all_uptime"]), st["sessions"])),
+            (t("st_completed_n"), f"{st['added']} / {st['completed']}"),
+            (t("st_peaks"), f"↓ {fmt_size(st['peak_down'])}/s   ↑ {fmt_size(st['peak_up'])}/s"),
+            (t("st_wasted"), f"{fmt_size(st['wasted'])}  {t('st_session', fmt_size(st['session_wasted']))}"),
             t("sg_trackers"),
             *[(f"{host}  ({n})", t("st_tracker_v", fmt_size(up), fmt_size(down),
                                      f"{up / down:.2f}" if down else ("∞" if up else "—")))
@@ -2399,11 +2427,18 @@ class AboutDialog(QDialog):
         close.setObjectName("primary")
         close.setDefault(True)
         close.clicked.connect(self.accept)
+        kb = QPushButton(icon("fa6s.keyboard"), t("kb_title"))
+        kb.clicked.connect(self._keys)
         btns.addWidget(upd)
         btns.addWidget(cp)
+        btns.addWidget(kb)
         btns.addStretch()
         btns.addWidget(close)
         lay.addLayout(btns)
+
+    def _keys(self):
+        from .panels import ShortcutsDialog
+        ShortcutsDialog(self).exec()
 
     def _check(self):
         if self.main is not None and hasattr(self.main, "check_updates"):
@@ -2538,6 +2573,8 @@ class MainWindow(QMainWindow):
         split.setSizes([470, 210])
         root.addWidget(split, 1)
         self._build_statusbar()
+        self._build_shortcuts()
+        self._fetchers: list = []
 
         self._build_tray()
         from .notify import Notifier
@@ -2567,6 +2604,69 @@ class MainWindow(QMainWindow):
         self.tick()
 
     # ── building blocks ────────────────────────────────────────
+    def _typing(self) -> bool:
+        """Focus is in a text field — plain keys (Enter, Space, F5 …) belong to it, not to the list."""
+        from PySide6.QtWidgets import QAbstractSpinBox
+        w = QApplication.focusWidget()
+        return isinstance(w, (QLineEdit, QAbstractSpinBox)) or (isinstance(w, QComboBox) and w.isEditable())
+
+    def _build_shortcuts(self):
+        """Window-wide keys (the list itself never takes focus). See ShortcutsDialog for the list."""
+        def key(seq, slot, plain=False):
+            a = QAction(self)
+            a.setShortcut(QKeySequence(seq))
+            a.setShortcutContext(Qt.WindowShortcut)
+            a.triggered.connect((lambda: None if self._typing() else slot()) if plain else slot)
+            self.addAction(a)
+        key("Ctrl+V", self.paste_items)
+        key("Ctrl+S", lambda: self.start_selected())
+        key("Ctrl+P", lambda: self._each(self.engine.pause))
+        key("Ctrl+Shift+S", lambda: self._each(self.engine.stop))
+        key("Ctrl+Shift+F", lambda: self._each(self.engine.force_start))
+        key("Shift+Delete", lambda: self.remove_selected(with_files=True))
+        key("Ctrl+R", self.recheck_selected)
+        key("F5", lambda: self._each(self.engine.reannounce), plain=True)
+        key("Ctrl+Shift+M", self.move_selected)
+        key("Ctrl+M", self.copy_magnet)
+        key("Return", self.open_folder, plain=True)
+        key("Enter", self.open_folder, plain=True)
+        key("Alt+Return", self.properties_dialog)
+        key("Ctrl+F", self.focus_search)
+        key("Escape", self.escape)
+        key("Ctrl+B", lambda: self.set_sidebar(not self.sidebar.isVisible()))
+        key("Ctrl+I", self.stats_window)
+        key("Ctrl+H", self.history_dialog)
+        key("Ctrl+,", self.settings_dialog)
+        key("Ctrl+/", self.shortcuts_dialog)
+        key("Ctrl+Q", self.quit)
+
+    def focus_search(self):
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def escape(self):
+        if self.search.hasFocus() or self.search.text():
+            self.search.clear()
+            self.search.clearFocus()
+        else:
+            self.table.clearSelection()
+
+    def shortcuts_dialog(self):
+        from .panels import ShortcutsDialog
+        ShortcutsDialog(self).exec()
+
+    def stats_window(self):
+        from .panels import StatsDialog
+        w = getattr(self, "_stats_win", None)
+        if w is None or not w.isVisible():
+            self._stats_win = w = StatsDialog(self, self)
+            w.setAttribute(Qt.WA_DeleteOnClose)
+            w.destroyed.connect(lambda *_: setattr(self, "_stats_win", None))
+            w.show()
+        else:
+            w.raise_()
+            w.activateWindow()
+
     def _themed_icon(self, setter, name, key="secondary"):
         self._themed.append((setter, name, key))
 
@@ -2615,7 +2715,8 @@ class MainWindow(QMainWindow):
         self.power_pill.hide()
         self._themed_icon(self.power_pill.setIcon, "fa6s.power-off", "danger")
         lay.addWidget(self.power_pill)
-        ibtn("fa6s.clock-rotate-left", t("hist_tip"), self.history_dialog)
+        ibtn("fa6s.chart-column", t("sw_open"), self.stats_window)
+        ibtn("fa6s.clock-rotate-left", t("hist_tip") + " (Ctrl+H)", self.history_dialog)
         ibtn("fa6s.file-import", t("imp_title"), self.import_dialog)
         self.theme_btn = ibtn("fa6s.moon", t("theme_toggle"), self.toggle_theme)
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
@@ -2748,7 +2849,7 @@ class MainWindow(QMainWindow):
         btn("add_magnet", "fa6s.magnet", self.add_magnet_dialog, color="ic_magnet", shortcut="Ctrl+U")
         btn("create_torrent", "fa6s.file-circle-plus", self.create_torrent_dialog, color="ic_create", shortcut="Ctrl+N")
         lay.addWidget(vsep())
-        b = btn("start", "fa6s.play", lambda: self._each(self.engine.resume, all_if_none=True), color="success")
+        b = btn("start", "fa6s.play", lambda: self.start_selected(all_if_none=True), color="success")
         b.setToolTip(t("start_tip"))
         b = btn("pause", "fa6s.pause", lambda: self._each(self.engine.pause, all_if_none=True), color="secondary")
         b.setToolTip(t("pause_tip"))
@@ -2759,9 +2860,20 @@ class MainWindow(QMainWindow):
         btn("remove", "fa6s.trash-can", self.remove_selected, "danger", color="danger", shortcut="Delete")
         lay.addStretch()
 
+        self.sb_btn = QToolButton()
+        self.sb_btn.setObjectName("iconBtn")
+        self.sb_btn.setCheckable(True)
+        self.sb_btn.setToolTip(t("sb_toggle_tip"))
+        self.sb_btn.setCursor(Qt.PointingHandCursor)
+        self.sb_btn.setIconSize(QSize(15, 15))
+        self.sb_btn.clicked.connect(lambda on: self.set_sidebar(on))
+        self._themed_icon(self.sb_btn.setIcon, "fa6s.table-columns", "head_ic")
+        lay.addWidget(self.sb_btn)
+
         self.search = QLineEdit()
         self.search.setObjectName("search")
-        self.search.setPlaceholderText(t("search_ph"))
+        self.search.setPlaceholderText(t("search_ph2"))
+        self.search.setToolTip(t("kb_search") + " (Ctrl+F)")
         self.search.setClearButtonEnabled(True)
         self.search_act = self.search.addAction(QIcon(), QLineEdit.LeadingPosition)
         self._themed_icon(self.search_act.setIcon, "fa6s.magnifying-glass")
@@ -2787,7 +2899,8 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(1, 10, 1, 1)
         lay.setSpacing(8)
 
-        pills = QHBoxLayout()
+        self.pill_bar = QWidget()
+        pills = QHBoxLayout(self.pill_bar)
         pills.setContentsMargins(12, 0, 12, 0)
         pills.setSpacing(6)
         self.pill_group = QButtonGroup(self)
@@ -2831,7 +2944,7 @@ class MainWindow(QMainWindow):
         pills.addWidget(self.cat_combo)
         pills.addWidget(self.tag_combo)
         pills.addWidget(self.tracker_combo)
-        lay.addLayout(pills)
+        lay.addWidget(self.pill_bar)
 
         self.model = TorrentModel()
         self.proxy = FilterProxy()
@@ -2857,7 +2970,7 @@ class MainWindow(QMainWindow):
         hh.setSectionsMovable(True)
         hh.setContextMenuPolicy(Qt.CustomContextMenu)
         hh.customContextMenuRequested.connect(self.columns_menu)
-        for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 145), (C_DOWN, 120), (C_UP, 120),
+        for c, w in ((C_SIZE, 90), (C_PROG, 150), (C_STATE, 165), (C_DOWN, 120), (C_UP, 120),
                      (C_SEEDS, 55), (C_PEERS, 55), (C_RATIO, 65), (C_ETA, 80), (C_TRACKER, 150), (C_CAT, 110)):
             self.table.setColumnWidth(c, w)
         for c in HIDDEN_COLS:
@@ -2889,8 +3002,101 @@ class MainWindow(QMainWindow):
         self.list_stack = QStackedWidget()
         self.list_stack.addWidget(self.table)
         self.list_stack.addWidget(empty)
-        lay.addWidget(self.list_stack, 1)
+
+        from .panels import FilterSidebar
+        self.sidebar = FilterSidebar()
+        self.sidebar.changed.connect(lambda *_: self.proxy.invalidateFilter())
+        self.sidebar.action.connect(self._sidebar_action)
+        self.hsplit = QSplitter(Qt.Horizontal)
+        self.hsplit.setChildrenCollapsible(False)
+        self.hsplit.addWidget(self.sidebar)
+        self.hsplit.addWidget(self.list_stack)
+        self.hsplit.setStretchFactor(1, 1)
+        self.hsplit.setSizes([215, 1000])
+        lay.addWidget(self.hsplit, 1)
+
+        # "drop here" hint over the list while something addable is dragged onto the window
+        self.drop_hint = QLabel(box)
+        self.drop_hint.setAlignment(Qt.AlignCenter)
+        self.drop_hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.drop_hint.hide()
+        self._list_box = box
         return box
+
+    def _show_drop_hint(self, on: bool):
+        if not on:
+            self.drop_hint.hide()
+            return
+        ic = qta.icon("fa6s.file-arrow-down", color=C["primary"]).pixmap(40, 40)
+        from PySide6.QtCore import QBuffer, QIODevice
+        buf = QBuffer(); buf.open(QIODevice.WriteOnly); ic.save(buf, "PNG")
+        img = bytes(buf.data().toBase64()).decode()
+        self.drop_hint.setText(f'<img src="data:image/png;base64,{img}"><br>'
+                               f'<span style="font-size:15pt; font-weight:600; color:{C["primary_text"]}">{t("drop_here")}</span><br>'
+                               f'<span style="color:{C["secondary"]}">{t("drop_hint")}</span>')
+        bg = QColor(C["primary_subtle"]); bg.setAlpha(225)
+        self.drop_hint.setStyleSheet(f"background: rgba({bg.red()},{bg.green()},{bg.blue()},{bg.alpha()});"
+                                     f"border: 2px dashed {C['primary']}; border-radius: 12px;")
+        self.drop_hint.setGeometry(self._list_box.rect().adjusted(8, 8, -8, -8))
+        self.drop_hint.raise_()
+        self.drop_hint.show()
+
+    # ── filter sidebar ─────────────────────────────────────────
+    def set_sidebar(self, on: bool):
+        """The sidebar replaces the status buttons + drop-downs (one set of filters at a time)."""
+        self.cfg["sidebar"] = on
+        self.sidebar.setVisible(on)
+        self.pill_bar.setVisible(not on)
+        self.sb_btn.setChecked(on)
+        self.sidebar.reset()
+        self.pills["all"].setChecked(True)
+        for cb in (self.cat_combo, self.tag_combo, self.tracker_combo):
+            cb.setCurrentIndex(0)
+        self.proxy.state, self.proxy.category, self.proxy.tag, self.proxy.tracker = "all", "", "", ""
+        self.proxy.set_sidebar(self.sidebar.active if on else None)
+
+    def _sidebar_keys(self, sec: str, key: str) -> list[str]:
+        from .panels import sidebar_match
+        act = {"status": "all", "category": "", "tag": "", "tracker": ""}
+        act[sec] = key
+        return [r.key for r in self.model.rows if sidebar_match(r, act)]
+
+    def _sidebar_action(self, what: str, sec: str, key: str):
+        if what == "hide":
+            self.set_sidebar(False)
+        elif what in ("start", "pause", "stop"):
+            keys = self._sidebar_keys(sec, key)
+            if what == "start":
+                self.start_keys(keys)
+            else:
+                for k in keys:
+                    (self.engine.pause if what == "pause" else self.engine.stop)(k)
+                self.tick()
+        elif what == "cat_new":
+            name, ok = QInputDialog.getText(self, t("set_grp_cats"), t("cat_prompt"))
+            name = name.strip()
+            if ok and name and name not in [c["name"] for c in self.cfg.get("categories", [])]:
+                self.cfg.setdefault("categories", []).append({"name": name, "path": ""})
+                config.save(self.cfg)
+                self.refresh_category_combo()
+                self.tick()
+        elif what == "cat_del":
+            if QMessageBox.question(self, APP_TITLE, t("sb_cat_del_q", key)) == QMessageBox.Yes:
+                self.cfg["categories"] = [c for c in self.cfg.get("categories", []) if c.get("name") != key]
+                config.save(self.cfg)
+                for r in self.model.rows:
+                    if r.category == key:
+                        self.engine.set_category(r.key, "")
+                self.refresh_category_combo()
+                self.tick()
+        elif what == "tag_del":
+            if QMessageBox.question(self, APP_TITLE, t("sb_tag_del_q", key)) == QMessageBox.Yes:
+                self.cfg["tags"] = [g for g in self.cfg.get("tags", []) if g != key]
+                config.save(self.cfg)
+                for r in self.model.rows:
+                    if key in r.tags:
+                        self.engine.set_tags(r.key, [g for g in r.tags if g != key])
+                self.tick()
 
     # Summary layout: (left key, right key) per row, like BitComet's two-column summary
     SUM_TRANSFER = [("gen_active", "gen_eta"), ("gen_downloaded", "gen_uploaded"),
@@ -3341,6 +3547,10 @@ class MainWindow(QMainWindow):
         self.theme_btn.setIcon(icon("fa6s.sun" if dark else "fa6s.moon", "head_ic"))
         winint.set_title_bar(int(self.winId()), dark, C["page_bg"], C["emphasis"])
         self.table.viewport().update()
+        self.sidebar._keys = {k: [] for k in self.sidebar._keys}     # rebuild with icons in the new colours
+        self.sidebar.retheme()
+        self.sidebar.refresh(self.model.rows, [c["name"] for c in self.cfg.get("categories", [])],
+                             self.engine.all_tags())
 
     def toggle_theme(self):
         self.cfg["theme"] = "light" if theme.current_name == "dark" else "dark"
@@ -3361,6 +3571,70 @@ class MainWindow(QMainWindow):
         keys = self.selected_keys() or (self.visible_keys() if all_if_none else [])
         for k in keys:
             fn(k)
+        self.tick()
+
+    def start_selected(self, all_if_none: bool = False):
+        keys = self.selected_keys() or (self.visible_keys() if all_if_none else [])
+        self.start_keys(keys)
+
+    def start_keys(self, keys: list[str]):
+        """Start; torrents whose files are missing stay stopped and the user is asked what to do."""
+        failed = [k for k in keys if not self.engine.resume(k)]
+        self.tick()
+        if not failed:
+            return
+        rows = {r.key: r for r in self.model.rows}
+        if len(failed) > 1:
+            QMessageBox.warning(self, t("miss_start_title"), t("miss_start_n", len(failed)))
+            return
+        r = rows.get(failed[0])
+        if r is None:
+            return
+        box = QMessageBox(QMessageBox.Warning, t("miss_start_title"), t("miss_start", r.name, r.missing),
+                          QMessageBox.NoButton, self)
+        b_loc = box.addButton(t("miss_locate"), QMessageBox.AcceptRole)
+        b_re = box.addButton(t("miss_redl"), QMessageBox.DestructiveRole)
+        box.addButton(t("cancel"), QMessageBox.RejectRole)
+        box.setDefaultButton(b_loc)
+        box.exec()
+        if box.clickedButton() is b_loc:
+            self.locate_keys([r.key])
+        elif box.clickedButton() is b_re:
+            # whatever is still there counts; the rest downloads again
+            self.engine.recheck(r.key)
+            self.engine.opts.setdefault(r.key, {})["start_after_check"] = True
+            self.tick()
+
+    def recheck_selected(self):
+        keys = self.selected_keys()
+        if not keys:
+            return
+        if QMessageBox.question(self, t("rc_title"), t("rc_q", len(keys))) != QMessageBox.Yes:
+            return
+        for k in keys:
+            self.engine.recheck(k)
+        self.tick()
+
+    def locate_keys(self, keys: list[str]):
+        """Set files location: the files were moved by hand — point the torrent(s) at them."""
+        rows = {r.key: r for r in self.model.rows}
+        for k in keys:
+            r = rows.get(k)
+            if r is None:
+                continue
+            start = r.missing or r.save_path
+            while start and not os.path.isdir(start):
+                parent = os.path.dirname(start)
+                start = "" if parent == start else parent
+            d = QFileDialog.getExistingDirectory(self, t("loc_title", r.name), start)
+            if not d:
+                continue
+            d = os.path.normpath(d)
+            # picked the torrent's own folder instead of the one that holds it — take its parent
+            if os.path.basename(d) == r.name and not os.path.exists(os.path.join(d, r.name)):
+                d = os.path.dirname(d)
+            self.engine.locate(k, d)
+            self.log_event("torrent", t("loc_started", r.name, d))
         self.tick()
 
     def select_all(self):
@@ -3486,23 +3760,89 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     QMessageBox.warning(self, APP_TITLE, t("add_error", e))
 
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls() or e.mimeData().hasText():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        md = e.mimeData()
+    @staticmethod
+    def _mime_items(md) -> list[str]:
+        """.torrent files, folders with .torrent files, magnets and http(s) links being dropped."""
+        from .panels import items_from_text, torrents_in
+        out: list[str] = []
         if md.hasUrls():
             for u in md.urls():
-                if u.isLocalFile() and u.toLocalFile().lower().endswith(".torrent"):
-                    self.add_item(u.toLocalFile())
-                elif u.scheme() == "magnet":
-                    self.add_item(u.toString())
-        elif md.text().startswith("magnet:"):
-            self.add_item(md.text().strip())
+                if u.isLocalFile():
+                    out += torrents_in(u.toLocalFile())
+                elif u.scheme() in ("magnet", "http", "https"):
+                    out.append(u.toString())
+        if not out and md.hasText():
+            out = items_from_text(md.text())
+        return list(dict.fromkeys(out))
+
+    def dragEnterEvent(self, e):
+        md = e.mimeData()
+        # folders are walked only on drop; a local folder / file is accepted here as "maybe"
+        if md.hasUrls() and any(u.isLocalFile() and (os.path.isdir(u.toLocalFile())
+                                                     or u.toLocalFile().lower().endswith(".torrent"))
+                                or u.scheme() in ("magnet", "http", "https") for u in md.urls()) \
+                or (md.hasText() and not md.hasUrls() and self._mime_items(md)):
+            e.acceptProposedAction()
+            self._show_drop_hint(True)
+
+    def dragLeaveEvent(self, e):
+        self._show_drop_hint(False)
+
+    def dropEvent(self, e):
+        self._show_drop_hint(False)
+        items = self._mime_items(e.mimeData())
+        e.acceptProposedAction()
+        QTimer.singleShot(0, lambda: self.add_items(items))     # let the drag source finish first
+
+    def paste_items(self):
+        from .panels import items_from_text
+        md = QGuiApplication.clipboard().mimeData()
+        items = self._mime_items(md) if md is not None else []
+        if not items:
+            items = items_from_text(QGuiApplication.clipboard().text())
+        if items:
+            self.add_items(items)
+        else:
+            self.statusBar().showMessage(t("paste_none"), 5000)
+
+    def add_items(self, items: list[str]):
+        """Several at once (drop, paste): links are downloaded first; a whole folder asks once."""
+        local = [i for i in items if not i.lower().startswith(("http://", "https://"))]
+        links = [i for i in items if i.lower().startswith(("http://", "https://"))]
+        files = [i for i in local if not i.startswith("magnet:")]
+        if len(files) > 5 and QMessageBox.question(self, APP_TITLE, t("folder_torrents", len(files))) != QMessageBox.Yes:
+            local = [i for i in local if i.startswith("magnet:")]
+        for i in local:
+            self.add_item(i)
+        for url in links:
+            self.fetch_torrent(url)
+
+    def fetch_torrent(self, url: str):
+        from .panels import TorrentFetcher
+        f = TorrentFetcher(url, self)
+        self._fetchers.append(f)
+        self.log_event("torrent", t("dl_started", url))
+        self.statusBar().showMessage(t("dl_started", url[:90]), 5000)
+
+        def done(u, path, err):
+            if f in self._fetchers:
+                self._fetchers.remove(f)
+            f.deleteLater()
+            if err or not path:
+                self.log_event("error", t("dl_failed", u, err))
+                QMessageBox.warning(self, APP_TITLE, t("dl_failed", u, err))
+                return
+            self.add_item(path)
+            if not path.startswith("magnet:"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        f.done.connect(done)
+        f.start()
 
     # ── removing / menu ────────────────────────────────────────
-    def remove_selected(self):
+    def remove_selected(self, with_files: bool = False):
         keys = self.selected_keys()
         if not keys:
             return
@@ -3515,6 +3855,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(QMessageBox.Warning if owe else QMessageBox.Question, t("remove_title"), text,
                           QMessageBox.Yes | QMessageBox.No, self)
         cb = QCheckBox(t("remove_files"))
+        cb.setChecked(with_files)
         box.setCheckBox(cb)
         if box.exec() == QMessageBox.Yes:
             for k in keys:
@@ -3550,7 +3891,7 @@ class MainWindow(QMainWindow):
             m = QMenu(self)
             m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
             m.addSeparator()
-            m.addAction(icon("fa6s.play", "success"), t("start_all"), lambda: self._each(self.engine.resume, True))
+            m.addAction(icon("fa6s.play", "success"), t("start_all"), lambda: self.start_selected(True))
             m.addAction(icon("fa6s.pause", "warning"), t("pause_all"), lambda: self._each(self.engine.pause, True))
             m.addAction(icon("fa6s.stop", "danger"), t("stop_all"), lambda: self._each(self.engine.stop, True))
             m.exec(self.table.viewport().mapToGlobal(pos))
@@ -3559,10 +3900,17 @@ class MainWindow(QMainWindow):
         n = len(self.selected_keys())
         if n > 1:
             m.addSection(t("n_selected", n))
-        m.addAction(icon("fa6s.play", "success"), t("start"), lambda: self._each(self.engine.resume))
-        m.addAction(icon("fa6s.pause", "warning"), t("pause"), lambda: self._each(self.engine.pause))
-        m.addAction(icon("fa6s.stop", "danger"), t("stop"), lambda: self._each(self.engine.stop))
-        a = m.addAction(icon("fa6s.bolt", "orange"), t("force_start"), lambda: self._each(self.engine.force_start))
+        sel = set(self.selected_keys())
+        missing = [r.key for r in self.model.rows if r.key in sel and r.state == "missing"]
+        if missing:
+            a = m.addAction(icon("fa6s.location-dot", "danger"), t("loc_menu"), lambda: self.locate_keys(missing))
+            f = a.font(); f.setBold(True); a.setFont(f)
+            m.addSeparator()
+        m.addAction(icon("fa6s.play", "success"), t("start") + "\tCtrl+S", self.start_selected)
+        m.addAction(icon("fa6s.pause", "warning"), t("pause") + "\tCtrl+P", lambda: self._each(self.engine.pause))
+        m.addAction(icon("fa6s.stop", "danger"), t("stop") + "\tCtrl+Shift+S", lambda: self._each(self.engine.stop))
+        a = m.addAction(icon("fa6s.bolt", "orange"), t("force_start") + "\tCtrl+Shift+F",
+                        lambda: self._each(self.engine.force_start))
         a.setToolTip(t("force_tip"))
         qm = m.addMenu(icon("fa6s.list-ol", "primary"), t("queue_menu"))
         for where, name in (("top", "fa6s.angles-up"), ("up", "fa6s.angle-up"),
@@ -3572,11 +3920,11 @@ class MainWindow(QMainWindow):
                          lambda w=where: self.queue_move(w))
         m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
         m.addSeparator()
-        m.addAction(icon("fa6s.folder-open"), t("open_folder"), self.open_folder)
-        m.addAction(icon("fa6s.rotate"), t("recheck"), lambda: self._each(self.engine.recheck))
-        m.addAction(icon("fa6s.bullhorn"), t("reannounce"), lambda: self._each(self.engine.reannounce))
-        m.addAction(icon("fa6s.link"), t("copy_magnet"), self.copy_magnet)
-        m.addAction(icon("fa6s.sliders"), t("properties"), self.properties_dialog)
+        m.addAction(icon("fa6s.folder-open"), t("open_folder") + "\tEnter", self.open_folder)
+        m.addAction(icon("fa6s.rotate"), t("recheck") + "\tCtrl+R", self.recheck_selected)
+        m.addAction(icon("fa6s.bullhorn"), t("reannounce") + "\tF5", lambda: self._each(self.engine.reannounce))
+        m.addAction(icon("fa6s.link"), t("copy_magnet") + "\tCtrl+M", self.copy_magnet)
+        m.addAction(icon("fa6s.sliders"), t("properties") + "\tAlt+Enter", self.properties_dialog)
         m.addSeparator()
         cm = m.addMenu(icon("fa6s.tag"), t("cat_menu"))
         cm.addAction(t("cat_none"), lambda: self.set_category_selected(""))
@@ -3585,11 +3933,15 @@ class MainWindow(QMainWindow):
         cm.addSeparator()
         cm.addAction(icon("fa6s.plus"), t("cat_new"), self.new_category_for_selected)
         m.addAction(icon("fa6s.hashtag", "teal"), t("tags_menu"), self.tags_dialog)
-        m.addAction(icon("fa6s.folder-tree"), t("move_to"), self.move_selected)
+        m.addAction(icon("fa6s.folder-tree"), t("move_to") + "\tCtrl+Shift+M", self.move_selected)
+        if not missing:
+            m.addAction(icon("fa6s.location-dot"), t("loc_menu"), lambda: self.locate_keys(self.selected_keys()))
         m.addAction(icon("fa6s.server"), t("edit_trackers"), self.edit_trackers)
         m.addAction(icon("fa6s.right-left"), t("replace_trackers"), self.replace_trackers)
         m.addSeparator()
-        m.addAction(icon("fa6s.trash-can", "danger"), t("remove"), self.remove_selected)
+        m.addAction(icon("fa6s.trash-can", "danger"), t("remove") + "\tDelete", self.remove_selected)
+        m.addAction(icon("fa6s.dumpster", "danger"), t("kb_remove_files") + "\tShift+Delete",
+                    lambda: self.remove_selected(with_files=True))
         m.exec(self.table.viewport().mapToGlobal(pos))
 
     def start_network_extras(self):
@@ -3668,6 +4020,7 @@ class MainWindow(QMainWindow):
             "files_header": b64(self.files_tbl.header().saveState()),
             "trackers_header": b64(self.tr_tbl.header().saveState()),
             "trackers_columns": len(widgets.TrackersView.COLS),
+            "hsplit": b64(self.hsplit.saveState()),
         }
         config.save(self.cfg)
 
@@ -3690,6 +4043,9 @@ class MainWindow(QMainWindow):
             self.tr_tbl.header().restoreState(ba("trackers_header"))
         if isinstance(st.get("tab"), int):
             self.tabs.setCurrentIndex(st["tab"])
+        if ba("hsplit") is not None:
+            self.hsplit.restoreState(ba("hsplit"))
+        self.set_sidebar(self.cfg.get("sidebar", True))
 
     def columns_menu(self, pos):
         hh = self.table.horizontalHeader()
@@ -3823,11 +4179,20 @@ class MainWindow(QMainWindow):
         keys = self.selected_keys()
         if not keys:
             return
-        row = next((r for r in self.model.rows if r.key == keys[0]), None)
-        d = QFileDialog.getExistingDirectory(self, t("move_to"), row.save_path if row else "")
-        if d:
-            for k in keys:
-                self.engine.move(k, d)
+        from .panels import MoveDialog
+        rows = [r for r in self.model.rows if r.key in keys]
+        d = MoveDialog(self.cfg, rows, self)
+        if not d.exec() or not d.folder():
+            return
+        dest = d.folder()
+        remember_path(self.cfg, dest)
+        config.save(self.cfg)
+        for r in rows:
+            if r.state == "moving":
+                self.log_event("error", t("mv_busy", r.name))
+            elif self.engine.move(r.key, dest, keep_existing=d.keep_existing()):
+                self.log_event("torrent", t("mv_started", r.name, dest))
+        self.tick()
 
     def edit_trackers(self):
         from .dialogs import TrackersDialog
@@ -3978,11 +4343,39 @@ class MainWindow(QMainWindow):
         self._tr_bad = bad
 
         self.refresh_tag_combo()
+        if self.sidebar.isVisible():
+            self.sidebar.refresh(rows, [c["name"] for c in self.cfg.get("categories", [])],
+                                 self.engine.all_tags())
+            if self.proxy.sidebar is not None:
+                self.proxy.invalidateFilter()      # counts / states moved: re-apply the live filters
         while self.engine.cross_results:
             name, key, prog = self.engine.cross_results.pop(0)
             msg = t("cross_ok", name) if prog >= 1.0 else t("cross_partial", name, f"{prog:.1%}")
             self.log_event("torrent" if prog >= 1.0 else "error", msg)
             self.notify(msg, key, folder=False)
+
+        while self.engine.moved_names:
+            name, key, err = self.engine.moved_names.pop(0)
+            if err:
+                self.log_event("error", t("mv_failed", name, err))
+                self.notify(t("mv_failed", name, err), key, folder=False)
+            else:
+                self.log_event("torrent", t("mv_done", name))
+                self.notify(t("mv_done", name), key, folder=True)
+        while self.engine.checked_names:
+            name, key, prog = self.engine.checked_names.pop(0)
+            msg = t("rc_done", name, f"{prog:.1%}".replace(".0%", "%"))
+            self.log_event("torrent" if prog >= 1 else "error", msg)
+            self.notify(msg, key, folder=False)
+        if self.engine.missing_names:
+            found = list(self.engine.missing_names)
+            self.engine.missing_names.clear()
+            for name, key, folder in found:
+                self.log_event("error", t("miss_found", name, folder).replace("\n", " "))
+            if len(found) == 1:
+                self.notify(t("miss_found", *found[0][::2]), found[0][1], folder=False)
+            else:
+                self.notify(t("miss_many", len(found)), "", folder=False)
 
         while self.engine.stopped_names:
             name, key = self.engine.stopped_names.pop(0)

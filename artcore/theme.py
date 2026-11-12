@@ -251,6 +251,14 @@ QHeaderView::section {{
 QHeaderView::section:hover {{ color: {c['emphasis']}; }}
 QTableCornerButton::section {{ background: {c['body_bg']}; border: none; }}
 
+/* filter sidebar (like qBittorrent's) */
+QTreeWidget#sidebar {{
+  background: {c['body_bg']}; color: {c['body']}; border: none;
+  border-right: 1px solid {c['border']}; outline: 0; padding: 2px 4px 2px 6px;
+}}
+QTreeWidget#sidebar::item {{ padding: 4px 4px; border: none; border-radius: 0; }}
+QTreeWidget#sidebar::item:hover {{ background: {c['tertiary_bg']}; }}
+
 /* tabs (.st-tabs) */
 QTabWidget::pane {{ border: none; border-top: 1px solid {c['border']}; background: {c['body_bg']}; }}
 QTabBar {{ background: transparent; }}
