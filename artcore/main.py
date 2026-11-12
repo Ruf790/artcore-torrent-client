@@ -24,6 +24,20 @@ def _send_to_running(items: list[str]) -> bool:
     return True
 
 
+def _wait_old_exit(timeout: float = 20.0) -> None:
+    """--restarted (language switch): the old copy is still saving its session — wait until its
+    single-instance server is gone, so this one doesn't just hand over to it and exit."""
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        sock = QLocalSocket()
+        sock.connectToServer(SERVER_NAME)
+        if not sock.waitForConnected(200):
+            return
+        sock.abort()
+        time.sleep(0.3)
+
+
 def selftest() -> int:
     """Used by CI on the built .exe: every module imports, the main window builds, the engine starts.
     Writes the result to %TEMP%/artcore_selftest.txt (a --windowed exe has no console)."""
@@ -89,6 +103,8 @@ def main() -> int:
     app.setApplicationName(APP_TITLE)
     app.setQuitOnLastWindowClosed(False)   # keeps running in the tray
 
+    if "--restarted" in args:
+        _wait_old_exit()
     if _send_to_running(items if items or minimized else []):
         return 0
 
@@ -132,6 +148,7 @@ def main() -> int:
                     win.add_item(line)
         s.readyRead.connect(read)
     server.newConnection.connect(on_conn)
+    win.server = server              # closed before a restart (language switch)
 
     for it in items:
         win.add_item(it)

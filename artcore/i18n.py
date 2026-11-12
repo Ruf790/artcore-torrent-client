@@ -409,7 +409,15 @@ STRINGS = {
     "set_dht":         ("DHT / LSD (для публичных торрентов)", "DHT / LSD (public torrents only)"),
     "set_upnp":        ("UPnP / NAT-PMP",                    "UPnP / NAT-PMP"),
     "set_tray":        ("Сворачивать в трей при закрытии",   "Minimize to tray on close"),
-    "set_lang":        ("Язык (после перезапуска)",          "Language (after restart)"),
+    "set_lang":        ("Язык / Language",                   "Language / Язык"),
+    "lang_tip":        ("Язык интерфейса / Interface language", "Interface language / Язык интерфейса"),
+    # asked in both languages: the window is still in the old one
+    "lang_restart_q":  ("Язык изменится после перезапуска клиента. Перезапустить сейчас?\n\n"
+                        "The language changes after a restart. Restart now?",
+                        "The language changes after a restart. Restart now?\n\n"
+                        "Язык изменится после перезапуска клиента. Перезапустить сейчас?"),
+    "lang_restart_now": ("Перезапустить / Restart",          "Restart / Перезапустить"),
+    "lang_restart_later": ("Позже / Later",                  "Later / Позже"),
     # create torrent
     "ct_title":        ("Создать торрент",                   "Create torrent"),
     "ct_source":       ("Файл или папка",                    "File or folder"),
