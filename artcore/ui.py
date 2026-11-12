@@ -3143,6 +3143,8 @@ class MainWindow(QMainWindow):
         key("Enter", self.open_folder, plain=True)
         key("Alt+Return", self.properties_dialog)
         key("Ctrl+F", self.focus_search)
+        key("F3", self.file_search)
+        key("Ctrl+Shift+E", self.export_list)
         key("Escape", self.escape)
         key("Ctrl+B", lambda: self.set_sidebar(not self.sidebar.isVisible()))
         key("Ctrl+Shift+L", lambda: self.set_compact(not ProgressDelegate.compact))
@@ -3165,6 +3167,71 @@ class MainWindow(QMainWindow):
         from .panels import BansDialog
         BansDialog(self.engine, self.geo, self).exec()
         self.tick()
+
+    def file_search(self):
+        """F3: find files across all torrents. Non-modal, so it can stay open while browsing."""
+        from .panels import FileSearchDialog
+        dlg = getattr(self, "_fsearch", None)
+        if dlg is None:
+            dlg = self._fsearch = FileSearchDialog(self.engine, self)
+            dlg.locate.connect(self.locate_file)
+        dlg.show(); dlg.raise_(); dlg.activateWindow()
+        dlg.q.setFocus(); dlg.q.selectAll()
+
+    def locate_file(self, key: str, index: int):
+        """Select the torrent in the list (dropping filters that hide it) and show the file in "Files"."""
+        def find() -> int:
+            for i in range(self.proxy.rowCount()):
+                if _row_of(self.proxy.index(i, 0)).key == key:
+                    return i
+            return -1
+        i = find()
+        if i < 0 and self.search.text():
+            self.search.clear()
+            i = find()
+        if i < 0:
+            self.set_sidebar(bool(self.cfg.get("sidebar")))     # resets status / category / tag / tracker
+            i = find()
+        if i < 0:
+            return
+        self.table.clearSelection()
+        self.table.selectRow(i)
+        self.table.scrollTo(self.proxy.index(i, 0), QAbstractItemView.PositionAtCenter)
+        self.tabs.setCurrentWidget(self.files_tbl)
+        self.refresh_files(key)
+        self.files_tbl.reveal(index)
+
+    def export_list(self):
+        """The torrent list as it is shown (filter + sort order) → Excel (.xlsx) or CSV."""
+        from . import export
+        rows = [_row_of(self.proxy.index(i, 0)) for i in range(self.proxy.rowCount())]
+        sel = set(self.selected_keys())
+        if len(sel) > 1:
+            rows = [r for r in rows if r.key in sel]
+        if not rows:
+            return
+        last = self.cfg.get("last_export_dir") or os.path.expanduser("~")
+        name = f"{APP_TITLE.replace(' ', '_')}_{datetime.now():%Y-%m-%d}"
+        flt = "Excel (*.xlsx);;CSV (*.csv)"
+        path, chosen = QFileDialog.getSaveFileName(self, t("xl_title", len(rows)),
+                                                   os.path.join(last, name + ".xlsx"), flt)
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".xlsx", ".csv"):
+            ext = ".csv" if chosen.startswith("CSV") else ".xlsx"
+            path += ext
+        try:
+            n = (export.write_csv if ext == ".csv" else export.write_xlsx)(path, rows, t)
+        except OSError as e:
+            QMessageBox.warning(self, APP_TITLE, t("exp_failed", e))
+            return
+        self.cfg["last_export_dir"] = os.path.dirname(path)
+        config.save(self.cfg)
+        msg = t("xl_done", n, os.path.basename(path))
+        self.log_event("torrent", msg)
+        self.toast("success", t("xl_done_title"), msg,
+                   on_click=lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
 
     def set_grid(self, on: bool):
         """BitComet-style grid in the torrent list."""
@@ -3536,6 +3603,22 @@ class MainWindow(QMainWindow):
         self.search.setFixedWidth(250)
         self.search.textChanged.connect(lambda s: self.proxy.set_filter(text=s))
         lay.addWidget(self.search)
+        self.fs_btn = QToolButton()
+        self.fs_btn.setObjectName("iconBtn")
+        self.fs_btn.setToolTip(t("fs_title") + " (F3)")
+        self.fs_btn.setCursor(Qt.PointingHandCursor)
+        self.fs_btn.setIconSize(QSize(15, 15))
+        self.fs_btn.clicked.connect(self.file_search)
+        self._themed_icon(self.fs_btn.setIcon, "fa6s.file-circle-question", "head_ic")
+        lay.addWidget(self.fs_btn)
+        self.xl_btn = QToolButton()
+        self.xl_btn.setObjectName("iconBtn")
+        self.xl_btn.setToolTip(t("xl_menu") + " (Ctrl+Shift+E)")
+        self.xl_btn.setCursor(Qt.PointingHandCursor)
+        self.xl_btn.setIconSize(QSize(15, 15))
+        self.xl_btn.clicked.connect(self.export_list)
+        self._themed_icon(self.xl_btn.setIcon, "fa6s.file-excel", "head_ic")
+        lay.addWidget(self.xl_btn)
         return lay
 
     def _build_kpis(self) -> QHBoxLayout:
@@ -4695,6 +4778,9 @@ class MainWindow(QMainWindow):
             m.addAction(icon("fa6s.play", "success"), t("start_all"), lambda: self.start_selected(True))
             m.addAction(icon("fa6s.pause", "warning"), t("pause_all"), lambda: self._each(self.engine.pause, True))
             m.addAction(icon("fa6s.stop", "danger"), t("stop_all"), lambda: self._each(self.engine.stop, True))
+            m.addSeparator()
+            m.addAction(icon("fa6s.file-circle-question", "primary"), t("fs_title") + "\tF3", self.file_search)
+            m.addAction(icon("fa6s.file-excel", "success"), t("xl_menu") + "\tCtrl+Shift+E", self.export_list)
             m.exec(self.table.viewport().mapToGlobal(pos))
             return
         m = QMenu(self)
@@ -4726,6 +4812,8 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.bullhorn"), t("reannounce") + "\tF5", lambda: self._each(self.engine.reannounce))
         m.addAction(icon("fa6s.link"), t("copy_magnet") + "\tCtrl+M", self.copy_magnet)
         m.addAction(icon("fa6s.file-export", "info"), t("exp_menu") + "\tCtrl+E", self.export_selected)
+        m.addAction(icon("fa6s.file-excel", "success"),
+                    (t("xl_menu_sel", n) if n > 1 else t("xl_menu")) + "\tCtrl+Shift+E", self.export_list)
         m.addAction(icon("fa6s.sliders"), t("properties") + "\tAlt+Enter", self.properties_dialog)
         m.addSeparator()
         cm = m.addMenu(icon("fa6s.tag"), t("cat_menu"))

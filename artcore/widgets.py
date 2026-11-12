@@ -311,6 +311,20 @@ class FilesView(QTreeWidget):
             for i in range(self.topLevelItemCount()):
                 self.topLevelItem(i).setExpanded(True)
 
+    def reveal(self, index: int):
+        """Scroll to a file and select it (file search → "Show in torrent")."""
+        it = self.leaves.get(index)
+        if it is None:
+            return
+        p = it.parent()
+        while p is not None:
+            p.setExpanded(True)
+            p = p.parent()
+        self.clearSelection()
+        it.setSelected(True)
+        self.setCurrentItem(it)
+        self.scrollToItem(it, QAbstractItemView.PositionAtCenter)
+
     def selected_indices(self) -> list[int]:
         """File indices under the selection (a selected folder means all its files)."""
         out: set[int] = set()

@@ -625,10 +625,10 @@ SHORTCUTS = [
     ("kb_g_torrent", [("Ctrl+S", "start"), ("Ctrl+P", "pause"), ("Ctrl+Shift+S", "stop"),
                       ("Ctrl+Shift+F", "force_start"), ("Delete", "remove"), ("Shift+Delete", "kb_remove_files"),
                       ("Ctrl+R", "recheck"), ("F5", "reannounce"), ("Ctrl+Shift+M", "move_to"),
-                      ("Ctrl+M", "copy_magnet"), ("Ctrl+E", "exp_menu"), ("Enter", "open_folder"), ("Alt+Enter", "properties")]),
+                      ("Ctrl+M", "copy_magnet"), ("Ctrl+E", "exp_menu"), ("Ctrl+Shift+E", "xl_menu"), ("Enter", "open_folder"), ("Alt+Enter", "properties")]),
     ("kb_g_queue", [("Ctrl+Shift+Up", "queue_up"), ("Ctrl+Shift+Down", "queue_down"),
                     ("Ctrl+Shift+Home", "queue_top"), ("Ctrl+Shift+End", "queue_bottom")]),
-    ("kb_g_view", [("Ctrl+A", "select_all"), ("Ctrl+F", "kb_search"), ("Esc", "kb_esc"),
+    ("kb_g_view", [("Ctrl+A", "select_all"), ("Ctrl+F", "kb_search"), ("F3", "fs_title"), ("Esc", "kb_esc"),
                    ("Ctrl+B", "kb_sidebar"), ("Ctrl+Shift+L", "compact_menu"), ("Ctrl+Shift+G", "grid_menu"), ("Ctrl+I", "sw_title"), ("Ctrl+H", "kb_history"),
                    ("Ctrl+,", "settings"), ("F1", "about"), ("Ctrl+/", "kb_title"), ("Ctrl+Q", "quit")]),
 ]
@@ -1472,3 +1472,189 @@ class PeerDialog(QDialog):
             lab = self.vals[k]
             if lab.text() != text:
                 lab.setText(text)
+
+
+# ============================================================
+#  Search for files inside every torrent (F3)
+# ============================================================
+
+def file_matcher(query: str):
+    """``*.srt`` / ``s01e0?`` → glob on the file name (or the whole path when it has a /);
+    plain words → every word must be in the path, any order, case-insensitive.
+    Several globs separated by spaces or ';' are OR-ed: ``*.srt *.ass``."""
+    import fnmatch
+    q = query.strip().lower().replace("\\", "/")
+    if not q:
+        return None
+    if "*" in q or "?" in q:
+        pats = [p for p in q.replace(";", " ").split() if p]
+
+        def m(path: str) -> bool:
+            path = path.replace("\\", "/")
+            name = path.rsplit("/", 1)[-1]
+            return any(fnmatch.fnmatchcase(path if "/" in p else name, p) for p in pats)
+        return m
+    words = q.split()
+    return lambda path: all(w in path.replace("\\", "/") for w in words)
+
+
+class _NumItem(QTableWidgetItem):
+    """Sorts by the number in UserRole, shows the formatted text."""
+    def __lt__(self, other):
+        return (self.data(Qt.UserRole) or 0) < (other.data(Qt.UserRole) or 0)
+
+
+class FileSearchDialog(QDialog):
+    """Find a file (``*.srt``, an episode name…) across all torrents and see which torrent has it."""
+    locate = Signal(str, int)      # torrent key, file index → main window selects it, opens "Files"
+    LIMIT = 2000
+
+    def __init__(self, engine, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QLineEdit
+        _theme_title_bar(self)
+        self.engine = engine
+        self.setWindowTitle(t("fs_title"))
+        self.setWindowIcon(app_icon())
+        self.resize(1100, 620)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 12)
+        lay.setSpacing(8)
+        lay.addWidget(_section(t("fs_title"), "fa6s.magnifying-glass", "primary"))
+        self.q = QLineEdit()
+        self.q.setPlaceholderText(t("fs_placeholder"))
+        self.q.setClearButtonEnabled(True)
+        self.q.addAction(widgets.icon("fa6s.magnifying-glass", "secondary"), QLineEdit.LeadingPosition)
+        self.q.setMinimumHeight(34)
+        lay.addWidget(self.q)
+        self.hint = QLabel(t("fs_hint")); self.hint.setObjectName("meta"); self.hint.setWordWrap(True)
+        lay.addWidget(self.hint)
+        self.tbl = QTableWidget(0, 5)
+        self.tbl.setHorizontalHeaderLabels([t("fs_file"), t("fs_size"), t("fs_done"), t("fs_torrent"), t("fs_folder")])
+        self.tbl.verticalHeader().hide()
+        self.tbl.verticalHeader().setDefaultSectionSize(28)
+        self.tbl.setShowGrid(False)
+        self.tbl.setWordWrap(False)
+        self.tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tbl.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.customContextMenuRequested.connect(self._menu)
+        self.tbl.cellDoubleClicked.connect(lambda r, _c: self._go(r))
+        hh = self.tbl.horizontalHeader()
+        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        for c, w in ((1, 95), (2, 80), (3, 330), (4, 200)):
+            self.tbl.setColumnWidth(c, w)
+        lay.addWidget(self.tbl, 1)
+        row = QHBoxLayout()
+        self.count = QLabel(); self.count.setObjectName("meta")
+        self.b_go = QPushButton(widgets.icon("fa6s.location-crosshairs", "primary"), t("fs_show"))
+        self.b_go.clicked.connect(lambda: self._go(self.tbl.currentRow()))
+        self.b_open = QPushButton(widgets.icon("fa6s.folder-open", "warning"), t("fs_open_folder"))
+        self.b_open.clicked.connect(lambda: self._open(self.tbl.currentRow(), folder=True))
+        close = QPushButton(t("close")); close.setObjectName("primary"); close.clicked.connect(self.accept)
+        row.addWidget(self.count); row.addStretch()
+        row.addWidget(self.b_go); row.addWidget(self.b_open); row.addWidget(close)
+        lay.addLayout(row)
+        self.timer = QTimer(self, singleShot=True, interval=250, timeout=self._run)
+        self.q.textChanged.connect(lambda _s: self.timer.start())
+        self.q.returnPressed.connect(self._run)
+        self.hits: list[dict] = []
+        self._sel()
+        self.tbl.itemSelectionChanged.connect(self._sel)
+
+    def set_query(self, text: str):
+        self.q.setText(text)
+        self._run()
+
+    def _sel(self):
+        ok = self.tbl.currentRow() >= 0 and bool(self.tbl.selectedItems())
+        self.b_go.setEnabled(ok); self.b_open.setEnabled(ok)
+
+    def _run(self):
+        self.timer.stop()
+        m = file_matcher(self.q.text())
+        self.tbl.setSortingEnabled(False)
+        self.tbl.setRowCount(0)
+        if m is None:
+            self.hits = []
+            self.count.setText("")
+            self.hint.show()
+            return
+        self.hint.hide()
+        self.hits, cut = self.engine.search_files(m, self.LIMIT)
+        torrents = len({h["key"] for h in self.hits})
+        self.tbl.setRowCount(len(self.hits))
+        sec = C["secondary"]
+        for r, h in enumerate(self.hits):
+            name = h["path"].replace("\\", "/").rsplit("/", 1)[-1]
+            it = QTableWidgetItem(widgets.file_icon(name), name)
+            it.setToolTip(h["path"]); it.setData(Qt.UserRole + 1, r)
+            self.tbl.setItem(r, 0, it)
+            sz = _NumItem(fmt_size(h["size"])); sz.setData(Qt.UserRole, h["size"])
+            sz.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.tbl.setItem(r, 1, sz)
+            pr = _NumItem(f"{h['progress'] * 100:.0f}%"); pr.setData(Qt.UserRole, h["progress"])
+            pr.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if h["progress"] >= 1:
+                pr.setForeground(QColor(C["success"]))
+            self.tbl.setItem(r, 2, pr)
+            tor = QTableWidgetItem(widgets.icon("fa6s.magnet", "primary"), h["torrent"]); tor.setToolTip(h["torrent"])
+            self.tbl.setItem(r, 3, tor)
+            folder = os.path.dirname(h["path"].replace("\\", "/"))
+            fo = QTableWidgetItem(folder or "—"); fo.setToolTip(os.path.dirname(h["abs"]))
+            fo.setForeground(QColor(sec))
+            self.tbl.setItem(r, 4, fo)
+        self.tbl.setSortingEnabled(True)
+        txt = t("fs_count").format(len(self.hits), torrents)
+        if cut:
+            txt += "  ·  " + t("fs_cut").format(self.LIMIT)
+        self.count.setText(txt if self.hits else t("fs_none"))
+        self._sel()
+
+    def _hit(self, row: int):
+        it = self.tbl.item(row, 0) if row >= 0 else None
+        return self.hits[it.data(Qt.UserRole + 1)] if it is not None else None
+
+    def _go(self, row: int):
+        h = self._hit(row)
+        if h:
+            self.locate.emit(h["key"], h["index"])
+
+    def _open(self, row: int, folder: bool):
+        from PySide6.QtGui import QDesktopServices
+        h = self._hit(row)
+        if not h:
+            return
+        p = h["abs"]
+        if folder:
+            if os.name == "nt" and os.path.exists(p):
+                import subprocess
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+                return
+            p = os.path.dirname(p)
+        if os.path.exists(p):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+        else:
+            QMessageBox.information(self, APP_TITLE, t("fs_missing"))
+
+    def _menu(self, pos):
+        row = self.tbl.rowAt(pos.y())
+        h = self._hit(row)
+        if not h:
+            return
+        menu = QMenu(self)
+        menu.addAction(widgets.icon("fa6s.location-crosshairs", "primary"), t("fs_show"), lambda: self._go(row))
+        a = menu.addAction(widgets.icon("fa6s.file", "secondary"), t("fs_open_file"), lambda: self._open(row, False))
+        a.setEnabled(h["progress"] >= 1)
+        menu.addAction(widgets.icon("fa6s.folder-open", "warning"), t("fs_open_folder"), lambda: self._open(row, True))
+        menu.addSeparator()
+        menu.addAction(widgets.icon("fa6s.copy", "secondary"), t("fs_copy_path"),
+                       lambda: QGuiApplication.clipboard().setText(
+                           "\n".join(self._hit(r)["abs"] for r in sorted({i.row() for i in self.tbl.selectedItems()}))))
+        menu.addAction(widgets.icon("fa6s.copy", "secondary"), t("fs_copy_torrent"),
+                       lambda: QGuiApplication.clipboard().setText(h["torrent"]))
+        menu.exec(self.tbl.viewport().mapToGlobal(pos))
+

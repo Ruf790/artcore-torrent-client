@@ -1924,6 +1924,38 @@ class Engine:
             })
         return out
 
+    def search_files(self, match, limit: int = 2000) -> tuple[list[dict], bool]:
+        """Files of every torrent whose path satisfies ``match(path_lower)``.
+
+        Paths are cheap (metadata only); progress is asked from libtorrent only for torrents
+        that actually have a hit. Returns (hits, truncated)."""
+        out: list[dict] = []
+        for key, h in list(self.handles.items()):
+            try:
+                st = h.status()
+                if not st.has_metadata:
+                    continue
+                fs = h.torrent_file().files()
+                hits = []
+                for i in range(fs.num_files()):
+                    if fs.file_flags(i) & lt.file_storage.flag_pad_file:
+                        continue
+                    path = self.file_path(key, fs, i)
+                    if match(path.lower()):
+                        hits.append((i, path, fs.file_size(i)))
+                if not hits:
+                    continue
+                done = h.file_progress(lt.torrent_handle.piece_granularity)
+                for i, path, size in hits:
+                    out.append({"key": key, "torrent": st.name, "index": i, "path": path, "size": size,
+                                "progress": (done[i] / size) if size else 1.0,
+                                "abs": os.path.join(st.save_path, path)})
+                    if len(out) >= limit:
+                        return out, True
+            except Exception:
+                continue
+        return out, False
+
     def file_path(self, key: str, fs, i: int) -> str:
         """Current path of a file — renamed ones included (torrent_file() has the original names)."""
         return self.opts.get(key, {}).get("renamed", {}).get(str(i)) or fs.file_path(i)
