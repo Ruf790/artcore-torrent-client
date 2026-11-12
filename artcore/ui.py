@@ -138,6 +138,8 @@ def state_text(r) -> str:
 
 
 class TorrentModel(QAbstractTableModel):
+    name_icon = "state"          # name-column icon: state (BitComet arrows) | type (file kind)
+
     def __init__(self):
         super().__init__()
         self.rows: list[TorrentRow] = []
@@ -198,7 +200,9 @@ class TorrentModel(QAbstractTableModel):
                 return QColor(C["secondary"])
         if role == Qt.DecorationRole:
             if c == C_NAME:
-                return widgets.torrent_icon(r.kind)
+                if TorrentModel.name_icon == "type":
+                    return widgets.torrent_icon(r.kind)
+                return widgets.state_icon(r.state, r.progress >= 1)
             if c == C_CAT and r.category:
                 return widgets.icon("fa6s.tag", "purple")
             if c == C_TAGS and r.tags:
@@ -1488,6 +1492,11 @@ class SettingsDialog(QDialog):
         self.pbar.addItem(t("pb_rounded"), "rounded")
         self.pbar.setCurrentIndex(max(0, self.pbar.findData(cfg.get("progress_style", "classic"))))
         form.addRow(t("pb_style"), self.pbar)
+        self.name_icon = QComboBox()
+        self.name_icon.addItem(t("ni_state"), "state")
+        self.name_icon.addItem(t("ni_type"), "type")
+        self.name_icon.setCurrentIndex(max(0, self.name_icon.findData(cfg.get("name_icon", "state"))))
+        form.addRow(t("ni_label"), self.name_icon)
         self.compact = QCheckBox(t("compact_set")); self.compact.setChecked(bool(cfg.get("compact_list")))
         form.addRow("", self.compact)
         self.lang = QComboBox(); self.lang.addItems(["Русский", "English"])
@@ -1700,6 +1709,7 @@ class SettingsDialog(QDialog):
                  ip_filter=self.ipf.text().strip(), geoip=self.geoip.isChecked(),
                  theme=("system", "light", "dark")[self.theme.currentIndex()],
                  ui_style=self.style_combo.currentData(), progress_style=self.pbar.currentData(),
+                 name_icon=self.name_icon.currentData(),
                  compact_list=self.compact.isChecked(),
                  preallocate=self.prealloc.isChecked(), disk_write_mode=self.wmode.currentData(),
                  disk_os_cache=self.oscache.currentData(), disk_queue_mb=self.dqueue.value(),
@@ -2807,6 +2817,7 @@ class MainWindow(QMainWindow):
         self.engine = engine
         self.cfg = cfg
         ProgressDelegate.style = cfg.get("progress_style", "classic")
+        TorrentModel.name_icon = cfg.get("name_icon", "state")
         self._quitting = False
         self._themed: list[tuple] = []        # (setter, icon name, colour key) for re-theming
         self.taskbar = winint.Taskbar()
@@ -4840,6 +4851,7 @@ class MainWindow(QMainWindow):
             self.cfg.update(new_cfg)
             config.save(self.cfg)
             ProgressDelegate.style = self.cfg.get("progress_style", "classic")
+            TorrentModel.name_icon = self.cfg.get("name_icon", "state")
             self.set_compact(bool(self.cfg.get("compact_list")))
             self.table.viewport().update()
             self.engine.apply_settings(self.cfg)
