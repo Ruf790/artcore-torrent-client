@@ -1584,6 +1584,8 @@ class SettingsDialog(QDialog):
         self.title_speed = QCheckBox(t("set_title_speed")); self.title_speed.setChecked(cfg.get("speed_in_title", True))
         for w in (self.tray, self.mini_cb, self.title_speed):
             form.addRow(w)
+        self.confirm_quit = QCheckBox(t("set_confirm_quit")); self.confirm_quit.setChecked(cfg.get("confirm_quit", True))
+        form.addRow(self.confirm_quit)
 
         # ── Advanced
         form = page("sp_adv", "fa6s.gears", "secondary")
@@ -1763,7 +1765,7 @@ class SettingsDialog(QDialog):
                  proxy_peers=self.px_peers.isChecked(), proxy_hostnames=self.px_dns.isChecked(),
                  auto_trackers_on=self.auto_trk_on.isChecked(), auto_trackers=self.auto_trk.toPlainText().strip(),
                  add_subfolder=self.add_sub.isChecked(), delete_torrent_file=self.del_torrent.isChecked(),
-                 minimize_to_tray=self.tray.isChecked(),
+                 minimize_to_tray=self.tray.isChecked(), confirm_quit=self.confirm_quit.isChecked(),
                  show_add_dialog=self.show_add.isChecked(), check_updates=self.upd.isChecked(),
                  toasts=self.toasts.isChecked() if self.toasts is not None else c.get("toasts", True),
                  stop_ratio=self.stop_ratio.value(), stop_hours=self.stop_hours.value(),
@@ -2896,6 +2898,8 @@ class MainWindow(QMainWindow):
         TorrentModel.name_icon = cfg.get("name_icon", "state")
         self._quitting = False
         self._themed: list[tuple] = []        # (setter, icon name, colour key) for re-theming
+        self._session_ending = False
+        QGuiApplication.instance().commitDataRequest.connect(self._on_session_end)
         self.taskbar = winint.Taskbar()
         self._tb_state = None
         self._awake = None
@@ -3007,7 +3011,7 @@ class MainWindow(QMainWindow):
         key("Ctrl+H", self.history_dialog)
         key("Ctrl+,", self.settings_dialog)
         key("Ctrl+/", self.shortcuts_dialog)
-        key("Ctrl+Q", self.quit)
+        key("Ctrl+Q", self.request_quit)
 
     def set_compact(self, on: bool):
         """Compact list: 26 px rows instead of 38 — about half as many torrents again on screen."""
@@ -3137,7 +3141,7 @@ class MainWindow(QMainWindow):
         ibtn("fa6s.gear", t("settings"), self.settings_dialog)
         ibtn("fa6s.circle-info", t("about") + " (F1)", self.about_dialog)
         # the window's ✕ only hides it to the tray — a visible way to really quit
-        qb = ibtn("fa6s.power-off", t("quit") + " (Ctrl+Q)", lambda: self.quit())
+        qb = ibtn("fa6s.power-off", t("quit") + " (Ctrl+Q)", self.request_quit)
         self._themed_icon(qb.setIcon, "fa6s.power-off", "danger")
         a = QAction(self); a.setShortcut(QKeySequence("F1")); a.triggered.connect(self.about_dialog)
         self.addAction(a)
@@ -3846,7 +3850,7 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.stop", "danger"), t("tray_pause_all"), lambda: self._all(self.engine.stop))
         m.addAction(icon("fa6s.play", "success"), t("tray_resume_all"), lambda: self._all(self.engine.resume))
         m.addSeparator()
-        m.addAction(icon("fa6s.power-off", "danger"), t("quit"), self.quit)
+        m.addAction(icon("fa6s.power-off", "danger"), t("quit"), self.request_quit)
 
     # ── mini widget / power / taskbar ──────────────────────────
     def set_mini(self, on: bool):
@@ -5359,8 +5363,50 @@ class MainWindow(QMainWindow):
             e.ignore()
             self.hide()
             return
+        if not self._quitting and not self._session_ending and not self._confirm_quit():
+            e.ignore()
+            return
         self.quit()
         e.accept()
+
+    def request_quit(self):
+        """Quit asked for by the user (button, tray, Ctrl+Q): confirm first unless turned off."""
+        if self._confirm_quit():
+            self.quit()
+
+    def _confirm_quit(self) -> bool:
+        if not self.cfg.get("confirm_quit", True) or self._session_ending:
+            return True
+        rows = self.model.rows
+        dl = sum(1 for r in rows if r.state in ("downloading", "metadata")
+                 or (r.state == "tracker_error" and r.progress < 1))
+        seed = sum(1 for r in rows if r.state == "seeding" or (r.state == "tracker_error" and r.progress >= 1))
+        box = QMessageBox(QMessageBox.Question, t("quit_title"), t("quit_q"), QMessageBox.NoButton,
+                          self if self.isVisible() else None)
+        if dl or seed:
+            box.setInformativeText(t("quit_active", dl, seed))
+        yes = box.addButton(t("quit"), QMessageBox.AcceptRole)
+        yes.setObjectName("danger")
+        box.addButton(t("cancel"), QMessageBox.RejectRole)
+        box.setDefaultButton(yes)
+        cb = QCheckBox(t("quit_dont_ask"))
+        box.setCheckBox(cb)
+        box.setWindowIcon(app_icon())
+        from PySide6.QtWidgets import QSizePolicy, QSpacerItem
+        g = box.layout()                        # QMessageBox is a grid: widen it so the text isn't a column
+        g.addItem(QSpacerItem(420, 0, QSizePolicy.Minimum, QSizePolicy.Expanding), g.rowCount(), 0, 1, g.columnCount())
+        box.exec()
+        if box.clickedButton() is not yes:
+            return False
+        if cb.isChecked():
+            self.cfg["confirm_quit"] = False
+            config.save(self.cfg)
+        return True
+
+    def _on_session_end(self, *_):
+        """Windows is logging off / shutting down: no questions, just save and go."""
+        self._session_ending = True
+        self.quit()
 
     def quit(self, installer: str = "", restart: bool = False):
         if self._quitting:
