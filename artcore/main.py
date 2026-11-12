@@ -131,7 +131,8 @@ def main() -> int:
 
     app.setStyle("Fusion")
     theme.load_fonts()
-    theme.apply(app, cfg.get("theme", "system"), cfg.get("ui_style", "soft"))
+    theme.apply(app, cfg.get("theme", "system"), cfg.get("ui_style", "soft"),
+                mica=bool(cfg.get("mica", True)) and winint.mica_supported())
     app.setWindowIcon(app_icon())
 
     engine = Engine(config.data_dir(), cfg)
