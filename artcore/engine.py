@@ -2020,6 +2020,69 @@ class Engine:
             del self._peer_seen[sk]
         return res
 
+    def peer_detail(self, key: str, addr: str) -> dict | None:
+        """Everything libtorrent knows about one connection ("ip:port"), for the peer window.
+        None once the peer has disconnected."""
+        h = self.handles.get(key)
+        if not h:
+            return None
+        for p in h.get_peer_info():
+            if f"{p.ip[0]}:{p.ip[1]}" != addr:
+                continue
+            fl = int(p.flags)
+
+            def has(name):
+                v = getattr(lt.peer_info, name, None)
+                return bool(v is not None and fl & int(v))
+
+            def secs(v):
+                try:
+                    return float(v.total_seconds()) if hasattr(v, "total_seconds") else float(v)
+                except Exception:
+                    return -1.0
+            src = int(p.source)
+            sources = [n for n, f in (("tracker", lt.peer_info.tracker), ("dht", lt.peer_info.dht),
+                                      ("pex", lt.peer_info.pex), ("lsd", lt.peer_info.lsd),
+                                      ("resume", lt.peer_info.resume_data)) if src & int(f)] \
+                or (["manual"] if fl & _OUTGOING else ["incoming"])     # we dialled it without a source
+            try:
+                le = p.local_endpoint() if callable(p.local_endpoint) else p.local_endpoint
+                local = f"{le[0]}:{le[1]}"
+            except Exception:
+                local = ""
+            pid = p.pid.to_bytes()
+            ctype = int(getattr(p, "connection_type", 0) or 0)
+            first = self._peer_seen.setdefault((key, addr), time.time())
+            return {
+                "addr": addr, "host": p.ip[0], "port": p.ip[1], "local_endpoint": local,
+                "client": p.client.decode("utf-8", "replace") if isinstance(p.client, bytes) else str(p.client),
+                "peer_id": pid[:8].decode("latin-1", "replace") if pid[:1] == b"-" else pid[:8].hex(),
+                "sources": sources,
+                "outgoing": bool(fl & _OUTGOING), "utp": bool(fl & _UTP), "i2p": has("i2p_socket"),
+                "ssl": has("ssl_socket"), "holepunched": has("holepunched"),
+                "enc": "rc4" if has("rc4_encrypted") else "header" if has("plaintext_encrypted") else "",
+                # connection_type: standard_bittorrent=1, web_seed=2, http_seed=4
+                "kind": "web" if ctype == int(lt.peer_info.web_seed) else
+                        "http" if ctype == int(lt.peer_info.http_seed) else "bt",
+                "connected": int(time.time() - first),
+                "progress": float(p.progress), "num_pieces": int(p.num_pieces),
+                "seed": has("seed"), "upload_only": has("upload_only"),
+                "down": int(p.payload_down_speed), "up": int(p.payload_up_speed),
+                "down_peak": int(p.download_rate_peak), "up_peak": int(p.upload_rate_peak),
+                "downloaded": int(p.total_download), "uploaded": int(p.total_upload),
+                "peer_rate": int(getattr(p, "remote_dl_rate", 0) or 0),
+                "interesting": has("interesting"), "choked": has("choked"),
+                "remote_interested": has("remote_interested"), "remote_choked": has("remote_choked"),
+                "snubbed": has("snubbed"), "optimistic": has("optimistic_unchoke"),
+                "on_parole": has("on_parole"), "endgame": has("endgame_mode"),
+                "extensions": has("supports_extensions"),
+                "dl_queue": int(p.download_queue_length), "ul_queue": int(p.upload_queue_length),
+                "hashfails": int(p.num_hashfails), "failcount": int(p.failcount),
+                "rtt": int(getattr(p, "rtt", 0) or 0),
+                "last_active": secs(p.last_active), "last_request": secs(p.last_request),
+            }
+        return None
+
     def piece_map(self, key: str) -> dict:
         """Piece states for the Piece map tab and the Summary bars.
         state per piece: 0 empty · 1 downloading · 2 done · 3 skipped (files not wanted)."""

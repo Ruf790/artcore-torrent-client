@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from datetime import date, datetime, timedelta
 
-from PySide6.QtCore import Qt, QRectF, QPointF, QThread, Signal, QSize, QTimer
+from PySide6.QtCore import Qt, QRectF, QPointF, QThread, Signal, QSize, QTimer, QUrl
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QFontMetrics, QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
@@ -1354,3 +1354,121 @@ class BansDialog(QDialog):
         if QMessageBox.question(self, t("bans_title"), t("bans_clear_q", len(self.engine.bans))) == QMessageBox.Yes:
             self.engine.clear_bans()
             self._fill()
+
+
+
+class PeerDialog(QDialog):
+    """One peer up close, refreshed every second: who, how connected, what was exchanged, and the
+    BitTorrent state flags in plain words."""
+    def __init__(self, engine, key: str, addr: str, geo=None, parent=None):
+        super().__init__(parent)
+        from .ui import fmt_eta, fmt_speed
+        self.fmt_eta, self.fmt_speed = fmt_eta, fmt_speed
+        _theme_title_bar(self)
+        self.engine, self.key, self.addr, self.geo = engine, key, addr, geo
+        self.setWindowTitle(t("pd_title", addr))
+        self.setWindowIcon(app_icon())
+        self.resize(860, 620)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 12)
+        lay.setSpacing(10)
+        self.head = QLabel(); self.head.setTextFormat(Qt.RichText)
+        lay.addWidget(self.head)
+        grid = QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(12)
+        self.vals: dict[str, QLabel] = {}
+        sections = [
+            ("pd_sec_peer", "fa6s.user", "primary",
+             ["pd_addr", "pd_country", "pd_client", "pd_peerid", "pd_source", "pd_kind"]),
+            ("pd_sec_conn", "fa6s.plug", "info",
+             ["pd_dir", "pd_proto", "pd_enc", "pd_connected", "pd_rtt", "pd_local"]),
+            ("pd_sec_xfer", "fa6s.right-left", "success",
+             ["pd_down", "pd_up", "pd_dl_total", "pd_ul_total", "pd_peer_rate", "pd_have"]),
+            ("pd_sec_state", "fa6s.list-check", "purple",
+             ["pd_we_want", "pd_they_want", "pd_we_choke", "pd_they_choke", "pd_queue", "pd_health"]),
+        ]
+        for i, (title, ic, tone, keys) in enumerate(sections):
+            box = QFrame(); box.setObjectName("card")
+            v = QVBoxLayout(box); v.setContentsMargins(14, 10, 14, 12); v.setSpacing(6)
+            v.addWidget(_section(t(title), ic, tone))
+            g = QGridLayout(); g.setHorizontalSpacing(12); g.setVerticalSpacing(5)
+            for r, k in enumerate(keys):
+                lab = QLabel(t(k)); lab.setObjectName("meta")
+                val = QLabel("—"); val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                val.setWordWrap(True)
+                g.addWidget(lab, r, 0, Qt.AlignTop); g.addWidget(val, r, 1)
+                self.vals[k] = val
+            g.setColumnStretch(1, 1)
+            v.addLayout(g); v.addStretch()
+            grid.addWidget(box, i // 2, i % 2)
+        lay.addLayout(grid, 1)
+        row = QHBoxLayout()
+        self.b_copy = QPushButton(widgets.icon("fa6s.copy"), t("peer_copy_ip"))
+        self.b_copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(addr.rsplit(":", 1)[0]))
+        self.b_ban = QPushButton(widgets.icon("fa6s.ban", "danger"), t("peer_ban", addr.rsplit(":", 1)[0]))
+        self.b_ban.clicked.connect(self._ban)
+        close = QPushButton(t("close")); close.setObjectName("primary"); close.clicked.connect(self.accept)
+        row.addWidget(self.b_copy); row.addWidget(self.b_ban); row.addStretch(); row.addWidget(close)
+        lay.addLayout(row)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.refresh); self.timer.start(1000)
+        self.refresh()
+
+    def _ban(self):
+        self.engine.ban(self.addr.rsplit(":", 1)[0], t("peer_ban_manual"))
+        self.b_ban.setEnabled(False)
+
+    @staticmethod
+    def _yn(on: bool, yes: str, no: str) -> str:
+        col = C["success"] if on else C["secondary"]
+        return f'<span style="color:{col}">{"●" if on else "○"}</span>&nbsp;{yes if on else no}'
+
+    def refresh(self):
+        d = self.engine.peer_detail(self.key, self.addr)
+        if d is None:
+            self.timer.stop()
+            self.head.setText(f'<span style="font-size:13pt;font-weight:600">{self.addr}</span>'
+                              f'&nbsp;&nbsp;<span style="color:{C["danger"]}">{t("pd_gone")}</span>')
+            return
+        code, cname = ("", "")
+        if self.geo is not None and getattr(self.geo, "status", "") == "ready":
+            code, cname = self.geo.lookup(d["host"])
+        flag = widgets.flag_path(code)
+        img = f'<img src="{QUrl.fromLocalFile(flag).toString()}" width="24" height="18">&nbsp;' if flag else ""
+        role = t("pd_seed") if d["seed"] else t("pd_leech", f"{d['progress'] * 100:.1f}%")
+        self.head.setText(f'{img}<span style="font-size:13pt;font-weight:600">{d["client"] or "?"}</span>'
+                          f'&nbsp;&nbsp;<span style="color:{C["secondary"]}">{d["addr"]} · {role}</span>')
+        fs, fe = self.fmt_speed, self.fmt_eta
+        v = {
+            "pd_addr": d["addr"],
+            "pd_country": f"{cname} ({code})" if code else "—",
+            "pd_client": d["client"] or "—",
+            "pd_peerid": d["peer_id"],
+            "pd_source": ", ".join(t("src_" + x) for x in d["sources"]),
+            "pd_kind": t("pd_kind_" + d["kind"]),
+            "pd_dir": t("pd_out") if d["outgoing"] else t("pd_in"),
+            "pd_proto": ("uTP (UDP)" if d["utp"] else "TCP") + (" · I2P" if d["i2p"] else "")
+                        + (" · SSL" if d["ssl"] else "") + (" · NAT hole-punch" if d["holepunched"] else ""),
+            "pd_enc": self._yn(bool(d["enc"]), t("pd_enc_" + (d["enc"] or "rc4")), t("pd_enc_none")),
+            "pd_connected": fe(d["connected"]),
+            "pd_rtt": f'{d["rtt"]} ms' if d["rtt"] else "—",
+            "pd_local": d["local_endpoint"] or "—",
+            "pd_down": f'{fs(d["down"]) or "0 B/s"}  ·  {t("pd_peak")} {fs(d["down_peak"]) or "0 B/s"}',
+            "pd_up": f'{fs(d["up"]) or "0 B/s"}  ·  {t("pd_peak")} {fs(d["up_peak"]) or "0 B/s"}',
+            "pd_dl_total": fmt_size(d["downloaded"]),
+            "pd_ul_total": fmt_size(d["uploaded"]),
+            "pd_peer_rate": fs(d["peer_rate"]) or "—",
+            "pd_have": t("pd_have_v", f"{d['progress'] * 100:.1f}%", d["num_pieces"]),
+            "pd_we_want": self._yn(d["interesting"], t("pd_yes_we_want"), t("pd_no_we_want")),
+            "pd_they_want": self._yn(d["remote_interested"], t("pd_yes_they_want"), t("pd_no_they_want")),
+            "pd_we_choke": self._yn(not d["choked"], t("pd_we_unchoke"), t("pd_we_choke_v")),
+            "pd_they_choke": self._yn(not d["remote_choked"], t("pd_they_unchoke"), t("pd_they_choke_v")),
+            "pd_queue": t("pd_queue_v", d["dl_queue"], d["ul_queue"]),
+            "pd_health": ", ".join(x for x in (
+                t("pd_snubbed") if d["snubbed"] else "", t("pd_parole") if d["on_parole"] else "",
+                t("pd_optimistic") if d["optimistic"] else "", t("pd_endgame") if d["endgame"] else "",
+                t("pd_hashfails", d["hashfails"]) if d["hashfails"] else "",
+                t("pd_upload_only") if d["upload_only"] and not d["seed"] else "") if x) or t("pd_ok"),
+        }
+        for k, text in v.items():
+            lab = self.vals[k]
+            if lab.text() != text:
+                lab.setText(text)
