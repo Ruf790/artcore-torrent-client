@@ -315,6 +315,14 @@ PROGRESS_COLORS = {   # state → (start, end) of the bar gradient
 }
 
 
+def _bar_state(r) -> str:
+    """State the progress bar is coloured by. A tracker refusing the announce says nothing about
+    the data: the bar keeps the colour of a download / finished torrent, only the status is red."""
+    if r.state == "tracker_error":
+        return "seeding" if r.progress >= 1 else "downloading"
+    return r.state
+
+
 class ProgressDelegate(QStyledItemDelegate):
     """Rounded pill bar with the percentage inside: dark text over the empty part,
     white over the filled part. Gradient by state, light stripes while downloading."""
@@ -339,7 +347,7 @@ class ProgressDelegate(QStyledItemDelegate):
         painter.setPen(Qt.NoPen)
         painter.fillPath(track, QColor(C["secondary_bg"]))
         p = max(0.0, min(1.0, r.progress))
-        a, b = PROGRESS_COLORS.get(r.state, ("primary", "info"))
+        a, b = PROGRESS_COLORS.get(_bar_state(r), ("primary", "info"))
         if theme.current_style == "muted":
             b = a
         fill = QRectF(bar.left(), bar.top(), bar.width() * p, bar.height())
@@ -395,7 +403,7 @@ class ProgressDelegate(QStyledItemDelegate):
         painter.drawRect(bar.adjusted(0.5, 0.5, -0.5, -0.5))
         fill = QRectF(bar.left(), bar.top(), bar.width() * p, bar.height())
         if p > 0:
-            key = self.CLASSIC.get(r.state, "primary")
+            key = self.CLASSIC.get(_bar_state(r), "primary")
             painter.fillRect(fill.adjusted(1, 1, 0, -1) if p < 1 else bar.adjusted(1, 1, -1, -1), QColor(C[key]))
         f = painter.font(); f.setPointSizeF(8.5); painter.setFont(f)
         txt = "100%" if p >= 1 else f"{p * 100:.1f}%"
