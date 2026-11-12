@@ -150,15 +150,15 @@ def main() -> int:
         def read():
             data = bytes(s.readAll()).decode("utf-8", "replace")
             win.show_normal()
-            for line in data.splitlines():
-                if line and line != "--show":
-                    win.add_item(line)
+            got = [line for line in data.splitlines() if line and line != "--show"]
+            if got:
+                win.queue_items(got)
         s.readyRead.connect(read)
     server.newConnection.connect(on_conn)
     win.server = server              # closed before a restart (language switch)
 
-    for it in items:
-        win.add_item(it)
+    if items:
+        win.queue_items(items)
 
     code = app.exec()
     # Everything is saved by now (MainWindow.quit → engine.shutdown). Leave for real: closing the
