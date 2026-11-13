@@ -3285,6 +3285,15 @@ class MainWindow(QMainWindow):
         self.refresh_files(key)
         self.files_tbl.reveal(index)
 
+    def reveal_incomplete(self, path: str):
+        """Double-click on "name.!ac" in Explorer: select its torrent and the file in "Files"."""
+        self.show_normal()
+        hit = self.engine.find_incomplete(path)
+        if hit is None:
+            QMessageBox.information(self, APP_TITLE, t("ac_unknown", os.path.basename(path)))
+            return
+        self.locate_file(*hit)
+
     def export_list(self):
         """The torrent list as it is shown (filter + sort order) → Excel (.xlsx) or CSV."""
         from . import export
@@ -4728,6 +4737,12 @@ class MainWindow(QMainWindow):
 
     def add_items(self, items: list[str]):
         """Several at once (drop, paste): links are downloaded first; a whole folder asks once."""
+        partial = [i for i in items if i.lower().endswith(".!ac")]
+        if partial:                           # an unfinished file opened from Explorer: show its torrent
+            items = [i for i in items if i not in partial]
+            self.reveal_incomplete(partial[0])
+            if not items:
+                return
         local = [i for i in items if not i.lower().startswith(("http://", "https://"))]
         links = [i for i in items if i.lower().startswith(("http://", "https://"))]
         if len(local) > 1 and self.cfg.get("show_add_dialog", True):

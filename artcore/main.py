@@ -96,7 +96,7 @@ def main() -> int:
     args = sys.argv[1:]
     if "--selftest" in args:
         return selftest()
-    items = [a for a in args if a.startswith("magnet:") or a.lower().endswith(".torrent")]
+    items = [a for a in args if a.startswith("magnet:") or a.lower().endswith((".torrent", ".!ac"))]
     minimized = "--minimized" in args
 
     winint.init_process()

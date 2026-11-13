@@ -2049,6 +2049,23 @@ class Engine:
             return ""
         return os.path.join(h.status().save_path, self.disk_rel(key, h.torrent_file().files(), i))
 
+    def find_incomplete(self, path: str) -> tuple[str, int] | None:
+        """(torrent key, file index) of an unfinished "*.!ac" file — Explorer opened it in the client."""
+        want = os.path.normcase(os.path.abspath(path))
+        for key, h in list(self.handles.items()):
+            ac = self.opts.get(key, {}).get("ac", ())
+            if not ac:
+                continue
+            try:
+                st = h.status()
+                fs = h.torrent_file().files()
+                for i in ac:
+                    if os.path.normcase(os.path.abspath(os.path.join(st.save_path, self.disk_rel(key, fs, i)))) == want:
+                        return key, i
+            except Exception:
+                continue
+        return None
+
     def sync_incomplete_ext(self, key: str) -> None:
         """Settings → Folders, "Add .!ac to unfinished files": unfinished files are renamed to
         "name.ext.!ac", finished ones (and all of them when the option is off) lose the suffix.
