@@ -113,6 +113,7 @@ class Engine:
         self._day_mark = (0, 0)              # session totals already put into self.days
         self._ac_pending: set[tuple[str, int]] = set()   # ".!ac" renames sent, alert not back yet
         self._ac_dirty: set[str] = set()                  # torrents whose ".!ac" state to re-check
+        self._ac_failed: dict[tuple[str, int], float] = {}  # rename refused (file open in a player…) → retry later
         self._moves: dict[str, dict] = {}    # key → {"dest", "files": [(path, size)], "total", "pct", "at"}
         self.moved_names: list[tuple[str, str, str]] = []      # (name, key, "" | error) for the UI
         self.checked_names: list[tuple[str, str, float]] = []  # (name, key, progress) after a hash check
@@ -234,10 +235,12 @@ class Engine:
         }
 
     def apply_settings(self, cfg: dict) -> None:
-        old_ext = bool(getattr(self, "cfg", {}).get("incomplete_ext"))
         self.cfg = cfg
         self.ses.apply_settings(self._settings())
-        if bool(cfg.get("incomplete_ext")) != old_ext:
+        # the settings dialog edits this very dict in place, so compare with our own copy of the flag
+        ext = bool(cfg.get("incomplete_ext"))
+        if ext != getattr(self, "_ac_on", None):
+            self._ac_on = ext
             for key in list(getattr(self, "handles", {})):
                 self.sync_incomplete_ext(key)
         for key, h in self.handles.items():
@@ -1211,6 +1214,7 @@ class Engine:
                     pass
             if isinstance(a, lt.file_rename_failed_alert) and self._cur_key:
                 self._ac_pending.discard((self._cur_key, int(a.index)))
+                self._ac_failed[(self._cur_key, int(a.index))] = time.time()
             if isinstance(a, lt.file_completed_alert) and self._cur_key:
                 if int(a.index) in self.opts.get(self._cur_key, {}).get("ac", []):
                     self._ac_dirty.add(self._cur_key)
@@ -1300,6 +1304,14 @@ class Engine:
             self._check_cross()
         if self._polls % 3 == 0:
             self._apply_tracker_limits()
+        if self._polls % 30 == 13 and (self.cfg.get("incomplete_ext") or any(o.get("ac") for o in self.opts.values())):
+            for key, h in list(self.handles.items()):      # safety net: a missed alert, a file a player had open
+                try:
+                    st = h.status()
+                    if not st.is_seeding or self.opts.get(key, {}).get("ac"):
+                        self.sync_incomplete_ext(key)
+                except Exception:
+                    pass
         if self._polls % 15 == 0:
             self._count_trackers()
             self._check_space()
@@ -2061,6 +2073,8 @@ class Engine:
         done = h.file_progress() if on else []
         for i in range(fs.num_files()):
             if fs.file_flags(i) & lt.file_storage.flag_pad_file or (key, i) in self._ac_pending:
+                continue
+            if time.time() - self._ac_failed.get((key, i), 0) < 300:
                 continue
             size = fs.file_size(i)
             want = on and size > 0 and i < len(done) and done[i] < size
