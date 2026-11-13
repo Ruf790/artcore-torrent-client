@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QPlainTextEdit, QPushButton, QRadioButton, QTableWidget,
@@ -508,3 +509,96 @@ class ImportDialog(QDialog):
                 skipped += 1
                 self.engine._log("error", f"import {c.name}: {e}")
         return done, skipped
+
+
+# ============================================================
+#  Open from address (BitComet style): http(s) links, magnets, info-hashes
+# ============================================================
+
+def address_items(text: str) -> tuple[list[str], list[str]]:
+    """Recognised items (links, magnets, hashes turned into magnets, local .torrent paths)
+    and the lines that are none of these."""
+    from .panels import items_from_text
+    good, bad = [], []
+    for line in (text or "").replace("\r", "\n").split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        found = items_from_text(s)
+        if found:
+            good += found
+        else:
+            bad.append(s)
+    return list(dict.fromkeys(good)), bad
+
+
+def _clipboard_addresses() -> str:
+    """Clipboard text if it holds only links / magnets / hashes (not ordinary text, not paths)."""
+    from PySide6.QtGui import QGuiApplication
+    clip = (QGuiApplication.clipboard().text() or "").strip()
+    if not clip or len(clip) > 200_000:
+        return ""
+    lines = [l.strip() for l in clip.replace("\r", "\n").split("\n") if l.strip()]
+    def remote(s: str) -> bool:
+        low = s.lower()
+        return (low.startswith(("magnet:?", "http://", "https://"))
+                or (len(s) in (40, 64) and all(c in "0123456789abcdefABCDEF" for c in s)))
+    return "\n".join(lines) if lines and all(remote(l) for l in lines) else ""
+
+
+class AddressDialog(QDialog):
+    """«Open from address»: several lines, each a .torrent link, a magnet or an info-hash."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        ui = _ui()
+        ui._theme_title_bar(self)
+        self.setWindowTitle(t("addr_title"))
+        self.setWindowIcon(ui.icon("fa6s.magnet", "ic_magnet"))
+        self.setMinimumSize(560, 360)
+        self.items: list[str] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 16)
+        lay.setSpacing(6)
+        lay.addWidget(QLabel(t("addr_intro")))
+        for ic, color, key in (("fa6s.link", "primary", "addr_http"),
+                               ("fa6s.magnet", "ic_magnet", "addr_magnet"),
+                               ("fa6s.hashtag", "success", "addr_hash")):
+            row = QHBoxLayout()
+            row.setContentsMargins(12, 0, 0, 0)
+            pic = QLabel()
+            pic.setPixmap(ui.icon(ic, color).pixmap(14, 14))
+            row.addWidget(pic)
+            row.addWidget(QLabel(t(key)), 1)
+            lay.addLayout(row)
+        self.edit = QPlainTextEdit()
+        self.edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.edit.setPlaceholderText(t("addr_placeholder"))
+        self.edit.setPlainText(_clipboard_addresses())
+        lay.addSpacing(4)
+        lay.addWidget(self.edit, 1)
+        self.status = QLabel()
+        self.status.setObjectName("meta")
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        self.bb = _buttons(self)
+        lay.addWidget(self.bb)
+        self.edit.textChanged.connect(self._update)
+        self._update()
+        self.edit.setFocus()
+        self.edit.moveCursor(QTextCursor.End)
+
+    def _update(self):
+        good, bad = address_items(self.edit.toPlainText())
+        parts = []
+        if good:
+            parts.append(t("addr_found", len(good)))
+        if bad:
+            sample = bad[0] if len(bad[0]) <= 60 else bad[0][:57] + "…"
+            parts.append(t("addr_bad", len(bad), sample))
+        self.status.setText("   ".join(parts))
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(bool(good))
+
+    def accept(self):
+        self.items, _bad = address_items(self.edit.toPlainText())
+        if self.items:
+            super().accept()

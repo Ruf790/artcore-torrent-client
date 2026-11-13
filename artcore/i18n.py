@@ -6,7 +6,7 @@ _lang = "ru"
 STRINGS = {
     # toolbar / menu
     "add_torrent":     ("Добавить торрент",       "Add torrent"),
-    "add_magnet":      ("Magnet-ссылка",          "Magnet link"),
+    "add_magnet":      ("По адресу",              "From address"),
     "create_torrent":  ("Создать торрент",        "Create torrent"),
     "start":           ("Старт",                  "Start"),
     "pause":           ("Пауза",                  "Pause"),
@@ -548,6 +548,16 @@ STRINGS = {
     "no":              ("Нет",        "No"),
     # dialogs
     "magnet_prompt":   ("Вставьте magnet-ссылку:",           "Paste a magnet link:"),
+    "addr_title":      ("Открыть торрент по адресу",         "Open torrent from address"),
+    "addr_intro":      ("Можно открыть торрент по адресам таких видов, по одному на строку:",
+                        "You can open torrents from these kinds of addresses, one per line:"),
+    "addr_http":       ("HTTP(S)-ссылка на .torrent-файл",   "HTTP(S) link to a .torrent file"),
+    "addr_magnet":     ("Magnet-ссылка",                     "Magnet link"),
+    "addr_hash":       ("Инфо-хеш (40 или 64 символа)",      "Info hash (40 or 64 characters)"),
+    "addr_placeholder": ("https://…/download.php?id=…\nmagnet:?xt=urn:btih:…\n0123456789abcdef0123456789abcdef01234567",
+                         "https://…/download.php?id=…\nmagnet:?xt=urn:btih:…\n0123456789abcdef0123456789abcdef01234567"),
+    "addr_found":      ("Распознано: {0}",                   "Recognised: {0}"),
+    "addr_bad":        ("Не распознано строк: {0} (например: {1})", "Not recognised: {0} line(s) (e.g. {1})"),
     "remove_title":    ("Удалить торрент",                   "Remove torrent"),
     "remove_text":     ("Удалить выбранные торренты ({0})?", "Remove selected torrents ({0})?"),
     "remove_files":    ("Удалить и скачанные файлы",         "Also delete downloaded files"),
