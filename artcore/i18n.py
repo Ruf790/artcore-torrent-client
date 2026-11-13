@@ -593,6 +593,11 @@ STRINGS = {
     # create torrent
     "ct_title":        ("Создать торрент",                   "Create torrent"),
     "ct_source":       ("Файл или папка",                    "File or folder"),
+    "ct_banner":       ("Из файла или папки — для любого трекера. Пасскей и параметры запоминаются.",
+                        "From a file or a folder — for any tracker. The passkey and options are remembered."),
+    "ct_card_src":     ("Источник",                          "Source"),
+    "ct_card_trk":     ("Трекеры и зеркала",                 "Trackers and mirrors"),
+    "ct_card_opt":     ("Параметры",                         "Options"),
     "ct_file":         ("Файл…",                             "File…"),
     "ct_folder":       ("Папка…",                            "Folder…"),
     "ct_announce":     ("Announce URL (ваш, с passkey)",     "Announce URL (yours, with passkey)"),

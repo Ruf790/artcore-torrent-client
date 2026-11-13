@@ -1364,6 +1364,74 @@ def _section(text: str, icon_name: str | None = None, color: str = "primary") ->
     return lab
 
 
+def _blue_card(title: str, icon_name: str | None = None) -> tuple[QFrame, QFormLayout]:
+    """A card with a blue header bar (like the site's "card-header bg-primary"); returns the card
+    and the form layout of its body (labels above the fields)."""
+    card = QFrame()
+    card.setObjectName("bcard")
+    card.setStyleSheet(
+        f"QFrame#bcard {{ background: {C['body_bg']}; border: 1px solid {C['border']}; border-radius: 10px; }}"
+        f"QFrame#bcardHead {{ border: none; border-top-left-radius: 9px; border-top-right-radius: 9px;"
+        f" background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {C['primary']}, stop:1 {C['primary_hover']}); }}"
+        f"QFrame#bcardHead QLabel {{ background: transparent; border: none; color: #ffffff; }}"
+        f"QLabel#bcardTitle {{ font-family: \"{theme.TITLE_FONT}\"; font-size: 11pt; font-weight: 600; }}"
+        f"QWidget#bcardBody {{ background: transparent; border: none; }}")
+    v = QVBoxLayout(card)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(0)
+    head = QFrame()
+    head.setObjectName("bcardHead")
+    hl = QHBoxLayout(head)
+    hl.setContentsMargins(12, 7, 12, 7)
+    hl.setSpacing(8)
+    if icon_name:
+        ic = QLabel()
+        ic.setPixmap(widgets.icon(icon_name, "#ffffff").pixmap(15, 15))
+        hl.addWidget(ic)
+    lab = QLabel(title)
+    lab.setObjectName("bcardTitle")
+    hl.addWidget(lab, 1)
+    v.addWidget(head)
+    body = QWidget()
+    body.setObjectName("bcardBody")
+    form = QFormLayout(body)
+    form.setContentsMargins(14, 10, 14, 12)
+    form.setRowWrapPolicy(QFormLayout.WrapAllRows)
+    form.setVerticalSpacing(6)
+    v.addWidget(body)
+    return card, form
+
+
+def _blue_banner(title: str, subtitle: str, icon_name: str) -> QFrame:
+    """Blue band at the top of a dialog: a big icon, the title and a line of explanation."""
+    band = QFrame()
+    band.setObjectName("bband")
+    band.setStyleSheet(
+        f"QFrame#bband {{ border: none; border-radius: 12px;"
+        f" background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {C['primary']}, stop:1 {C['purple']}); }}"
+        f"QFrame#bband QLabel {{ background: transparent; border: none; color: #ffffff; }}"
+        f"QLabel#bbandTitle {{ font-family: \"{theme.TITLE_FONT}\"; font-size: 15pt; font-weight: 600; }}"
+        f"QLabel#bbandIcon {{ background: rgba(255,255,255,46); border-radius: 10px; }}")
+    hl = QHBoxLayout(band)
+    hl.setContentsMargins(14, 12, 16, 12)
+    hl.setSpacing(12)
+    ic = QLabel()
+    ic.setObjectName("bbandIcon")
+    ic.setFixedSize(44, 44)
+    ic.setAlignment(Qt.AlignCenter)
+    ic.setPixmap(widgets.icon(icon_name, "#ffffff").pixmap(22, 22))
+    hl.addWidget(ic)
+    col = QVBoxLayout()
+    col.setSpacing(0)
+    tl = QLabel(title); tl.setObjectName("bbandTitle")
+    sl = QLabel(subtitle); sl.setWordWrap(True)
+    sl.setStyleSheet("color: rgba(255,255,255,215);")
+    col.addWidget(tl)
+    col.addWidget(sl)
+    hl.addLayout(col, 1)
+    return band
+
+
 def _theme_title_bar(w: QWidget) -> None:
     winint.set_title_bar(int(w.winId()), theme.current_name == "dark", C["page_bg"], C["emphasis"])
 
@@ -2729,12 +2797,13 @@ class CreateTorrentDialog(QDialog):
         self.cfg = cfg
         self.out_path = ""
         self.src_path = ""
-        form = QFormLayout(self)
-        form.setContentsMargins(20, 12, 20, 16)
-        form.setRowWrapPolicy(QFormLayout.WrapAllRows)      # labels above the fields: more room for paths
-        form.setVerticalSpacing(6)
-        form.addRow(_section(t("ct_title")))
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 14, 18, 16)
+        outer.setSpacing(12)
+        outer.addWidget(_blue_banner(t("ct_title"), t("ct_banner"), "fa6s.file-circle-plus"))
 
+        card, form = _blue_card(t("ct_card_src"), "fa6s.folder-open")
+        outer.addWidget(card)
         self.src = QLineEdit()
         bf = QPushButton(t("ct_file"));   bf.clicked.connect(self._pick_file)
         bd = QPushButton(t("ct_folder")); bd.clicked.connect(self._pick_dir)
@@ -2764,8 +2833,15 @@ class CreateTorrentDialog(QDialog):
             e.setLineWrapMode(QPlainTextEdit.NoWrap)
             return e
 
+        card, form = _blue_card(t("ct_card_trk"), "fa6s.server")
+        outer.addWidget(card)
         self.announce = text_box(cfg.get("announce_url", ""), "https://tracker.example/announce.php?passkey=…")
         form.addRow(t("ct_announce_n"), self.announce)
+        self.webseeds = text_box("", "https://mirror.example/files/", 46)
+        form.addRow(t("ct_webseeds"), self.webseeds)
+
+        card, form = _blue_card(t("ct_card_opt"), "fa6s.sliders")
+        outer.addWidget(card)
 
         opts = QHBoxLayout()
         self.piece = QComboBox()
@@ -2783,25 +2859,23 @@ class CreateTorrentDialog(QDialog):
         self.piece.currentIndexChanged.connect(lambda _: self._show_check())
         self.fmt.currentIndexChanged.connect(lambda _: self._schedule_check())
 
-        self.webseeds = text_box("", "https://mirror.example/files/", 46)
-        form.addRow(t("ct_webseeds"), self.webseeds)
         self.source = QLineEdit(cfg.get("ct_source", ""))
         self.source.setToolTip(t("ct_source_hint"))
         form.addRow(t("ct_src_tag"), self.source)
         self.comment = QLineEdit()
         form.addRow(t("ct_comment"), self.comment)
         self.private = QCheckBox(t("ct_private")); self.private.setChecked(True)
-        form.addRow(self.private)
         self.seed = QCheckBox(t("ct_seed")); self.seed.setChecked(True)
-        form.addRow(self.seed)
+        flags = QHBoxLayout(); flags.addWidget(self.private); flags.addSpacing(18); flags.addWidget(self.seed); flags.addStretch()
+        form.addRow(flags)
         self.bar = QProgressBar(); self.bar.setTextVisible(True); self.bar.hide()
-        form.addRow(self.bar)
+        outer.addWidget(self.bar)
 
         self.bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.bb.button(QDialogButtonBox.Ok).setObjectName("primary")
         self.bb.accepted.connect(self._go)
         self.bb.rejected.connect(self.reject)
-        form.addRow(self.bb)
+        outer.addWidget(self.bb)
 
     def _schedule_check(self):
         self._check_timer.start()
