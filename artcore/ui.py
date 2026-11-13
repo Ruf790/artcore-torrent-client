@@ -4569,11 +4569,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, t("ba_title"), "\n".join(errors[:15]))
 
     def add_magnet_dialog(self):
-        clip = QGuiApplication.clipboard().text().strip()
-        text, ok = QInputDialog.getText(self, t("add_magnet"), t("magnet_prompt"),
-                                        text=clip if clip.startswith("magnet:") else "")
-        if ok and text.strip():
-            self.add_item(text.strip())
+        """BitComet-style «Open from address»: links, magnets and info-hashes, several lines."""
+        from .dialogs import AddressDialog
+        d = AddressDialog(self)
+        if d.exec() and d.items:
+            self.add_items(d.items)
 
     def create_torrent_dialog(self):
         d = CreateTorrentDialog(self.cfg, self)
