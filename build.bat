@@ -4,7 +4,7 @@ rem Needs: Python 3.12 or 3.13 64-bit (python.org), Inno Setup 6.3+ (jrsoftware.
 cd /d "%~dp0"
 
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt pyinstaller || goto :err
+python -m pip install -r requirements.txt pyinstaller pillow || goto :err
 
 python tools\make_icon.py || goto :err
 

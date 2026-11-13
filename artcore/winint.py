@@ -8,6 +8,7 @@ import sys
 IS_WIN = sys.platform == "win32"
 APP_ID = "ArtCore.Client"
 PROG_ID = "ArtCoreClient.torrent"
+PROG_ID_PART = "ArtCoreClient.incomplete"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "ArtCore Client"
 MUTEX_NAME = "ArtCoreClientMutex"   # same name as AppMutex in setup.iss
@@ -205,6 +206,16 @@ def register_associations() -> None:
     if icon:
         setkey(PROG_ID + r"\DefaultIcon", {"": f'"{icon}",0'})
     setkey(PROG_ID + r"\shell\open\command", {"": f'{cmd} "%1"'})
+    # unfinished files ("name.!ac"): own icon, double-click shows the torrent in the client
+    setkey(".!ac", {"": PROG_ID_PART})
+    from .i18n import t
+    setkey(PROG_ID_PART, {"": t("ac_type")})
+    part_icon = os.path.join(os.path.dirname(icon), "incomplete.ico") if icon else ""
+    if part_icon and os.path.isfile(part_icon):
+        setkey(PROG_ID_PART + r"\DefaultIcon", {"": f'"{part_icon}",0'})
+    elif icon:
+        setkey(PROG_ID_PART + r"\DefaultIcon", {"": f'"{icon}",0'})
+    setkey(PROG_ID_PART + r"\shell\open\command", {"": f'{cmd} "%1"'})
     setkey("magnet", {"": "URL:Magnet link", "URL Protocol": ""})
     if icon:
         setkey(r"magnet\DefaultIcon", {"": f'"{icon}",0'})

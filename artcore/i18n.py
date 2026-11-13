@@ -799,6 +799,11 @@ STRINGS = {
                          "Когда файл готов, расширение убирается само. Включение и выключение сразу переименовывает файлы уже добавленных торрентов.",
                          "While a file is unfinished it is named “movie.mkv.!ac”, so it can't be opened by mistake. "
                          "The suffix is removed as soon as the file is complete. Turning this on or off renames the files of existing torrents right away."),
+    "ac_type":         ("Недокачанный файл (ArtCore Client)", "Unfinished download (ArtCore Client)"),
+    "ac_unknown":      ("Файл «{0}» не относится ни к одному торренту в клиенте.\n\n"
+                        "Это недокачанный файл: если торрент удалён, файл можно удалить или добавить торрент снова — загрузка продолжится с того же места.",
+                        "“{0}” does not belong to any torrent in the client.\n\n"
+                        "It is an unfinished file: if its torrent was removed, delete the file or add the torrent again — the download continues where it stopped."),
     "set_move_done":   ("Переносить готовые загрузки в",     "Move completed downloads to"),
     "set_move_bycat":  ("…в подпапку с названием категории", "…into a subfolder named after the category"),
     "folder_off":      ("не задана",                         "not set"),

@@ -3,12 +3,13 @@
 ; Expects the PyInstaller output in dist\ArtCoreClient\.
 
 #define AppName      "ArtCore Client"
-#define AppVersion   "1.0.47"
+#define AppVersion   "1.0.48"
 #define AppPublisher "ArtCore Client"
 #define AppURL       "https://github.com/Ruf790/artcore-torrent-client"
 #define AppExe       "ArtCoreClient.exe"
 #define ProgIdT      "ArtCoreClient.torrent"
 #define ProgIdM      "ArtCoreClient.magnet"
+#define ProgIdI      "ArtCoreClient.incomplete"
 
 [Setup]
 ; Never change AppId: Windows uses it to find the installed copy for updates/uninstall
@@ -63,6 +64,8 @@ ru.Firewall=Разрешить входящие соединения в бран
 en.Firewall=Allow incoming connections in Windows Firewall
 ru.TorrentFile=Торрент-файл
 en.TorrentFile=Torrent file
+ru.IncompleteFile=Недокачанный файл (ArtCore Client)
+en.IncompleteFile=Unfinished download (ArtCore Client)
 
 [Tasks]
 Name: "desktopicon";  Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -74,6 +77,7 @@ Name: "firewall";     Description: "{cm:Firewall}";          GroupDescription: "
 
 [Files]
 Source: "dist\ArtCoreClient\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "assets\incomplete.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "COPYING"; DestDir: "{app}"; DestName: "COPYING.txt"; Flags: ignoreversion
 Source: "THIRD-PARTY.md"; DestDir: "{app}"; DestName: "THIRD-PARTY.txt"; Flags: ignoreversion
@@ -95,6 +99,13 @@ Root: HKA; Subkey: "Software\Classes\.torrent\OpenWithProgids"; ValueType: strin
 Root: HKA; Subkey: "Software\Classes\{#ProgIdT}"; ValueType: string; ValueName: ""; ValueData: "{cm:TorrentFile}"; Flags: uninsdeletekey; Tasks: assoctorrent
 Root: HKA; Subkey: "Software\Classes\{#ProgIdT}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"",0"; Tasks: assoctorrent
 Root: HKA; Subkey: "Software\Classes\{#ProgIdT}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: assoctorrent
+
+; ── .!ac — unfinished files: own icon, double-click shows the torrent in the client ──
+Root: HKA; Subkey: "Software\Classes\.!ac"; ValueType: string; ValueName: ""; ValueData: "{#ProgIdI}"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.!ac\OpenWithProgids"; ValueType: string; ValueName: "{#ProgIdI}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\{#ProgIdI}"; ValueType: string; ValueName: ""; ValueData: "{cm:IncompleteFile}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\{#ProgIdI}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\incomplete.ico"",0"
+Root: HKA; Subkey: "Software\Classes\{#ProgIdI}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 
 ; ── magnet: ─────────────────────────────────────────────────
 Root: HKA; Subkey: "Software\Classes\magnet"; ValueType: string; ValueName: ""; ValueData: "URL:Magnet link"; Flags: uninsdeletekey; Tasks: assocmagnet
