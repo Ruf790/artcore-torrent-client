@@ -1006,7 +1006,8 @@ class ToastHost:
 
 class MiniWidget(QWidget):
     """Floating always-on-top speed window (BitComet-style): drag to move, double-click opens the
-    client, right-click for a menu. Small graph of the last two minutes behind the numbers."""
+    client, right-click for a menu, .torrent files / magnets / browser links can be dropped on it.
+    Semi-transparent until the mouse is over it. Small graph of the last two minutes behind the numbers."""
     def __init__(self, win: "MainWindow"):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.win = win
@@ -1015,8 +1016,15 @@ class MiniWidget(QWidget):
         self.down: deque[int] = deque(maxlen=120)
         self.up: deque[int] = deque(maxlen=120)
         self._drag = None
+        self._drop = False
         self.setCursor(Qt.SizeAllCursor)
         self.setToolTip(t("mini_tip"))
+        self.setAcceptDrops(True)
+        self.apply_opacity()
+
+    def apply_opacity(self, hover: bool = False):
+        pct = int(self.win.cfg.get("mini_opacity", 85))
+        self.setWindowOpacity(1.0 if hover or self._drop else max(20, min(100, pct)) / 100)
 
     def push(self, down: int, up: int):
         self.down.append(down)
@@ -1027,6 +1035,17 @@ class MiniWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if self._drop:                                   # something is being dragged over it
+            p.setPen(QPen(QColor(C["primary"]), 2, Qt.DashLine))
+            p.setBrush(QColor(C["primary_subtle"]))
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10)
+            p.drawPixmap(int(r.left() + 12), int(r.center().y() - 10),
+                         qta.icon("fa6s.file-arrow-down", color=C["primary"]).pixmap(20, 20))
+            f = p.font(); f.setPointSizeF(9); f.setWeight(QFont.DemiBold); p.setFont(f)
+            p.setPen(QColor(C["primary"]))
+            p.drawText(QRectF(r.left() + 40, r.top(), r.width() - 46, r.height()),
+                       Qt.AlignVCenter | Qt.AlignLeft | Qt.TextWordWrap, t("mini_drop"))
+            return
         p.setPen(QPen(QColor(C["border"]), 1))
         p.setBrush(QColor(C["body_bg"]))
         p.drawRoundedRect(r, 10, 10)
@@ -1054,6 +1073,37 @@ class MiniWidget(QWidget):
             p.drawPixmap(int(r.left() + 10), int(y + 3), qta.icon(ic, color=C[key]).pixmap(12, 12))
             p.setPen(QColor(C[key]))
             p.drawText(QRectF(r.left() + 28, y, r.width() - 36, 18), Qt.AlignVCenter | Qt.AlignLeft, txt)
+        if self.win.cfg.get("alt_on"):                 # turtle: alternative limits are on
+            p.drawPixmap(int(r.right() - 24), int(r.top() + 6),
+                         qta.icon("mdi6.tortoise", color=C["success"]).pixmap(18, 18))
+
+    def enterEvent(self, e):
+        self.apply_opacity(True)
+
+    def leaveEvent(self, e):
+        self.apply_opacity(False)
+
+    # drag & drop of .torrent files, folders, magnets and links — same as onto the main window
+    def dragEnterEvent(self, e):
+        if self.win.drop_ok(e.mimeData()):
+            e.acceptProposedAction()
+            self._drop = True
+            self.apply_opacity(True)
+            self.update()
+
+    def dragLeaveEvent(self, e):
+        self._drop = False
+        self.apply_opacity(False)
+        self.update()
+
+    def dropEvent(self, e):
+        self._drop = False
+        self.apply_opacity(False)
+        self.update()
+        items = self.win._mime_items(e.mimeData())
+        e.acceptProposedAction()
+        if items:
+            QTimer.singleShot(0, lambda: self.win.add_items(items))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -1072,10 +1122,33 @@ class MiniWidget(QWidget):
     def mouseDoubleClickEvent(self, e):
         self.win.show_normal()
 
+    def _set_opacity(self, pct: int):
+        self.win.cfg["mini_opacity"] = pct
+        config.save(self.win.cfg)
+        self.apply_opacity(self.underMouse())
+
     def contextMenuEvent(self, e):
+        w = self.win
         m = QMenu(self)
-        m.addAction(icon("fa6s.window-maximize"), t("show"), self.win.show_normal)
-        m.addAction(icon("fa6s.eye-slash"), t("mini_hide"), lambda: self.win.set_mini(False))
+        m.addAction(icon("fa6s.window-maximize"), t("show"), w.show_normal)
+        m.addAction(icon("fa6s.plus"), t("add_torrent"), w.add_torrent_dialog)
+        m.addAction(icon("fa6s.magnet", "ic_magnet"), t("addr_title") + "…", w.add_magnet_dialog)
+        m.addSeparator()
+        a = m.addAction(icon("mdi6.tortoise", "success"), t("alt_menu"))
+        a.setCheckable(True)
+        a.setChecked(bool(w.cfg.get("alt_on")))
+        a.toggled.connect(w.set_alt)
+        m.addAction(icon("fa6s.stop", "danger"), t("tray_pause_all"), lambda: w._all(w.engine.stop))
+        m.addAction(icon("fa6s.play", "success"), t("tray_resume_all"), lambda: w._all(w.engine.resume))
+        m.addSeparator()
+        op = m.addMenu(icon("fa6s.droplet"), t("mini_opacity"))
+        cur = int(w.cfg.get("mini_opacity", 85))
+        for pct in (100, 85, 70, 55, 40):
+            act = op.addAction(f"{pct} %")
+            act.setCheckable(True)
+            act.setChecked(pct == cur)
+            act.triggered.connect(lambda _=False, v=pct: self._set_opacity(v))
+        m.addAction(icon("fa6s.eye-slash"), t("mini_hide"), lambda: w.set_mini(False))
         m.exec(e.globalPos())
 
 
@@ -1209,8 +1282,7 @@ class StatsView(QTableWidget):
             sched = t("st_sched_on" if sched_on else "st_sched_idle", cfg.get("sched_from"), cfg.get("sched_to"))
         else:
             sched = t("pm_off")
-        dl_lim = cfg.get("sched_dl", 0) if sched_on else cfg.get("dl_limit", 0)
-        ul_lim = cfg.get("sched_ul", 0) if sched_on else cfg.get("ul_limit", 0)
+        dl_lim, ul_lim = win.effective_limits()
 
         cpu = mem = "—"
         if self.proc is not None:
@@ -1373,6 +1445,12 @@ class SettingsDialog(QDialog):
         form.addRow(t("set_dl_limit"), self.dl)
         form.addRow(t("set_ul_limit"), self.ul)
         form.addRow(note(t("sp_ul_warn")))
+        form.addRow(_section(t("sp_alt"), None))
+        self.alt_dl = spin(cfg.get("alt_dl", 1024), 0, 10_000_000, kib, t("unlimited"))
+        self.alt_ul = spin(cfg.get("alt_ul", 256), 0, 10_000_000, kib, t("unlimited"))
+        form.addRow(t("set_dl_limit"), self.alt_dl)
+        form.addRow(t("set_ul_limit"), self.alt_ul)
+        form.addRow(note(t("sp_alt_hint")))
         form.addRow(_section(t("sp_port"), None))
         self.port = spin(cfg["port"], 1024, 65535)
         prow = QHBoxLayout()
@@ -1471,6 +1549,9 @@ class SettingsDialog(QDialog):
         self.move_bycat = QCheckBox(t("set_move_bycat"))
         self.move_bycat.setChecked(cfg.get("move_done_by_category", True))
         form.addRow(self.move_bycat)
+        self.inc_ext = QCheckBox(t("set_inc_ext")); self.inc_ext.setChecked(cfg.get("incomplete_ext", False))
+        form.addRow(self.inc_ext)
+        form.addRow(note(t("set_inc_ext_note")))
         form.addRow(_section(t("sp_export"), None))
         erow, self.export_dir = folder_row(self, cfg.get("export_dir", ""))
         form.addRow(t("set_export"), erow)
@@ -1912,6 +1993,8 @@ class SettingsDialog(QDialog):
                  sched_from=self.sch_from.time().toString("HH:mm"),
                  sched_to=self.sch_to.time().toString("HH:mm"),
                  sched_dl=self.sch_dl.value(), sched_ul=self.sch_ul.value(),
+                 alt_dl=self.alt_dl.value(), alt_ul=self.alt_ul.value(),
+                 incomplete_ext=self.inc_ext.isChecked(),
                  categories=self.cats.categories(),
                  tracker_rules=self.tr_rules.rules(), ban_bad_peers=self.ban_bad.isChecked(),
                  cross_seed=self.cross.isChecked(),
@@ -3053,6 +3136,7 @@ class MainWindow(QMainWindow):
         self._port_result = None
         self._port_cbs: list = []
         self._sched_state: bool | None = None   # None = not applied yet
+        self._alt_state: bool | None = None
 
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
@@ -3352,6 +3436,9 @@ class MainWindow(QMainWindow):
         self._themed_icon(qb.setIcon, "fa6s.power-off", "danger")
         a = QAction(self); a.setShortcut(QKeySequence("F1")); a.triggered.connect(self.about_dialog)
         self.addAction(a)
+        a = QAction(self); a.setShortcut(QKeySequence("Ctrl+T"))
+        a.triggered.connect(lambda: self.set_alt(not self.cfg.get("alt_on")))
+        self.addAction(a)
         for seq, where in (("Ctrl+Shift+Up", "up"), ("Ctrl+Shift+Down", "down"),
                            ("Ctrl+Shift+Home", "top"), ("Ctrl+Shift+End", "bottom")):
             a = QAction(self); a.setShortcut(QKeySequence(seq))
@@ -3470,6 +3557,8 @@ class MainWindow(QMainWindow):
         self.sb_dht = item("fa6s.diagram-project", "info", t("sb_dht_tip"))
         self.sb_port = item("", "", t("sb_port_tip"), lambda: self.check_port())
         self.sb_ip = item("fa6s.earth-europe", "info", t("sb_ip_tip"))
+        self.sb_alt = item("mdi6.tortoise", "secondary", "", lambda: self.set_alt(not self.cfg.get("alt_on")))
+        self._update_alt_ui()
         self.sb_speed = item("fa6s.gauge-high", "primary", t("sb_speed_tip"))
         self.sb_session = item("fa6s.right-left", "secondary", t("sb_session_tip"))
         self._sb_port_state = None
@@ -4066,6 +4155,10 @@ class MainWindow(QMainWindow):
                 a.setCheckable(True)
                 a.setChecked(kib == cur)
                 a.triggered.connect(lambda _=False, k=cfg_key, v=kib: self.set_limit(k, v))
+        a = m.addAction(icon("mdi6.tortoise", "success"), t("alt_menu") + "\tCtrl+T")
+        a.setCheckable(True)
+        a.setChecked(bool(self.cfg.get("alt_on")))
+        a.toggled.connect(self.set_alt)
         m.addSeparator()
         a = m.addAction(icon("fa6s.gauge-high"), t("mini_toggle"))
         a.setCheckable(True)
@@ -4600,13 +4693,16 @@ class MainWindow(QMainWindow):
             out = items_from_text(md.text())
         return list(dict.fromkeys(out))
 
+    @classmethod
+    def drop_ok(cls, md) -> bool:
+        """Is this drag worth accepting? Folders are walked only on drop, so they are a "maybe" here."""
+        return bool(md.hasUrls() and any(u.isLocalFile() and (os.path.isdir(u.toLocalFile())
+                                                              or u.toLocalFile().lower().endswith(".torrent"))
+                                         or u.scheme() in ("magnet", "http", "https") for u in md.urls())
+                    or (md.hasText() and not md.hasUrls() and cls._mime_items(md)))
+
     def dragEnterEvent(self, e):
-        md = e.mimeData()
-        # folders are walked only on drop; a local folder / file is accepted here as "maybe"
-        if md.hasUrls() and any(u.isLocalFile() and (os.path.isdir(u.toLocalFile())
-                                                     or u.toLocalFile().lower().endswith(".torrent"))
-                                or u.scheme() in ("magnet", "http", "https") for u in md.urls()) \
-                or (md.hasText() and not md.hasUrls() and self._mime_items(md)):
+        if self.drop_ok(e.mimeData()):
             e.acceptProposedAction()
             self._show_drop_hint(True)
 
@@ -5236,6 +5332,7 @@ class MainWindow(QMainWindow):
             self.engine.apply_settings(self.cfg)
             self.set_mini(bool(self.cfg.get("mini_widget")))
             self._sched_state = None             # re-apply schedule limits on next tick
+            self._update_alt_ui()
             self.refresh_category_combo()
             if (self.cfg.get("ip_filter"), self.cfg.get("geoip")) != old_net:
                 self.start_network_extras()
@@ -5383,7 +5480,9 @@ class MainWindow(QMainWindow):
         if self.engine.bans:
             parts.append(f'<a href="bans" style="color:{C["secondary"]};text-decoration:none">'
                          f'{t("meta_bans", len(self.engine.bans))}</a>')
-        if sched:
+        if self.cfg.get("alt_on"):
+            parts.append(f'<span style="color:{C["success"]}">&#128034; {t("meta_alt")}</span>')
+        elif sched:
             parts.append(f'<span style="color:{C["warning_text"]}">&#9200; {t("meta_sched")}</span>')
         bind = self.cfg.get("bind_interface", "")
         if bind:
@@ -5542,23 +5641,61 @@ class MainWindow(QMainWindow):
                 self.peers_tbl.setItem(i, j, it)
 
     # ── speed schedule ─────────────────────────────────────────
-    def apply_schedule(self) -> bool:
-        """Switch between normal and scheduled global limits; returns True inside the window."""
+    def schedule_active(self) -> bool:
         cfg = self.cfg
-        active = False
-        if cfg.get("sched_enabled"):
-            now = datetime.now().strftime("%H:%M")
-            a, b = cfg.get("sched_from", "08:00"), cfg.get("sched_to", "23:00")
-            active = (a <= now < b) if a <= b else (now >= a or now < b)   # window may cross midnight
-        if active != self._sched_state:
-            if active:
-                self.engine.set_global_limits(cfg.get("sched_dl", 0), cfg.get("sched_ul", 0))
-            else:
-                self.engine.set_global_limits(cfg.get("dl_limit", 0), cfg.get("ul_limit", 0))
-            if self._sched_state is not None or active:
+        if not cfg.get("sched_enabled"):
+            return False
+        now = datetime.now().strftime("%H:%M")
+        a, b = cfg.get("sched_from", "08:00"), cfg.get("sched_to", "23:00")
+        return (a <= now < b) if a <= b else (now >= a or now < b)   # window may cross midnight
+
+    def effective_limits(self) -> tuple[int, int]:
+        """Global limits in force now (KiB/s): turtle > schedule > normal."""
+        cfg = self.cfg
+        if cfg.get("alt_on"):
+            return int(cfg.get("alt_dl", 0)), int(cfg.get("alt_ul", 0))
+        if self._sched_state:
+            return int(cfg.get("sched_dl", 0)), int(cfg.get("sched_ul", 0))
+        return int(cfg.get("dl_limit", 0)), int(cfg.get("ul_limit", 0))
+
+    def apply_schedule(self) -> bool:
+        """Switch between normal, scheduled and alternative global limits; True inside the schedule window."""
+        active = self.schedule_active()
+        alt = bool(self.cfg.get("alt_on"))
+        if active != self._sched_state or alt != self._alt_state:
+            if active != self._sched_state and (self._sched_state is not None or active):
                 self.log_event("system", t("sch_on" if active else "sch_off"))
             self._sched_state = active
+            self._alt_state = alt
+            self.engine.set_global_limits(*self.effective_limits())
         return active
+
+    def set_alt(self, on: bool):
+        """«Turtle»: the alternative limits on / off (status bar, tray, mini window, Ctrl+T)."""
+        on = bool(on)
+        if bool(self.cfg.get("alt_on")) != on:
+            self.cfg["alt_on"] = on
+            config.save(self.cfg)
+            dl, ul = self.effective_limits() if on else (0, 0)
+            self.log_event("system", t("alt_log_on", self._lim_text(dl), self._lim_text(ul)) if on else t("alt_log_off"))
+        self.apply_schedule()
+        self._update_alt_ui()
+        if self.mini is not None:
+            self.mini.update()
+
+    @staticmethod
+    def _lim_text(kib: int) -> str:
+        return fmt_size(kib * 1024).replace(".00", "") + "/s" if kib else "∞"
+
+    def _update_alt_ui(self):
+        on = bool(self.cfg.get("alt_on"))
+        b = getattr(self, "sb_alt", None)
+        if b is None:
+            return
+        dl, ul = int(self.cfg.get("alt_dl", 0)), int(self.cfg.get("alt_ul", 0))
+        b.setIcon(icon("mdi6.tortoise", "success" if on else "secondary"))
+        b.setText(f"↓ {self._lim_text(dl)}  ↑ {self._lim_text(ul)}" if on else "")
+        b.setToolTip(t("sb_alt_tip_on" if on else "sb_alt_tip_off", self._lim_text(dl), self._lim_text(ul)))
 
     # ── files tab ──────────────────────────────────────────────
     PRIO_TEXT = {PRIO_SKIP: "prio_skip", PRIO_NORMAL: "prio_normal", PRIO_HIGH: "prio_high"}

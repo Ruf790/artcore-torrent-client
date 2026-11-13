@@ -33,6 +33,9 @@ DEFAULTS = {
     "sched_to":         "23:00",
     "sched_dl":         0,          # KiB/s inside the window, 0 = unlimited
     "sched_ul":         0,
+    "alt_on":           False,      # alternative limits («turtle»), toggled from the status bar
+    "alt_dl":           1024,       # KiB/s, 0 = unlimited
+    "alt_ul":           256,
     "categories":       [],         # [{"name": ..., "path": ...}]
     "watch_dir":        "",
     "watch_category":   "",
@@ -57,6 +60,8 @@ DEFAULTS = {
     "done_open_folder": False,
     "mini_widget":      False,      # floating speed window
     "mini_pos":         None,
+    "mini_opacity":     85,         # % when the mouse is not over it
+    "incomplete_ext":   False,      # unfinished files get ".!ac" until they are complete
     "speed_in_title":   True,       # speeds in the window title = taskbar button tooltip
     "recent_paths":     [],         # save folders used lately (add dialog drop-down)
     "random_port":      False,      # pick a new listen port on every start

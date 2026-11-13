@@ -330,7 +330,10 @@ STRINGS = {
     "peer_copy_ip":    ("Копировать IP", "Copy IP"),
     "meta_portable":   ("Портативная", "Portable"),
     "cancel":          ("Отмена",     "Cancel"),
-    "mini_tip":        ("Двойной клик — открыть клиент, правый — меню", "Double-click opens the client, right-click for a menu"),
+    "mini_tip":        ("Двойной клик — открыть клиент, правый — меню. Сюда можно бросить .torrent, magnet или ссылку",
+                        "Double-click opens the client, right-click for a menu. Drop a .torrent, magnet or link here"),
+    "mini_drop":       ("Отпустите — торрент будет добавлен", "Drop to add the torrent"),
+    "mini_opacity":    ("Прозрачность",                      "Opacity"),
     "mini_hide":       ("Скрыть виджет", "Hide widget"),
     "mini_toggle":     ("Мини-виджет скорости", "Speed mini widget"),
     "pw_menu":         ("Когда всё скачается", "When everything is downloaded"),
@@ -696,6 +699,20 @@ STRINGS = {
     "sch_on":          ("Расписание: включены лимиты по времени", "Schedule: time-based limits on"),
     "sch_off":         ("Расписание: обычные лимиты",        "Schedule: normal limits"),
     "meta_sched":      ("расписание",                        "schedule"),
+    # alternative limits («turtle»)
+    "sp_alt":          ("Альтернативные лимиты («черепаха»)", "Alternative limits («turtle»)"),
+    "sp_alt_hint":     ("Включаются одним кликом по черепахе в строке состояния, через Ctrl+T или из меню в трее — "
+                        "например, пока смотрите видео или играете. Пока черепаха включена, расписание скорости не действует.",
+                        "Turned on with one click on the turtle in the status bar, Ctrl+T or the tray menu — "
+                        "e.g. while you watch a video or play. While the turtle is on, the speed schedule is not applied."),
+    "alt_menu":        ("Альтернативные лимиты («черепаха»)", "Alternative limits («turtle»)"),
+    "alt_log_on":      ("Черепаха включена: ↓ {0}, ↑ {1}",   "Turtle on: ↓ {0}, ↑ {1}"),
+    "alt_log_off":     ("Черепаха выключена, обычные лимиты", "Turtle off, normal limits"),
+    "sb_alt_tip_off":  ("Альтернативные лимиты выключены. Клик (или Ctrl+T) — включить: ↓ {0}, ↑ {1}.\nЗначения — в Настройки → Подключение.",
+                        "Alternative limits are off. Click (or Ctrl+T) to turn on: ↓ {0}, ↑ {1}.\nValues are in Settings → Connection."),
+    "sb_alt_tip_on":   ("Альтернативные лимиты включены: ↓ {0}, ↑ {1}. Клик (или Ctrl+T) — выключить.",
+                        "Alternative limits are on: ↓ {0}, ↑ {1}. Click (or Ctrl+T) to turn off."),
+    "meta_alt":        ("черепаха",                          "turtle"),
     # speed tab / pieces
     "tab_speed":       ("Скорость",                          "Speed"),
     "gr_range":        ("{0} мин",                           "{0} min"),
@@ -777,6 +794,11 @@ STRINGS = {
     "set_grp_folders": ("Папки",                             "Folders"),
     "set_watch":       ("Следящая папка (.torrent добавляются сами)", "Watch folder (.torrent files are added automatically)"),
     "set_watch_cat":   ("Категория для следящей папки",      "Category for the watch folder"),
+    "set_inc_ext":     ("Добавлять .!ac к недокачанным файлам", "Add .!ac to unfinished files"),
+    "set_inc_ext_note": ("Пока файл не докачан, он называется «фильм.mkv.!ac» — его не откроешь по ошибке. "
+                         "Когда файл готов, расширение убирается само. Включение и выключение сразу переименовывает файлы уже добавленных торрентов.",
+                         "While a file is unfinished it is named “movie.mkv.!ac”, so it can't be opened by mistake. "
+                         "The suffix is removed as soon as the file is complete. Turning this on or off renames the files of existing torrents right away."),
     "set_move_done":   ("Переносить готовые загрузки в",     "Move completed downloads to"),
     "set_move_bycat":  ("…в подпапку с названием категории", "…into a subfolder named after the category"),
     "folder_off":      ("не задана",                         "not set"),
