@@ -354,6 +354,8 @@ QTabBar::tab:hover {{ color: {c['emphasis']}; background: {c['tertiary_bg']}; }}
 QTabBar::tab:selected {{ color: {c['primary_text'] if c['body_bg'] == '#212529' else c['primary']}; border-bottom-color: {c['primary']}; }}
 
 QPlainTextEdit {{ background: {c['body_bg']}; color: {c['body']}; border: none; font-family: Consolas, monospace; font-size: 9pt; }}
+QDialog QPlainTextEdit {{ border: 1px solid {c['border']}; border-radius: 8px; padding: 3px 5px; }}
+QDialog QPlainTextEdit:focus {{ border-color: {c['primary']}; }}
 QLabel#rowLbl {{ color: {c['secondary']}; }}
 QLabel#rowVal {{ color: {c['body']}; font-weight: 600; }}
 
@@ -488,6 +490,7 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QTimeEdit, QComboBox {{
   border-bottom: 1px solid {c['input_edge']}; border-radius: 4px; padding: 5px 9px;
 }}
 QLineEdit#search {{ border-radius: 4px; padding-left: 10px; }}
+QDialog QPlainTextEdit {{ border-radius: 4px; border-bottom: 1px solid {c['input_edge']}; }}
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QComboBox:focus {{
   background: {c['body_bg']}; border-color: {c['border']}; border-bottom: 2px solid {c['primary']}; }}
 QComboBox QAbstractItemView {{ border-radius: 8px; padding: 4px;
