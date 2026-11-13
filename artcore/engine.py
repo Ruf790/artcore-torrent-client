@@ -111,6 +111,8 @@ class Engine:
             sv.setdefault(k, 0)
         self.days: dict[str, list[int]] = sv.setdefault("days", {})   # "YYYY-MM-DD" → [down, up]
         self._day_mark = (0, 0)              # session totals already put into self.days
+        self._ac_pending: set[tuple[str, int]] = set()   # ".!ac" renames sent, alert not back yet
+        self._ac_dirty: set[str] = set()                  # torrents whose ".!ac" state to re-check
         self._moves: dict[str, dict] = {}    # key → {"dest", "files": [(path, size)], "total", "pct", "at"}
         self.moved_names: list[tuple[str, str, str]] = []      # (name, key, "" | error) for the UI
         self.checked_names: list[tuple[str, str, float]] = []  # (name, key, progress) after a hash check
@@ -227,12 +229,17 @@ class Engine:
             "announce_to_all_tiers":    True,
             "alert_mask": (lt.alert_category.error | lt.alert_category.status
                            | lt.alert_category.storage | lt.alert_category.tracker
-                           | lt.alert_category.port_mapping | lt.alert_category.performance_warning),
+                           | lt.alert_category.port_mapping | lt.alert_category.performance_warning
+                           | lt.alert_category.file_progress),           # file_completed_alert (.!ac)
         }
 
     def apply_settings(self, cfg: dict) -> None:
+        old_ext = bool(getattr(self, "cfg", {}).get("incomplete_ext"))
         self.cfg = cfg
         self.ses.apply_settings(self._settings())
+        if bool(cfg.get("incomplete_ext")) != old_ext:
+            for key in list(getattr(self, "handles", {})):
+                self.sync_incomplete_ext(key)
         for key, h in self.handles.items():
             self._apply_conn_limits(key, h)
 
@@ -447,6 +454,8 @@ class Engine:
                 continue
             total += 1
             p = os.path.join(save_path, fs.file_path(i))
+            if not os.path.exists(p) and os.path.exists(p + INCOMPLETE_EXT):
+                p += INCOMPLETE_EXT                 # left unfinished by an earlier download
             try:
                 size = os.path.getsize(p)
             except OSError:
@@ -704,11 +713,15 @@ class Engine:
         if paused:
             atp.flags |= lt.torrent_flags.paused
             atp.flags &= ~lt.torrent_flags.auto_managed
+        reused = self._reuse_incomplete(atp)
         h = self.ses.add_torrent(atp)
         key = _key(h)
         if key in self.handles:
             raise ValueError("Этот торрент уже добавлен")
         self.handles[key] = h
+        if reused:
+            self.opts.setdefault(key, {})["ac"] = reused
+            self._save_opts()
         self._apply_conn_limits(key, h)
         self.count_event("added")
         self._add_auto_trackers(h)
@@ -716,6 +729,28 @@ class Engine:
             self._export_pending.add(key)     # once its resume data is written (v2 piece layers)
         h.save_resume_data(lt.torrent_handle.save_info_dict)
         return key
+
+    @staticmethod
+    def _reuse_incomplete(atp: lt.add_torrent_params) -> list[int]:
+        """Files left as "name.!ac" by an earlier download of the same torrent are picked up
+        (renamed_files points at them), so the check finds the data instead of starting from zero."""
+        if atp.ti is None:
+            return []
+        out = []
+        try:
+            fs = atp.ti.files()
+            ren = dict(atp.renamed_files or {})
+            for i in range(fs.num_files()):
+                rel = ren.get(i) or fs.file_path(i)
+                p = os.path.join(atp.save_path, rel)
+                if not rel.endswith(INCOMPLETE_EXT) and not os.path.exists(p) and os.path.isfile(p + INCOMPLETE_EXT):
+                    ren[i] = rel + INCOMPLETE_EXT
+                    out.append(i)
+            if out:
+                atp.renamed_files = ren
+        except Exception:
+            return []
+        return out
 
     def _add_auto_trackers(self, h: lt.torrent_handle) -> None:
         """Settings → Trackers: extra trackers for public torrents (never for private ones —
@@ -1096,8 +1131,9 @@ class Engine:
             prios = list(h.get_file_priorities())
         except Exception:
             prios = []
-        return _data_missing(s.save_path, h.torrent_file().files(),
-                             {int(k): v for k, v in self.opts.get(key, {}).get("renamed", {}).items()}, prios)
+        fs = h.torrent_file().files()
+        disk = {i: self.disk_rel(key, fs, i) for i in range(fs.num_files())}
+        return _data_missing(s.save_path, fs, disk, prios)
 
     def _scan_missing(self) -> None:
         """Every 30 s: a torrent that has data but whose files all vanished is stopped and marked,
@@ -1145,13 +1181,39 @@ class Engine:
                 except Exception:
                     pass
             if isinstance(a, lt.file_renamed_alert) and self._cur_key:
-                # torrent_file() keeps the original names; remember the current ones ourselves
+                # torrent_file() keeps the original names; remember the current ones ourselves.
+                # The ".!ac" suffix is kept apart (opts "ac"): "renamed" holds the clean name.
                 try:
                     new = a.new_name() if callable(getattr(a, "new_name", None)) else str(a.new_name)
-                    self.opts.setdefault(self._cur_key, {}).setdefault("renamed", {})[str(a.index)] = new
+                    o = self.opts.setdefault(self._cur_key, {})
+                    idx = int(a.index)
+                    self._ac_pending.discard((self._cur_key, idx))
+                    ac = set(o.get("ac", []))
+                    if new.endswith(INCOMPLETE_EXT):
+                        new = new[:-len(INCOMPLETE_EXT)]
+                        ac.add(idx)
+                    else:
+                        ac.discard(idx)
+                    if ac:
+                        o["ac"] = sorted(ac)
+                    else:
+                        o.pop("ac", None)
+                    ren = o.setdefault("renamed", {})
+                    if new == a.handle.torrent_file().files().file_path(idx):
+                        ren.pop(str(idx), None)
+                    else:
+                        ren[str(idx)] = new
+                    if not ren:
+                        o.pop("renamed", None)
                     self._save_opts()
+                    self._ac_dirty.add(self._cur_key)    # a plain rename of an unfinished file: suffix again
                 except Exception:
                     pass
+            if isinstance(a, lt.file_rename_failed_alert) and self._cur_key:
+                self._ac_pending.discard((self._cur_key, int(a.index)))
+            if isinstance(a, lt.file_completed_alert) and self._cur_key:
+                if int(a.index) in self.opts.get(self._cur_key, {}).get("ac", []):
+                    self._ac_dirty.add(self._cur_key)
             if self._cur_key and isinstance(a, TASK_ONLY_ALERTS):
                 self._task(self._cur_key, "tracker" if isinstance(a, lt.tracker_announce_alert)
                            else "error" if isinstance(a, lt.hash_failed_alert) else "torrent", a.message())
@@ -1169,6 +1231,7 @@ class Engine:
                     self._auto_export(_key(a.handle), "export_done_dir")
                     self._move_when_done(a.handle, st)
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
+                self._ac_dirty.add(self._cur_key)
             elif isinstance(a, lt.storage_moved_alert):
                 self._log("torrent", a.message())
                 mv = self._moves.pop(self._cur_key, None)
@@ -1185,6 +1248,7 @@ class Engine:
                     err = a.error.message() if a.error.value() else a.message()
                     self.moved_names.append((a.handle.status().name, self._cur_key, err))
             elif isinstance(a, lt.torrent_checked_alert):
+                self._ac_dirty.add(self._cur_key)
                 o = self.opts.get(self._cur_key, {})
                 if o.pop("checking", None):          # a check the user asked for (not the start-up one)
                     st = a.handle.status()
@@ -1228,6 +1292,8 @@ class Engine:
                 else:
                     self.portmap[name] = "error:" + a.message()
                     self._log("error", a.message())
+        while self._ac_dirty:
+            self.sync_incomplete_ext(self._ac_dirty.pop())
         self._apply_stop_rules()
         self._polls = getattr(self, "_polls", 0) + 1
         if self._cross_check:
@@ -1707,7 +1773,7 @@ class Engine:
         files = []
         if s.has_metadata:
             fs = h.torrent_file().files()
-            files = [(self.file_path(key, fs, i), fs.file_size(i)) for i in range(fs.num_files())
+            files = [(self.disk_rel(key, fs, i), fs.file_size(i)) for i in range(fs.num_files())
                      if not fs.file_flags(i) & lt.file_storage.flag_pad_file]
         total = sum(sz for p, sz in files if os.path.exists(os.path.join(s.save_path, p)))
         self._moves[key] = {"dest": path, "files": files, "total": total, "pct": 0, "at": 0.0,
@@ -1949,7 +2015,7 @@ class Engine:
                 for i, path, size in hits:
                     out.append({"key": key, "torrent": st.name, "index": i, "path": path, "size": size,
                                 "progress": (done[i] / size) if size else 1.0,
-                                "abs": os.path.join(st.save_path, path)})
+                                "abs": os.path.join(st.save_path, self.disk_rel(key, fs, i))})
                     if len(out) >= limit:
                         return out, True
             except Exception:
@@ -1960,11 +2026,49 @@ class Engine:
         """Current path of a file — renamed ones included (torrent_file() has the original names)."""
         return self.opts.get(key, {}).get("renamed", {}).get(str(i)) or fs.file_path(i)
 
+    def disk_rel(self, key: str, fs, i: int) -> str:
+        """Path of the file on disk, relative to the save folder — with ".!ac" while unfinished."""
+        p = self.file_path(key, fs, i)
+        return p + INCOMPLETE_EXT if i in self.opts.get(key, {}).get("ac", ()) else p
+
     def abs_file_path(self, key: str, i: int) -> str:
         h = self.handles.get(key)
         if not h or not h.status().has_metadata:
             return ""
-        return os.path.join(h.status().save_path, self.file_path(key, h.torrent_file().files(), i))
+        return os.path.join(h.status().save_path, self.disk_rel(key, h.torrent_file().files(), i))
+
+    def sync_incomplete_ext(self, key: str) -> None:
+        """Settings → Folders, "Add .!ac to unfinished files": unfinished files are renamed to
+        "name.ext.!ac", finished ones (and all of them when the option is off) lose the suffix.
+        Called after a check, when a file / torrent completes, after a rename and when the option changes."""
+        h = self.handles.get(key)
+        if not h:
+            return
+        try:
+            st = h.status()
+        except Exception:
+            return
+        on = bool(self.cfg.get("incomplete_ext"))
+        ac = set(self.opts.get(key, {}).get("ac", []))
+        if not st.has_metadata or (not on and not ac):
+            return
+        if st.state in (lt.torrent_status.checking_files, lt.torrent_status.checking_resume_data,
+                        lt.torrent_status.downloading_metadata):
+            return                                  # the check will post torrent_checked_alert
+        if on and not ac and st.is_seeding:
+            return                                  # complete torrent, nothing has the suffix
+        fs = h.torrent_file().files()
+        done = h.file_progress() if on else []
+        for i in range(fs.num_files()):
+            if fs.file_flags(i) & lt.file_storage.flag_pad_file or (key, i) in self._ac_pending:
+                continue
+            size = fs.file_size(i)
+            want = on and size > 0 and i < len(done) and done[i] < size
+            if want == (i in ac):
+                continue
+            name = self.file_path(key, fs, i)
+            self._ac_pending.add((key, i))
+            h.rename_file(i, name + INCOMPLETE_EXT if want else name)
 
     def current_info(self, key: str):
         """A copy of the torrent's metadata with the current (renamed) file paths."""
@@ -1998,8 +2102,9 @@ class Engine:
                     new.append(0)
             if new != prios:
                 h.prioritize_files(new)
+        ac = self.opts.get(key, {}).get("ac", ())
         for idx, path in (f.get("renames") or {}).items():
-            h.rename_file(idx, path)
+            h.rename_file(idx, path + INCOMPLETE_EXT if int(idx) in ac else path)
         if f.get("save_path"):
             self.move(key, f["save_path"])
         h.save_resume_data(lt.torrent_handle.save_info_dict)
@@ -2604,6 +2709,7 @@ JUNK_NAMES = {"thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", "desktop.ini", ".
               ".localized", "folder.lock"}
 JUNK_PREFIX = ("._", "~$", ".~lock.")
 JUNK_EXT = (".!ut", ".!qb", ".bc!", ".crdownload", ".part", ".partial")
+INCOMPLETE_EXT = ".!ac"          # unfinished files, Settings → Folders (like qBittorrent's ".!qB")
 JUNK_DIRS = {"__macosx", ".spotlight-v100", ".trashes", ".fseventsd", "$recycle.bin",
              "system volume information", ".temporaryitems"}
 
