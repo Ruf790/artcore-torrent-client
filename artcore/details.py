@@ -188,7 +188,17 @@ class PieceMapView(QWidget):
         from .ui import fmt_size
         st = pm.get("states", [])
         self.grid.set_states(st, complete)
-        if st:
+        if st and theme.current_style == "material":           # caps captions over the values
+            self.info.setTextFormat(Qt.RichText)
+            cap = f'font-size:8pt; font-weight:700; color:{C["primary"]};'
+            self.info.setText(
+                f'<table width="100%" cellspacing="0"><tr><td style="{cap}">{t("material_pieces").upper()}</td>'
+                f'<td align="right" style="{cap}">{t("material_piece_size").upper()}</td></tr>'
+                f'<tr><td>{pm["have"]:,}/{pm["total"]:,}'.replace(",", "\u00a0") +
+                f' &nbsp;·&nbsp; {t("pm_downloading").lower()}: {st.count(1)}</td>'
+                f'<td align="right">{fmt_size(pm["piece_len"])}</td></tr></table>')
+        elif st:
+            self.info.setTextFormat(Qt.AutoText)
             self.info.setText(t("pm_info", pm["have"], pm["total"], fmt_size(pm["piece_len"]),
                                 st.count(1)))
         else:

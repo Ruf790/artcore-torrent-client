@@ -44,8 +44,8 @@ PALETTES = {
 current: dict = dict(PALETTES["light"])
 current_name = "light"
 current_style = "soft"        # muted (gray) | soft (coloured accents) | vivid (gradients) | site (like the site's profile page)
-                              # | fluent (Windows 11)
-STYLES = ("muted", "soft", "vivid", "site", "fluent")
+                              # | fluent (Windows 11) | material (Android Material look: teal, flat, underlined tabs)
+STYLES = ("muted", "soft", "vivid", "site", "fluent", "material")
 mica_wanted = False    # Settings → "Mica" on and Windows 11
 mica_window = False    # the main window was created translucent (only at start-up)
 
@@ -121,6 +121,27 @@ GRADIENTS = {   # vivid style: tile gradients (light and dark use the same satur
     "down": ("#0d6efd", "#4d94ff"), "up": ("#198754", "#20c997"),
     "active": ("#fd7e14", "#f5b70a"), "session": ("#6f42c1", "#d63384"),
 }
+# Material look (Android-app style): teal accent, light-blue selection, rosy "FAB" button
+MATERIAL = {
+    "light": {
+        "body_bg": "#f9f9ff", "page_bg": "#f9f9ff", "body": "#1b1b1f", "emphasis": "#000000",
+        "secondary": "#3e4a50", "tertiary_bg": "#eef1f6", "secondary_bg": "#dce3e8",
+        "border": "#d6dade", "border_soft": "#e6e9ec", "muted_subtle": "#f1f4f8",
+        "primary": "#00677d", "primary_hover": "#005468", "primary_subtle": "#bde6fb",
+        "primary_text": "#004d5e", "selection": "#bde6fb",
+        "fab": "#ffd9de", "fab_hover": "#ffc9d1", "fab_text": "#3b0a14",
+        "tonal": "#7df0ff", "tonal_hover": "#5fe3f5", "tonal_text": "#001f25",
+    },
+    "dark": {
+        "body_bg": "#111417", "page_bg": "#111417", "body": "#e2e2e6", "emphasis": "#ffffff",
+        "secondary": "#a9b4ba", "tertiary_bg": "#1b2025", "secondary_bg": "#2a3138",
+        "border": "#3a4249", "border_soft": "#232a30", "muted_subtle": "#171c20",
+        "primary": "#0e8fa8", "primary_hover": "#26a5be", "primary_subtle": "#0f3a4a",
+        "primary_text": "#8fddf0", "selection": "#0f3a4a",
+        "fab": "#5a1d2a", "fab_hover": "#6e2535", "fab_text": "#ffd9de",
+        "tonal": "#004f58", "tonal_hover": "#00636f", "tonal_text": "#9eefff",
+    },
+}
 TITLE_FONT = "Oswald"
 _OSWALD = "Oswald"
 FLUENT_TITLE = "Segoe UI Variable Display"
@@ -181,7 +202,9 @@ def apply(app: QApplication, mode: str, style: str | None = None, mica: bool | N
         c["page_bg"] = "#eef2f8"            # a hint of blue instead of plain gray
     if current_style == "site":
         c["page_bg"] = c["body_bg"]         # white page, gray cards — like the profile page
-    TITLE_FONT = FLUENT_TITLE if current_style == "fluent" else _OSWALD
+    if current_style == "material":
+        c.update(MATERIAL[current_name])
+    TITLE_FONT = FLUENT_TITLE if current_style in ("fluent", "material") else _OSWALD
     if current_style == "fluent":
         _fluent_colours(c, dark)
     # icon colours that depend on the style (looked up by key like any palette colour)
@@ -190,6 +213,9 @@ def apply(app: QApplication, mode: str, style: str | None = None, mica: bool | N
     c["ic_add"] = "#ffffff"
     c["head_ic"] = "#ffffff" if current_style == "vivid" else c["secondary"]
     c["head_logo"] = "#ffffff" if colourful else c["primary_text"]
+    if current_style == "material":          # light button / transparent logo box: white icons would vanish
+        c["ic_add"] = c["fab_text"]
+        c["head_logo"] = c["primary"]
 
     pal = QPalette()
     pal.setColor(QPalette.Window, QColor(c["page_bg"]))
@@ -429,6 +455,8 @@ QLabel#kpiIco[tone="{tone}"] {{ background: {c[fam + '_subtle']}; border-radius:
 """
     if current_style == "fluent":
         out += fluent_qss(c, dark)
+    if current_style == "material":
+        out += material_qss(c, dark)
     if current_style == "vivid":
         out += """
 QFrame#headCard { border: none; border-radius: 14px;
@@ -539,3 +567,87 @@ QMainWindow, QMainWindow > QWidget#page {{ background: transparent; }}
 QStatusBar {{ background: {c['page_bg']}; }}
 QFrame#card, QFrame#headCard, QFrame#kpi {{ background: {'rgba(43,43,43,235)' if dark else 'rgba(255,255,255,225)'}; }}
 """ if mica_active() else "")
+
+
+def material_qss(c: dict, dark: bool) -> str:
+    """Material look: flat surfaces, teal accent, tabs with an underline, light-blue selected row,
+    pale-rose main button (a floating "add torrent" button)."""
+    return f"""
+* {{ font-family: "Roboto", "Segoe UI Variable Text", "Segoe UI", "Noto Sans", Arial; font-size: 10pt; }}
+QMainWindow, QDialog, QWidget#page {{ background: {c['page_bg']}; }}
+QFrame#card, QFrame#headCard {{ background: {c['body_bg']}; border: none; border-bottom: 1px solid {c['border']}; border-radius: 0; }}
+QLabel#title {{ font-family: "{FLUENT_TITLE}"; font-size: 15pt; font-weight: 500; color: {c['emphasis']}; }}
+QLabel#headIcon {{ background: transparent; }}
+QFrame#kpi {{ background: {c['tertiary_bg']}; border: none; border-radius: 4px; }}
+QLabel#kpiVal {{ font-size: 15pt; font-weight: 500; color: {c['emphasis']}; }}
+QLabel#kpiLbl {{ font-size: 9pt; color: {c['secondary']}; }}
+
+QPushButton {{ background: transparent; color: {c['primary_text']}; border: 1px solid {c['border']};
+  border-radius: 4px; padding: 6px 14px; font-weight: 500; }}
+QPushButton:hover {{ background: {c['primary_subtle']}; border-color: {c['primary_subtle']}; }}
+QPushButton:pressed {{ background: {c['secondary_bg']}; }}
+QPushButton#primary {{ background: {c['fab']}; color: {c['fab_text']}; border: none; border-radius: 12px; padding: 8px 18px; }}
+QPushButton#primary:hover {{ background: {c['fab_hover']}; }}
+QPushButton#danger {{ color: {c['danger_text'] if dark else c['danger']}; }}
+QPushButton#danger:hover {{ background: {c['danger_subtle']}; border-color: {c['danger']}; }}
+QToolButton#iconBtn {{ background: transparent; border-radius: 16px; }}
+QToolButton#iconBtn:hover {{ background: {c['primary_subtle']}; }}
+QPushButton#pill {{ background: transparent; color: {c['secondary']}; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; padding: 10px 18px; font-weight: 500; }}
+QPushButton#pill:hover {{ background: {c['tertiary_bg']}; color: {c['body']}; }}
+QPushButton#pill:checked {{ background: transparent; color: {c['primary_text']}; border-bottom: 2px solid {c['primary']}; }}
+QPushButton#materialChip {{ background: transparent; color: {c['body']}; border: 1px solid {c['border']}; border-radius: 8px; padding: 5px 12px; }}
+QPushButton#materialChip:hover {{ background: {c['tertiary_bg']}; }}
+QPushButton#materialChip:checked {{ background: {c['primary_subtle']}; border-color: {c['primary_subtle']}; color: {c['primary_text']}; }}
+QPushButton#materialLink {{ background: transparent; border: none; color: {c['primary']}; font-weight: 600; padding: 5px 8px; }}
+QPushButton#materialLink:hover {{ background: {c['primary_subtle']}; }}
+QFrame#selBar {{ background: {c['primary_subtle']}; border: none; border-radius: 0; }}
+QLabel#selLabel {{ color: {c['primary_text']}; font-size: 12pt; font-weight: 500; }}
+QWidget#materialStrip {{ background: {c['body_bg']}; }}
+QToolButton#materialEdit {{ background: #8a8d91; border: none; border-radius: 19px; padding: 10px; }}
+QToolButton#materialEdit:hover {{ background: #6f7276; }}
+
+QLineEdit, QSpinBox, QDoubleSpinBox, QTimeEdit, QComboBox {{ background: transparent; border: none;
+  border-bottom: 1px solid {c['secondary']}; border-radius: 0; padding: 5px 6px; }}
+QLineEdit#search {{ border-radius: 0; padding-left: 8px; min-width: 200px; }}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QComboBox:focus {{ border-bottom: 2px solid {c['primary']}; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{ background: transparent; border-left: none; }}
+
+QTableView, QTableWidget {{ selection-background-color: {c['selection']}; }}
+QTableView::item, QTableWidget::item {{ border-bottom: 1px solid {c['border_soft']}; }}
+QTableView::item:selected, QTableWidget::item:selected {{ background: {c['selection']}; color: {c['emphasis']}; }}
+QHeaderView::section {{ color: {c['primary']}; font-weight: 700; font-size: 8.5pt; padding: 8px 6px;
+  border-bottom: 1px solid {c['border']}; }}
+
+QTreeWidget#sidebar {{ background: {c['body_bg']}; border-right: 1px solid {c['border']}; padding: 4px 0; }}
+QTreeWidget#sidebar::item {{ padding: 6px 8px; border-radius: 0; }}
+QTreeWidget#sidebar::item:hover {{ background: {c['tertiary_bg']}; }}
+QTreeWidget#sidebar::item:selected {{ background: {c['selection']}; color: {c['primary_text']}; }}
+
+QTabWidget::pane, QTabWidget#pillTabs::pane {{ border: none; border-top: 1px solid {c['border']}; background: {c['body_bg']}; }}
+QTabBar::tab, QTabWidget#pillTabs QTabBar::tab {{ background: transparent; color: {c['body']}; border: none;
+  border-bottom: 2px solid transparent; border-radius: 0; padding: 11px 18px; margin: 0; font-weight: 500; }}
+QTabBar::tab:hover, QTabWidget#pillTabs QTabBar::tab:hover {{ background: {c['tertiary_bg']}; color: {c['body']}; }}
+QTabBar::tab:selected, QTabWidget#pillTabs QTabBar::tab:selected {{ background: transparent; color: {c['primary_text']};
+  border: none; border-bottom: 2px solid {c['primary']}; }}
+QTabWidget#pillTabs QTabBar::tab:first {{ margin-left: 0; }}
+
+QFrame#kpi[tone="down"] QLabel#kpiVal, QFrame#kpi[tone="up"] QLabel#kpiVal,
+QFrame#kpi[tone="active"] QLabel#kpiVal, QFrame#kpi[tone="session"] QLabel#kpiVal {{ color: {c['emphasis']}; }}
+QPushButton#materialTonal {{ background: {c['tonal']}; color: {c['tonal_text']}; border: none; border-radius: 14px;
+  padding: 9px 18px; margin: 10px 24px 6px 24px; font-weight: 500; }}
+QPushButton#materialTonal:hover {{ background: {c['tonal_hover']}; }}
+QPushButton#materialFab {{ background: {c['fab']}; color: {c['fab_text']}; border: none; border-radius: 14px;
+  padding: 13px 22px; font-weight: 500; }}
+QPushButton#materialFab:hover {{ background: {c['fab_hover']}; }}
+QToolButton::menu-indicator {{ image: none; }}
+QFrame#materialBar {{ background: {c['body_bg']}; border: 1px solid {c['border']}; border-radius: 12px; }}
+QToolButton#materialBtn {{ background: transparent; border: none; border-radius: 8px; padding: 8px 10px; }}
+QToolButton#materialBtn:hover {{ background: {c['primary_subtle']}; }}
+QLabel#rowLbl {{ color: {c['primary']}; font-weight: 700; font-size: 8.5pt; }}
+QLabel#rowVal {{ color: {c['body']}; font-weight: 400; }}
+QMenu {{ border-radius: 4px; }}
+QMenu::item {{ border-radius: 0; }}
+QMenu::item:selected {{ background: {c['primary_subtle']}; color: {c['primary_text']}; }}
+QToolButton#sbItem:hover {{ background: {c['primary_subtle']}; color: {c['primary_text']}; }}
+"""

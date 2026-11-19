@@ -11,10 +11,10 @@ from datetime import datetime
 
 import qtawesome as qta
 from PySide6.QtCore import (Qt, QPoint, QAbstractTableModel, QModelIndex, QTimer, QUrl, QThread,
-                            Signal, QRectF, QSortFilterProxyModel, QSize, QTime, QPointF)
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap,
+                            Signal, QRectF, QSortFilterProxyModel, QSize, QTime, QPointF, QEvent)
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap,
                            QPainterPath, QKeySequence, QGuiApplication, QFontMetrics, QPen)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QApplication, QButtonGroup, QCheckBox,
                                QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QTimeEdit,
                                QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
@@ -483,6 +483,250 @@ class BadgeDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class MaterialCardDelegate(QStyledItemDelegate):
+    """Material list item: round pause / play button, name, thin progress line and two small
+    lines of status. Paints the whole row inside the name column (the other columns are hidden)."""
+    H = 88
+    BTN = 20          # radius of the round button
+
+    def __init__(self, parent=None, on_toggle=None):
+        super().__init__(parent)
+        self.on_toggle = on_toggle
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.H)
+
+    def _btn_rect(self, rect):
+        return QRectF(rect.left() + 16, rect.center().y() - self.BTN, self.BTN * 2, self.BTN * 2)
+
+    @staticmethod
+    def _running(r) -> bool:
+        return r.state not in ("paused", "stopped", "error")
+
+    def paint(self, painter, option, index):
+        r = _row_of(index)
+        rect = option.rect
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(rect, QColor(C["selection"] if option.state & QStyle.State_Selected else C["body_bg"]))
+        painter.setPen(QColor(C["border_soft"]))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        # round button
+        b = self._btn_rect(rect)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(C["secondary_bg"]))
+        painter.drawEllipse(b)
+        ic = "fa6s.pause" if self._running(r) else "fa6s.play"
+        painter.drawPixmap(int(b.center().x() - 8), int(b.center().y() - 8), qta.icon(ic, color=C["primary"]).pixmap(16, 16))
+        left = int(b.right() + 16)
+        right = rect.right() - 16
+        w = right - left
+        # name
+        f = QFont(painter.font()); f.setPointSizeF(11); f.setWeight(QFont.Medium)
+        painter.setFont(f)
+        painter.setPen(QColor(C["emphasis"] if option.state & QStyle.State_Selected else C["body"]))
+        name = QFontMetrics(f).elidedText(r.name, Qt.ElideMiddle, w)
+        painter.drawText(QRectF(left, rect.top() + 9, w, 22), Qt.AlignLeft | Qt.AlignVCenter, name)
+        # thin progress line
+        p = max(0.0, min(1.0, r.progress))
+        y = rect.top() + 38
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(C["border"]))
+        painter.drawRoundedRect(QRectF(left, y, w, 3), 1.5, 1.5)
+        if p > 0:
+            key = ProgressDelegate.CLASSIC.get(_bar_state(r), "primary")
+            if key == "secondary" and r.state == "paused":
+                key = "warning"
+            painter.setBrush(QColor(C[key]))
+            painter.drawRoundedRect(QRectF(left, y, max(3.0, w * p), 3), 1.5, 1.5)
+        # status lines
+        small = QFont(painter.font()); small.setPointSizeF(9); small.setWeight(QFont.Normal)
+        bold = QFont(small); bold.setWeight(QFont.DemiBold)
+        fm = QFontMetrics(small)
+        pct = "100%" if p >= 1 else f"{p * 100:.1f}%"
+        painter.setFont(small)
+        painter.setPen(QColor(C["primary_text"]))
+        state = state_text(r)
+        painter.drawText(QRectF(left, rect.top() + 47, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                         f"{state}  •  {pct}  •  {r.seeds} / {r.peers}")
+        parts = [fmt_size(r.size)]
+        if r.eta >= 0 and r.progress < 1:
+            parts.append(fmt_eta(r.eta))
+        painter.setPen(QColor(C["secondary"]))
+        line = "  •  ".join(parts)
+        painter.drawText(QRectF(left, rect.top() + 65, w, 18), Qt.AlignLeft | Qt.AlignVCenter, line)
+        x = left + fm.horizontalAdvance(line) + 14
+        painter.setFont(bold)
+        if r.down_rate > 0:
+            txt = "↓ " + fmt_speed(r.down_rate)
+            painter.setPen(QColor(C["primary_text"] if theme.current_name == "dark" else C["primary"]))
+            painter.drawText(QRectF(x, rect.top() + 65, w, 18), Qt.AlignLeft | Qt.AlignVCenter, txt)
+            x += QFontMetrics(bold).horizontalAdvance(txt) + 12
+        if r.up_rate > 0:
+            painter.setPen(QColor(C["success_text"] if theme.current_name == "dark" else C["success"]))
+            painter.drawText(QRectF(x, rect.top() + 65, w, 18), Qt.AlignLeft | Qt.AlignVCenter, "↑ " + fmt_speed(r.up_rate))
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if (self.on_toggle and event.type() == QEvent.MouseButtonRelease
+                and event.button() == Qt.LeftButton
+                and self._btn_rect(option.rect).contains(event.position())):
+            self.on_toggle(_row_of(index))
+            return True
+        return super().editorEvent(event, model, option, index)
+
+
+class PeerCardDelegate(QStyledItemDelegate):
+    """Material peer row: address on top, a small gray line (progress, speeds, client) below.
+    Reads the other cells of the same row, so menus and sorting keep working on real data."""
+    H = 54
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = option.rect
+        painter.fillRect(rect, QColor(C["selection"] if option.state & QStyle.State_Selected else C["body_bg"]))
+        painter.setPen(QColor(C["border_soft"]))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        g = lambda col: str(index.siblingAtColumn(col).data(Qt.DisplayRole) or "")
+        seed = index.data(Qt.DecorationRole)
+        x = rect.left() + 16
+        if isinstance(seed, QIcon):
+            painter.drawPixmap(x, int(rect.top() + 11), seed.pixmap(16, 16))
+            x += 26
+        f = QFont(painter.font()); f.setPointSizeF(10.5); f.setWeight(QFont.Medium)
+        painter.setFont(f)
+        painter.setPen(QColor(C["body"]))
+        painter.drawText(QRectF(x, rect.top() + 7, rect.width() - x - 16, 22), Qt.AlignLeft | Qt.AlignVCenter, g(0))
+        f2 = QFont(f); f2.setPointSizeF(9); f2.setWeight(QFont.Normal)
+        painter.setFont(f2)
+        painter.setPen(QColor(C["secondary"]))
+        line = "  •  ".join(x_ for x_ in (g(3), "↓ " + g(6), "↑ " + g(7), g(2), g(1)) if x_.strip(" ↓↑"))
+        painter.drawText(QRectF(x, rect.top() + 29, rect.width() - x - 16, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                         QFontMetrics(f2).elidedText(line, Qt.ElideRight, rect.width() - x - 16))
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.H)
+
+
+class MaterialTreeDelegate(QStyledItemDelegate):
+    """Material two-line rows for the Files and Trackers trees (other columns hidden).
+    mode "files": name, thin progress line, "size • priority"; mode "trackers": URL, state line."""
+    H = 54
+
+    def __init__(self, parent, mode: str, on_check=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.on_check = on_check
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.H)
+
+    @staticmethod
+    def _leaves(item):
+        """File indices + 'wanted' flags under a tree item (a file counts for itself)."""
+        out = []
+        idx = item.data(0, Qt.UserRole)
+        if idx is not None:
+            out.append((idx, item.text(3) != t("prio_skip")))
+        for i in range(item.childCount()):
+            out.extend(MaterialTreeDelegate._leaves(item.child(i)))
+        return out
+
+    def _cb_rect(self, rect):
+        return QRectF(rect.right() - 36, rect.center().y() - 9, 18, 18)
+
+    def editorEvent(self, event, model, option, index):
+        if (self.mode == "files" and self.on_check and event.type() == QEvent.MouseButtonRelease
+                and event.button() == Qt.LeftButton
+                and self._cb_rect(option.rect).adjusted(-10, -10, 10, 10).contains(event.position())):
+            item = self.parent().itemFromIndex(index.siblingAtColumn(0))
+            leaves = self._leaves(item) if item is not None else []
+            if leaves:
+                self.on_check([i for i, _ in leaves], not all(on for _, on in leaves))
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    def paint(self, painter, option, index):
+        g = lambda col: str(index.siblingAtColumn(col).data(Qt.DisplayRole) or "")
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = option.rect
+        sel = bool(option.state & QStyle.State_Selected)
+        painter.fillRect(rect, QColor(C["selection"] if sel else C["body_bg"]))
+        painter.setPen(QColor(C["border_soft"]))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        x, w_all = rect.left() + 10, rect.width()
+        ic = index.data(Qt.DecorationRole)
+        if isinstance(ic, QIcon):
+            painter.drawPixmap(x, int(rect.center().y() - 10), ic.pixmap(20, 20))
+            x += 30
+        nxt, mn = (g(9), g(10)) if self.mode == "trackers" else ("", "")
+        right_pad = 52 if self.mode == "files" else (190 if (nxt or mn) else 16)
+        w = rect.right() - x - right_pad
+        f = QFont(painter.font()); f.setPointSizeF(10.5); f.setWeight(QFont.Medium)
+        painter.setFont(f)
+        skipped = self.mode == "files" and index.siblingAtColumn(3).data(Qt.DisplayRole) == t("prio_skip")
+        painter.setPen(QColor(C["secondary"] if skipped else C["body"]))
+        painter.drawText(QRectF(x, rect.top() + 6, w, 22), Qt.AlignLeft | Qt.AlignVCenter,
+                         QFontMetrics(f).elidedText(g(0), Qt.ElideMiddle, w))
+        f2 = QFont(f); f2.setPointSizeF(9); f2.setWeight(QFont.Normal)
+        painter.setFont(f2)
+        if self.mode == "files":
+            pr = index.siblingAtColumn(2).data(Qt.UserRole)
+            y = rect.top() + 31
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(C["border"]))
+            painter.drawRoundedRect(QRectF(x, y, w, 3), 1.5, 1.5)
+            if isinstance(pr, (int, float)) and pr > 0:
+                painter.setBrush(QColor(C["primary"]))
+                painter.drawRoundedRect(QRectF(x, y, max(3.0, w * float(pr)), 3), 1.5, 1.5)
+                pct = f"{float(pr) * 100:.0f}%"
+            else:
+                pct = ""
+            line = "  •  ".join(v for v in (pct, g(1), g(3)) if v)
+            ytxt = rect.top() + 36
+        else:
+            line = "  •  ".join(v for v in (g(3), g(4) and f"{g(4)}/{g(5)}/{g(6)}", g(8)) if v)
+            ytxt = rect.top() + 29
+        painter.setPen(QColor(C["secondary"]))
+        painter.drawText(QRectF(x, ytxt, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                         QFontMetrics(f2).elidedText(line, Qt.ElideRight, w))
+        if self.mode == "trackers" and (nxt or mn):    # countdown to the next announce, top right
+            rx = QRectF(rect.right() - 180, rect.top() + 6, 164, 20)
+            fb = QFont(f2); fb.setWeight(QFont.DemiBold)
+            painter.setFont(fb)
+            painter.setPen(QColor(C["primary_text"] if theme.current_name == "dark" else C["primary"]))
+            if nxt:
+                painter.drawText(rx, Qt.AlignRight | Qt.AlignVCenter, f"{t('tr_next')}  {nxt}")
+            painter.setFont(f2)
+            painter.setPen(QColor(C["secondary"]))
+            if mn:
+                painter.drawText(rx.translated(0, 20), Qt.AlignRight | Qt.AlignVCenter, f"{t('tr_min')}  {mn}")
+        if self.mode == "files":                     # Material check box: file is / is not downloaded
+            item = self.parent().itemFromIndex(index.siblingAtColumn(0))
+            flags = [on for _, on in self._leaves(item)] if item is not None else []
+            cb = self._cb_rect(rect)
+            painter.setBrush(Qt.NoBrush)
+            if flags and any(flags):
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(C["primary"]))
+                painter.drawRoundedRect(cb, 3, 3)
+                pen = QPen(QColor("#ffffff")); pen.setWidthF(2.0); pen.setCapStyle(Qt.RoundCap)
+                painter.setPen(pen)
+                if all(flags):
+                    painter.drawLine(QPointF(cb.left() + 4, cb.center().y()), QPointF(cb.center().x() - 1, cb.bottom() - 5))
+                    painter.drawLine(QPointF(cb.center().x() - 1, cb.bottom() - 5), QPointF(cb.right() - 4, cb.top() + 5))
+                else:
+                    painter.drawLine(QPointF(cb.left() + 4, cb.center().y()), QPointF(cb.right() - 4, cb.center().y()))
+            else:
+                pen = QPen(QColor(C["secondary"])); pen.setWidthF(2.0)
+                painter.setPen(pen)
+                painter.drawRoundedRect(cb.adjusted(1, 1, -1, -1), 3, 3)
+        painter.restore()
+
+
 # ============================================================
 #  Small widgets
 # ============================================================
@@ -563,11 +807,11 @@ class Kpi(QFrame):
         style = theme.current_style
         fam = theme.TONES[self.tone]
         site = style == "site"
-        self.ico_box.setVisible(style in ("soft", "site", "fluent"))
-        self.ico.setVisible(style not in ("soft", "site", "fluent"))
+        self.ico_box.setVisible(style in ("soft", "site", "fluent", "material"))
+        self.ico.setVisible(style not in ("soft", "site", "fluent", "material"))
         self.line.setVisible(site)
         self.layout().setContentsMargins(*((16, 14, 16, 14) if site else (14, 10, 12, 10)))
-        if style in ("soft", "site", "fluent"):
+        if style in ("soft", "site", "fluent", "material"):
             col = C[fam + "_text"] if theme.current_name == "dark" else C[fam]
             self.ico_box.setPixmap(qta.icon(self.icon_name, color=col).pixmap(20, 20))
         else:
@@ -1789,7 +2033,7 @@ class SettingsDialog(QDialog):
         self.theme.setCurrentIndex({"system": 0, "light": 1, "dark": 2}.get(cfg.get("theme", "system"), 0))
         form.addRow(t("set_theme"), self.theme)
         self.style_combo = QComboBox()
-        for k in ("site", "soft", "vivid", "muted", "fluent"):
+        for k in ("site", "soft", "vivid", "muted", "fluent", "material"):
             self.style_combo.addItem(t("style_" + k), k)
         self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(cfg.get("ui_style", "soft"))))
         form.addRow(t("set_style"), self.style_combo)
@@ -2317,6 +2561,22 @@ class AddTorrentDialog(QDialog):
         # seeds / leechers asked from the tracker in the background (scrape)
         self.health = QLabel(); self.health.setObjectName("meta"); self.health.setTextFormat(Qt.RichText)
         info.addWidget(self.health, 3, 0, 1, 2)
+        if theme.current_style == "material" and ti is not None:        # Material "Information" block
+            import datetime
+            try:
+                ih = ti.info_hashes()
+                h = str(ih.v1 if ih.has_v1() else ih.v2)
+            except Exception:
+                h = ""
+            ts = ti.creation_date()
+            extra = (("gen_hash1", h), ("gen_comment", ti.comment()),
+                     ("gen_created", datetime.datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M") if ts else ""))
+            for r, (k, v) in enumerate((e for e in extra if e[1]), start=4):
+                lab = QLabel(t(k)); lab.setObjectName("rowLbl")
+                val = QLabel(v); val.setObjectName("rowVal"); val.setWordWrap(True)
+                val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                info.addWidget(lab, r, 0, Qt.AlignTop)
+                info.addWidget(val, r, 1)
         info.setColumnStretch(1, 1)
         top = QHBoxLayout()
         top.addLayout(info, 1)
@@ -2369,6 +2629,8 @@ class AddTorrentDialog(QDialog):
             bl.addStretch()
         tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
         self.tabs, self.basic_tab = tabs, basic
+        if theme.current_style == "material":
+            tabs.tabBar().setExpanding(True)
 
         # ── Advanced · Publisher · Download order (same tabs as Task properties) ──
         if cross:
@@ -2408,7 +2670,7 @@ class AddTorrentDialog(QDialog):
 
         btns = QHBoxLayout()
         btns.addStretch()
-        self.ok = QPushButton(icon("fa6s.download", "white"), t("ad_now"))
+        self.ok = QPushButton(icon("fa6s.download", "fab_text" if theme.current_style == "material" else "white"), t("ad_now"))
         self.ok.setObjectName("primary")
         self.ok.setDefault(True)
         self.ok.clicked.connect(self.accept)
@@ -3317,7 +3579,8 @@ class MainWindow(QMainWindow):
         """Compact list: 26 px rows instead of 38 — about half as many torrents again on screen."""
         self.cfg["compact_list"] = on
         ProgressDelegate.compact = on
-        self.table.verticalHeader().setDefaultSectionSize(26 if on else 38)
+        self.table.verticalHeader().setDefaultSectionSize(
+            MaterialCardDelegate.H if self._card_on else (26 if on else 38))
         self.compact_btn.setChecked(on)
         self.table.viewport().update()
 
@@ -3443,6 +3706,15 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(h)
         lay.setContentsMargins(18, 14, 14, 14)
         lay.setSpacing(14)
+        self.menu_btn = QToolButton()               # Material: opens the filter "drawer"
+        self.menu_btn.setObjectName("iconBtn")
+        self.menu_btn.setCursor(Qt.PointingHandCursor)
+        self.menu_btn.setIconSize(QSize(22, 22))
+        self.menu_btn.clicked.connect(lambda: self.set_sidebar(not self.sidebar.isVisible()))
+        self._themed_icon(self.menu_btn.setIcon, "fa6s.bars", "head_ic")
+        self.menu_btn.hide()
+        lay.addWidget(self.menu_btn)
+        self._build_sel_bar(h)
         self.head_icon = QLabel()
         self.head_icon.setObjectName("headIcon")
         self.head_icon.setFixedSize(50, 50)
@@ -3455,6 +3727,7 @@ class MainWindow(QMainWindow):
         title = QLabel(APP_TITLE); title.setObjectName("title")
         self.meta = QLabel(); self.meta.setObjectName("meta"); self.meta.setTextFormat(Qt.RichText)
         self.meta.linkActivated.connect(lambda link: self.bans_dialog() if link == "bans" else None)
+        self.head_title = title
         col.addWidget(title)
         col.addWidget(self.meta)
         lay.addLayout(col)
@@ -3473,7 +3746,7 @@ class MainWindow(QMainWindow):
         self.update_pill.setCursor(Qt.PointingHandCursor)
         self.update_pill.clicked.connect(self.show_update)
         self.update_pill.hide()
-        self._themed_icon(self.update_pill.setIcon, "fa6s.circle-arrow-up", "#ffffff")
+        self._themed_icon(self.update_pill.setIcon, "fa6s.circle-arrow-up", C["fab_text"] if theme.current_style == "material" else "#ffffff")
         lay.addWidget(self.update_pill)
         self.power_pill = QPushButton()              # armed "when everything is downloaded" action
         self.power_pill.setObjectName("danger")
@@ -3716,7 +3989,7 @@ class MainWindow(QMainWindow):
                 b.setObjectName(obj)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(slot)
-            self._themed_icon(b.setIcon, name, "#ffffff" if obj == "primary" else color)
+            self._themed_icon(b.setIcon, name, (C["fab_text"] if theme.current_style == "material" else "#ffffff") if obj == "primary" else color)
             if shortcut:
                 a = QAction(self); a.setShortcut(QKeySequence(shortcut)); a.triggered.connect(slot)
                 self.addAction(a)
@@ -3791,6 +4064,36 @@ class MainWindow(QMainWindow):
         self.xl_btn.clicked.connect(self.export_list)
         self._themed_icon(self.xl_btn.setIcon, "fa6s.file-excel", "head_ic")
         lay.addWidget(self.xl_btn)
+        self.sort_btn = QToolButton()          # Material: sorting (the table header is hidden there)
+        self.sort_btn.setObjectName("iconBtn")
+        self.sort_btn.setCursor(Qt.PointingHandCursor)
+        self.sort_btn.setIconSize(QSize(18, 18))
+        self.sort_btn.setToolTip(t("material_sort"))
+        self.sort_btn.setPopupMode(QToolButton.InstantPopup)
+        self._themed_icon(self.sort_btn.setIcon, "fa6s.arrow-down-wide-short", "head_ic")
+        self._build_sort_menu()
+        self.sort_btn.hide()
+        lay.addWidget(self.sort_btn)
+        self.more_btn = QToolButton()          # Material: the rest of the toolbar lives in this menu
+        self.more_btn.setObjectName("iconBtn")
+        self.more_btn.setCursor(Qt.PointingHandCursor)
+        self.more_btn.setIconSize(QSize(18, 18))
+        self.more_btn.setPopupMode(QToolButton.InstantPopup)
+        self._themed_icon(self.more_btn.setIcon, "fa6s.ellipsis-vertical", "head_ic")
+        mm = QMenu(self.more_btn)
+        mm.addAction(icon("fa6s.magnet", "ic_magnet"), t("add_magnet"), self.add_magnet_dialog)
+        mm.addAction(icon("fa6s.file-circle-plus", "ic_create"), t("create_torrent"), self.create_torrent_dialog)
+        mm.addSeparator()
+        mm.addAction(icon("fa6s.play", "success"), t("start"), lambda: self.start_selected(all_if_none=True))
+        mm.addAction(icon("fa6s.pause"), t("pause"), lambda: self._each(self.engine.pause, all_if_none=True))
+        mm.addAction(icon("fa6s.stop", "danger"), t("stop"), lambda: self._each(self.engine.stop, all_if_none=True))
+        mm.addSeparator()
+        mm.addAction(icon("fa6s.circle-arrow-up", "primary"), t("tb_up"), lambda: self.queue_move("up"))
+        mm.addAction(icon("fa6s.circle-arrow-down", "primary"), t("tb_down"), lambda: self.queue_move("down"))
+        self.more_btn.setMenu(mm)
+        self.more_btn.hide()
+        lay.addWidget(self.more_btn)
+        self._actions_lay = lay
         return lay
 
     def _build_kpis(self) -> QHBoxLayout:
@@ -3936,7 +4239,373 @@ class MainWindow(QMainWindow):
         self.drop_hint.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.drop_hint.hide()
         self._list_box = box
+        self._build_material_bar(box)
         return box
+
+    def _build_material_bar(self, box) -> None:
+        """Material floating action bar (pause, recheck, magnet, properties, delete) over the list's
+        bottom-right corner; only visible in the Material look."""
+        from PySide6.QtCore import QObject
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect, QToolButton
+        bar = QFrame(box)
+        bar.setObjectName("materialBar")
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(8, 4, 8, 4); bl.setSpacing(2)
+        for icon_name, tip, fn in (
+                ("fa6s.play", t("start"), lambda: self.start_selected(all_if_none=False)),
+                ("fa6s.pause", t("pause"), lambda: self._each(self.engine.pause, all_if_none=False)),
+                ("fa6s.arrows-rotate", t("recheck"), self.recheck_selected),
+                ("fa6s.magnet", "Magnet", self.copy_magnet),
+                ("fa6s.gear", t("settings"), self.properties_dialog),
+                ("fa6s.trash-can", t("remove"), self.remove_selected)):
+            b = QToolButton(); b.setObjectName("materialBtn"); b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor); b.setIconSize(QSize(18, 18))
+            b.clicked.connect(lambda _=False, f=fn: f())
+            self._themed_icon(b.setIcon, icon_name)
+            bl.addWidget(b)
+        sh = QGraphicsDropShadowEffect(bar)
+        sh.setBlurRadius(18); sh.setOffset(0, 3); sh.setColor(QColor(0, 0, 0, 70))
+        bar.setGraphicsEffect(sh)
+        bar.hide()
+        self.material_bar = bar
+        fab = QPushButton("+   " + t("add_torrent"), box)
+        fab.setObjectName("materialFab")
+        fab.setCursor(Qt.PointingHandCursor)
+        fab.clicked.connect(self.add_torrent_dialog)
+        fsh = QGraphicsDropShadowEffect(fab)
+        fsh.setBlurRadius(18); fsh.setOffset(0, 3); fsh.setColor(QColor(0, 0, 0, 80))
+        fab.setGraphicsEffect(fsh)
+        fab.hide()
+        self.material_fab = fab
+        ed = QToolButton(box)                      # round gray pencil: edit the selected torrent
+        ed.setObjectName("materialEdit")
+        ed.setCursor(Qt.PointingHandCursor)
+        ed.setIconSize(QSize(18, 18))
+        ed.setToolTip(t("material_edit"))
+        ed.clicked.connect(lambda: self.properties_dialog())
+        self._themed_icon(ed.setIcon, "fa6s.pencil", "#ffffff")
+        ed.hide()
+        self.material_edit = ed
+
+        win_ = self
+
+        class _Place(QObject):
+            def eventFilter(self_, o, e):
+                if e.type() == QEvent.Resize and bar.isVisible():
+                    win_._place_material_overlays()
+                return False
+        self._material_place = _Place(box)
+        box.installEventFilter(self._material_place)
+
+    # ── Material strips over the Files / Trackers lists ───────────
+    _VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm", ".mpg", ".mpeg", ".flv"}
+
+    def _attach_strip(self, tree, strip, height: int) -> None:
+        from PySide6.QtCore import QObject
+
+        class _Resize(QObject):
+            def eventFilter(self_, o, e):
+                if e.type() == QEvent.Resize:
+                    strip.setGeometry(0, 0, o.width(), height)
+                return False
+        flt = _Resize(tree)
+        tree.installEventFilter(flt)
+        strip._flt = flt
+        strip._h = height
+
+    def _material_strips(self, want: bool) -> None:
+        if not hasattr(self, "files_strip"):
+            fs = QWidget(self.files_tbl); fs.setObjectName("materialStrip")
+            fl = QHBoxLayout(fs); fl.setContentsMargins(12, 8, 12, 8); fl.setSpacing(8)
+            self._chips = {}
+            for key, label in (("done", "material_done"), ("inc", "material_incomplete"), ("vid", "material_video")):
+                b = QPushButton(t(label)); b.setObjectName("materialChip"); b.setCheckable(True)
+                b.setCursor(Qt.PointingHandCursor)
+                b.toggled.connect(lambda _=False: self._files_apply_chips())
+                fl.addWidget(b); self._chips[key] = b
+            fl.addStretch()
+            for label, prio in (("material_select_all", PRIO_NORMAL), ("material_deselect", PRIO_SKIP)):
+                b = QPushButton(t(label)); b.setObjectName("materialLink"); b.setCursor(Qt.PointingHandCursor)
+                b.clicked.connect(lambda _=False, p=prio: self._files_all(p))
+                fl.addWidget(b)
+            self._attach_strip(self.files_tbl, fs, 48)
+            self.files_strip = fs
+            ts = QWidget(self.tr_tbl); ts.setObjectName("materialStrip")
+            tl = QHBoxLayout(ts); tl.setContentsMargins(0, 0, 0, 0)
+            ab = QPushButton("+  " + t("material_add_tracker")); ab.setObjectName("materialTonal")
+            ab.setCursor(Qt.PointingHandCursor)
+            ab.clicked.connect(lambda: self.edit_trackers())
+            tl.addWidget(ab)
+            self._attach_strip(self.tr_tbl, ts, 64)
+            self.tr_strip = ts
+        for tree, strip in ((self.files_tbl, self.files_strip), (self.tr_tbl, self.tr_strip)):
+            strip.setGeometry(0, 0, tree.width(), strip._h)
+            strip.setVisible(want)
+        if not want:
+            for b in self._chips.values():
+                b.blockSignals(True); b.setChecked(False); b.blockSignals(False)
+        self._files_apply_chips()
+
+    def _files_apply_chips(self) -> None:
+        if not hasattr(self, "_chips"):
+            return
+        on = {k: b.isChecked() for k, b in self._chips.items()}
+        tree = self.files_tbl
+        for leaf in tree.leaves.values():
+            pr = leaf.data(2, Qt.UserRole) or 0
+            ext = os.path.splitext(leaf.text(0))[1].lower()
+            ok = ((not on["done"] or pr >= 0.999) and (not on["inc"] or pr < 0.999)
+                  and (not on["vid"] or ext in self._VIDEO_EXT))
+            leaf.setHidden(not ok)
+        for f in reversed(tree.folders):
+            f.setHidden(f.childCount() > 0 and all(f.child(i).isHidden() for i in range(f.childCount())))
+
+    def _files_all(self, prio: int) -> None:
+        key = self.files_tbl.key
+        if key and self.files_tbl.leaves:
+            self.engine.set_file_priority(key, list(self.files_tbl.leaves.keys()), prio)
+            self.refresh_files(key)
+
+    def _files_check(self, idxs: list, wanted: bool) -> None:
+        key = self.files_tbl.key
+        if key:
+            self.engine.set_file_priority(key, idxs, PRIO_NORMAL if wanted else PRIO_SKIP)
+            self.refresh_files(key)
+
+    # ── Material: several torrents selected → action bar over the header ──
+    def _build_sel_bar(self, head) -> None:
+        from PySide6.QtCore import QObject
+        bar = QFrame(head)
+        bar.setObjectName("selBar")
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(14, 0, 14, 0)
+        bl.setSpacing(6)
+
+        def tool(icon_name, tip, fn):
+            b = QToolButton(); b.setObjectName("iconBtn"); b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor); b.setIconSize(QSize(20, 20))
+            b.clicked.connect(lambda _=False: fn())
+            self._themed_icon(b.setIcon, icon_name, "primary_text")
+            return b
+        bl.addWidget(tool("fa6s.xmark", t("material_clear"), lambda: self.table.clearSelection()))
+        self.sel_label = QLabel(); self.sel_label.setObjectName("selLabel")
+        bl.addWidget(self.sel_label)
+        bl.addStretch()
+        bl.addWidget(tool("fa6s.check-double", t("material_select_all"), lambda: self.table.selectAll()))
+        bl.addWidget(tool("fa6s.play", t("start"), lambda: self.start_selected(all_if_none=False)))
+        bl.addWidget(tool("fa6s.pause", t("pause"), lambda: self._each(self.engine.pause, all_if_none=False)))
+        bl.addWidget(tool("fa6s.trash-can", t("remove"), lambda: self.remove_selected()))
+        bar.hide()
+        self.sel_bar = bar
+
+        class _Cover(QObject):
+            def eventFilter(self_, o, e):
+                if e.type() == QEvent.Resize:
+                    bar.setGeometry(0, 0, o.width(), o.height())
+                return False
+        self._sel_cover = _Cover(head)
+        head.installEventFilter(self._sel_cover)
+
+    def _update_sel_bar(self, *_args) -> None:
+        n = len(self.selected_keys()) if theme.current_style == "material" else 0
+        show = n >= 2
+        if show:
+            self.sel_label.setText(f"{t('material_selected')} {n}")
+            self.sel_bar.setGeometry(0, 0, self.sel_bar.parent().width(), self.sel_bar.parent().height())
+            self.sel_bar.raise_()
+        self.sel_bar.setVisible(show)
+
+    # ── Material: sort menu ─────────────────────────────────────
+    SORT_OPTS = (("col_queue", C_QUEUE), ("col_name", C_NAME), ("col_size", C_SIZE), ("col_progress", C_PROG),
+                 ("col_down", C_DOWN), ("col_up", C_UP), ("col_ratio", C_RATIO), ("col_eta", C_ETA),
+                 ("col_seeds", C_SEEDS))
+
+    def _build_sort_menu(self) -> None:
+        mm = QMenu(self.sort_btn)
+        self._sort_cols = QActionGroup(mm)
+        self._sort_cols.setExclusive(True)
+        self._sort_col_acts = {}
+        for key, col in self.SORT_OPTS:
+            a = mm.addAction(t(key))
+            a.setCheckable(True)
+            self._sort_cols.addAction(a)
+            self._sort_col_acts[col] = a
+            a.triggered.connect(lambda _=False, c=col: self._apply_sort(col=c))
+        mm.addSeparator()
+        self._sort_dir = QActionGroup(mm)
+        self._sort_dir.setExclusive(True)
+        self._sort_dir_acts = {}
+        for desc, label in ((False, "material_asc"), (True, "material_desc")):
+            a = mm.addAction(t(label))
+            a.setCheckable(True)
+            self._sort_dir.addAction(a)
+            self._sort_dir_acts[desc] = a
+            a.triggered.connect(lambda _=False, d=desc: self._apply_sort(desc=d))
+        mm.aboutToShow.connect(self._sync_sort_menu)
+        self.sort_btn.setMenu(mm)
+
+    def _sort_state(self):
+        hh = self.table.horizontalHeader()
+        return hh.sortIndicatorSection(), hh.sortIndicatorOrder() == Qt.DescendingOrder
+
+    def _sync_sort_menu(self) -> None:
+        col, desc = self._sort_state()
+        if col in self._sort_col_acts:
+            self._sort_col_acts[col].setChecked(True)
+        self._sort_dir_acts[desc].setChecked(True)
+
+    def _apply_sort(self, col=None, desc=None) -> None:
+        cur_col, cur_desc = self._sort_state()
+        col = cur_col if col is None else col
+        desc = cur_desc if desc is None else desc
+        self.table.sortByColumn(col, Qt.DescendingOrder if desc else Qt.AscendingOrder)
+
+    # ── Material card list ────────────────────────────────────────
+    _card_on = False
+    _card_saved: "QByteArray | None" = None
+    _hdr_saved: dict = {}
+
+    def _toggle_card(self, r) -> None:
+        if MaterialCardDelegate._running(r):
+            self.engine.pause(r.key)
+        else:
+            self.start_keys([r.key])
+        self.tick()
+
+    def _sync_card_mode(self) -> None:
+        """The Material look shows every torrent as a card (all columns folded into the name column);
+        other looks get their own columns back. The user's column layout is kept aside."""
+        want = theme.current_style == "material"
+        hh = self.table.horizontalHeader()
+        if want and not self._card_on:
+            self._card_saved = hh.saveState()
+            for c in range(len(COLS)):
+                hh.setSectionHidden(c, c != C_NAME)
+            self.table.setItemDelegateForColumn(C_NAME, MaterialCardDelegate(self.table, self._toggle_card))
+            hh.setSectionResizeMode(C_NAME, QHeaderView.Stretch)
+            hh.hide()
+            self.table.verticalHeader().setDefaultSectionSize(MaterialCardDelegate.H)
+            self._card_on = True
+        elif not want and self._card_on:
+            self.table.setItemDelegateForColumn(C_NAME, QStyledItemDelegate(self.table))
+            if self._card_saved is not None:
+                hh.restoreState(self._card_saved)
+            hh.show()
+            self.table.verticalHeader().setDefaultSectionSize(38)
+            self._card_on = False
+            self._card_saved = None
+        pt = self.peers_tbl
+        if want:
+            for c in range(1, pt.columnCount()):
+                pt.setColumnHidden(c, True)
+            pt.horizontalHeader().hide()
+            pt.setItemDelegateForColumn(0, PeerCardDelegate(pt))
+            pt.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+            pt.verticalHeader().setDefaultSectionSize(PeerCardDelegate.H)
+        else:
+            for c in range(pt.columnCount()):
+                pt.setColumnHidden(c, False)
+            pt.horizontalHeader().show()
+            pt.setItemDelegateForColumn(0, QStyledItemDelegate(pt))
+            pt.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
+            pt.verticalHeader().setDefaultSectionSize(30)
+        self.peers_add_btn.setVisible(want)
+        self.material_bar.setVisible(want)
+        self.material_fab.setVisible(want)
+        self.material_edit.setVisible(want)
+        self._place_material_overlays()
+        # header: hamburger + title only; filters = status tabs, the sidebar is a drawer
+        self.menu_btn.setVisible(want)
+        self.head_icon.setVisible(not want)
+        self.meta.setVisible(not want)
+        on_now = getattr(self, "_material_ui_on", False)
+        if want and not on_now:
+            self.cfg.setdefault("sidebar_pre_material", bool(self.cfg.get("sidebar")))
+            self.set_sidebar(False)
+        elif not want and on_now:
+            self.set_sidebar(bool(self.cfg.pop("sidebar_pre_material", True)))
+        self._material_ui_on = want
+        # top rows: Material keeps only search & icons, everything else is in the FAB, bar and ⋮ menu
+        for i in range(self._actions_lay.count()):
+            w = self._actions_lay.itemAt(i).widget()
+            if isinstance(w, (QPushButton, QFrame)):
+                w.setVisible(not want)
+        self.more_btn.setVisible(want)
+        self.sort_btn.setVisible(want)
+        for k in (self.k_down, self.k_up, self.k_active, self.k_session):
+            k.setVisible(not want)
+        tb = self.tabs.tabBar()
+        tb.setExpanding(want)
+        tb.setDrawBase(not want)
+        # files & trackers: two-line rows
+        for name, tree, mode in (("files", self.files_tbl, "files"), ("tr", self.tr_tbl, "trackers")):
+            if want and name not in self._hdr_saved:
+                self._hdr_saved[name] = tree.header().saveState()
+                for c in range(1, tree.columnCount()):
+                    tree.setColumnHidden(c, True)
+                tree.header().setFixedHeight(48 if mode == "files" else 64)   # room for the strip
+                tree.setItemDelegateForColumn(0, MaterialTreeDelegate(
+                    tree, mode, self._files_check if mode == "files" else None))
+                tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+                tree.setUniformRowHeights(True)
+            elif not want and name in self._hdr_saved:
+                tree.setItemDelegateForColumn(0, QStyledItemDelegate(tree))
+                tree.header().restoreState(self._hdr_saved.pop(name))
+                for c in range(tree.columnCount()):
+                    tree.setColumnHidden(c, False)
+                tree.header().setMinimumHeight(0)
+                tree.header().setMaximumHeight(16777215)
+                tree.header().resizeSection(0, tree.header().sectionSize(0))
+            tree.viewport().update()
+        if not getattr(self, "_sel_connected", False):
+            self.table.selectionModel().selectionChanged.connect(self._update_sel_bar)
+            self._sel_connected = True
+        self._update_sel_bar()
+        self._material_strips(want)
+        if getattr(self, "_sum_style", None) != theme.current_style:
+            self._rebuild_summary()
+        self.table.viewport().update()
+
+    def _place_material_overlays(self) -> None:
+        box = self._list_box
+        if self.material_bar.isVisible():
+            self.material_bar.adjustSize()
+            self.material_bar.move(box.width() - self.material_bar.width() - 28, box.height() - self.material_bar.height() - 14)
+            self.material_bar.raise_()
+        if self.material_edit.isVisible():
+            self.material_edit.adjustSize()
+            self.material_edit.move(box.width() - self.material_edit.width() - 14, int(box.height() * 0.38))
+            self.material_edit.raise_()
+        if self.material_fab.isVisible():
+            self.material_fab.adjustSize()
+            x0 = self.table.mapTo(box, self.table.rect().topLeft()).x()
+            self.material_fab.move(x0 + 20, box.height() - self.material_fab.height() - 14)
+            self.material_fab.raise_()
+
+    def _rebuild_summary(self) -> None:
+        """Summary / Details pages are laid out differently in the Material look, so they are built again."""
+        mat = theme.current_style == "material"
+        old_s, old_d = self.summary_page, self.details_page
+        si, di = self.tabs.indexOf(old_s), self.tabs.indexOf(old_d)
+        cur = self.tabs.currentWidget()
+        self.summary_page = self._build_summary()          # builds self.g first, the details grid adds to it
+        self.details_page = self._build_details_page()
+        for idx, page, key in ((di, self.details_page, "tab_details"),
+                               (si, self.summary_page, "tab_state" if mat else "tab_summary")):
+            self.tabs.removeTab(idx)
+            self.tabs.insertTab(idx, page, t(key))
+            self._tab_icon(idx)
+        self.tabs.setTabVisible(di, mat)
+        if cur is old_s:
+            self.tabs.setCurrentIndex(si)
+        elif cur is old_d or cur is None:
+            self.tabs.setCurrentIndex(si)
+        else:
+            self.tabs.setCurrentWidget(cur)
+        for old in (old_s, old_d):
+            old.setParent(None)                            # kept alive: theme-icon callbacks still point at them
+        self._old_pages = getattr(self, "_old_pages", []) + [old_s, old_d]
+        self.refresh_details()
 
     def _show_drop_hint(self, on: bool):
         if not on:
@@ -4040,6 +4709,30 @@ class MainWindow(QMainWindow):
     def _sum_grid(self, rows) -> QWidget:
         w = QWidget()
         grid = QGridLayout(w)
+        if theme.current_style == "material":          # Material: caps label over value, four tiles per row
+            grid.setContentsMargins(8, 10, 8, 10)
+            grid.setHorizontalSpacing(18)
+            grid.setVerticalSpacing(16)
+            wide = {"gen_name", "gen_path", "gen_hash1", "gen_hash2", "gen_tracker", "gen_comment", "gen_error"}
+            r = c = 0
+            for k in (k for pair in rows for k in pair if k):
+                span = 4 if k in wide else 1
+                if c + span > 4:
+                    r, c = r + 1, 0
+                cell = QWidget()
+                cl = QVBoxLayout(cell); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(3)
+                lab = QLabel(t(k).upper()); lab.setObjectName("rowLbl")
+                val = QLabel(); val.setObjectName("rowVal"); val.setWordWrap(True)
+                val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                cl.addWidget(lab); cl.addWidget(val)
+                grid.addWidget(cell, r, c, 1, span)
+                self.g[k] = val
+                c += span
+                if c >= 4:
+                    r, c = r + 1, 0
+            for i in range(4):
+                grid.setColumnStretch(i, 1)
+            return w
         grid.setContentsMargins(4, 4, 4, 4)
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(5)
@@ -4099,9 +4792,29 @@ class MainWindow(QMainWindow):
         bars.setColumnStretch(1, 1)
         top.addLayout(bars, 1)
         v.addLayout(top)
-        v.addWidget(_section(t("sec_transfer"), "fa6s.right-left", "primary"))
+        material = theme.current_style == "material"
+        self._sum_style = theme.current_style
+        if not material:
+            v.addWidget(_section(t("sec_transfer"), "fa6s.right-left", "primary"))
         v.addWidget(self._sum_grid(self.SUM_TRANSFER))
-        v.addWidget(_section(t("sec_basic"), "fa6s.circle-info", "info"))
+        if not material:
+            v.addWidget(_section(t("sec_basic"), "fa6s.circle-info", "info"))
+            v.addWidget(self._sum_grid(self.SUM_BASIC))
+        v.addStretch()
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setWidget(inner)
+        return sc
+
+    def _build_details_page(self) -> QWidget:
+        """Material look: 'Details' (name, path, hash, comment, dates) is its own tab, 'State' keeps
+        the numbers. Other looks keep one Summary page, so this page stays empty and its tab is hidden."""
+        if theme.current_style != "material":
+            return QWidget()
+        inner = QWidget()
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(16, 10, 16, 10)
         v.addWidget(self._sum_grid(self.SUM_BASIC))
         v.addStretch()
         sc = QScrollArea()
@@ -4121,6 +4834,7 @@ class MainWindow(QMainWindow):
         self.tabs.setUsesScrollButtons(True)
 
         self.summary_page = self._build_summary()
+        self.details_page = self._build_details_page()
         self.files_tbl = widgets.FilesView()
         self.files_tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_tbl.customContextMenuRequested.connect(self.files_menu)
@@ -4148,6 +4862,13 @@ class MainWindow(QMainWindow):
         self.peers_summary.setTextFormat(Qt.RichText)
         self.peers_summary.setContentsMargins(14, 8, 14, 8)
         self.peers_summary.setWordWrap(True)
+        self.peers_add_btn = QPushButton("+  " + t("peer_add"))
+        self.peers_add_btn.setObjectName("materialTonal")
+        self.peers_add_btn.setCursor(Qt.PointingHandCursor)
+        self.peers_add_btn.clicked.connect(lambda: (self.selected_keys() or [None])[0]
+                                           and self.add_peer_dialog(self.selected_keys()[0]))
+        self.peers_add_btn.hide()
+        pl.addWidget(self.peers_add_btn)
         pl.addWidget(self.peers_summary)
         pl.addWidget(self.peers_tbl, 1)
 
@@ -4175,7 +4896,9 @@ class MainWindow(QMainWindow):
         self.stats_view = StatsView()
         self.log = LogView()
 
-        for w, key, ic in ((self.summary_page, "tab_summary", "fa6s.square-check"),
+        mat = theme.current_style == "material"
+        for w, key, ic in ((self.details_page, "tab_details", "fa6s.file-lines"),
+                           (self.summary_page, "tab_state" if mat else "tab_summary", "fa6s.square-check"),
                            (self.files_tbl, "tab_files", "fa6s.folder-tree"),
                            (self.tr_tbl, "tab_trackers", "fa6s.server"),
                            (self.peers_page, "tab_peers", "fa6s.users"),
@@ -4187,6 +4910,8 @@ class MainWindow(QMainWindow):
             i = self.tabs.addTab(w, t(key))
             self._tab_icons.append(ic)
             self._themed_icon(lambda q, i=i: self._tab_icon(i), ic)
+        self.tabs.setTabVisible(self.tabs.indexOf(self.details_page), mat)
+        self.tabs.setCurrentIndex(self.tabs.indexOf(self.summary_page))
         self.tabs.currentChanged.connect(lambda _: self.refresh_details())
         self.tabs.currentChanged.connect(lambda _: [self._tab_icon(i) for i in range(len(self._tab_icons))])
         lay.addWidget(self.tabs)
@@ -4195,7 +4920,7 @@ class MainWindow(QMainWindow):
     def _tab_icon(self, i: int):
         """Pill tabs: the selected one is a blue pill, so its icon turns white."""
         on = i == self.tabs.currentIndex()
-        self.tabs.setTabIcon(i, qta.icon(self._tab_icons[i], color="#ffffff" if on else C["secondary"]))
+        self.tabs.setTabIcon(i, qta.icon(self._tab_icons[i], color=(C["primary"] if theme.current_style == "material" else "#ffffff") if on else C["secondary"]))
 
     def _mk_table(self, keys, stretch):
         w = QTableWidget(0, len(keys))
@@ -4467,6 +5192,7 @@ class MainWindow(QMainWindow):
     # ── theme ──────────────────────────────────────────────────
     def retheme(self):
         widgets.clear_cache()
+        self._sync_card_mode()
         if hasattr(self, "files_tbl"):
             self.files_tbl.retheme()
         for setter, name, key in self._themed:
@@ -5094,12 +5820,12 @@ class MainWindow(QMainWindow):
             return bytes(ba.toBase64()).decode()
         self.cfg["ui_state"] = {
             "geometry": b64(self.saveGeometry()),
-            "header": b64(self.table.horizontalHeader().saveState()),
+            "header": b64(self._card_saved if self._card_on and self._card_saved is not None else self.table.horizontalHeader().saveState()),
             "columns": len(COLS),
             "splitter": b64(self.split.saveState()),
             "tab": self.tabs.currentIndex(),
-            "files_header": b64(self.files_tbl.header().saveState()),
-            "trackers_header": b64(self.tr_tbl.header().saveState()),
+            "files_header": b64(self._hdr_saved.get("files") or self.files_tbl.header().saveState()),
+            "trackers_header": b64(self._hdr_saved.get("tr") or self.tr_tbl.header().saveState()),
             "trackers_columns": len(widgets.TrackersView.COLS),
             "hsplit": b64(self.hsplit.saveState()),
         }
@@ -5130,6 +5856,7 @@ class MainWindow(QMainWindow):
             self.hsplit.restoreState(ba("hsplit"))
         self.set_sidebar(self.cfg.get("sidebar", True))
         self.set_compact(bool(self.cfg.get("compact_list")))
+        self._sync_card_mode()
 
     def columns_menu(self, pos):
         hh = self.table.horizontalHeader()
@@ -5611,7 +6338,7 @@ class MainWindow(QMainWindow):
             self.piece_map.show_map({}, False)
             return
 
-        if cur is self.summary_page:
+        if cur is self.summary_page or cur is self.details_page:
             self._refresh_summary(row)
         elif cur is self.files_tbl:
             self.refresh_files(row.key)
@@ -5791,6 +6518,8 @@ class MainWindow(QMainWindow):
 
     def refresh_files(self, key: str):
         self.files_tbl.update_files(key, self.engine.files(key))
+        if self._card_on:
+            self._files_apply_chips()
 
     def files_menu(self, pos):
         key = self.files_tbl.key
