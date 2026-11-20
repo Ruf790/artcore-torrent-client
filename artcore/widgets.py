@@ -459,6 +459,7 @@ class TrackersView(QTreeWidget):
                 it.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
         it.setToolTip(8, vals.get(8, ""))
         it.setToolTip(0, it.text(0))
+        it.setData(3, Qt.UserRole, status)          # the Material look colours the status line by it
         ic, col = self.STATUS_ICON.get(status, ("fa6s.circle-question", "secondary"))
         it.setIcon(3, icon(ic, col))
         bad = status in ("tracker_error", "not_working")

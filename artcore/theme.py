@@ -569,11 +569,58 @@ QFrame#card, QFrame#headCard, QFrame#kpi {{ background: {'rgba(43,43,43,235)' if
 """ if mica_active() else "")
 
 
+def _switch_images(c: dict) -> dict[str, str]:
+    """Material toggle switch as four PNGs (off / on, normal / disabled) in the temp folder:
+    QSS can't draw a sliding thumb, so the indicator of every check box is an image."""
+    import os
+    import tempfile
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+    d = os.path.join(tempfile.gettempdir(), "artcore_switch")
+    os.makedirs(d, exist_ok=True)
+    out = {}
+    W, H, K = 38, 22, 2                               # logical size, device pixel ratio of the image
+    for name, on, off_ in (("off", False, False), ("on", True, False), ("off_dis", False, True), ("on_dis", True, True)):
+        track = QColor(c["primary"] if on else c["secondary_bg"])
+        edge = QColor(c["primary"] if on else c["secondary"])
+        thumb = QColor("#ffffff" if on else c["secondary"])
+        if off_:
+            for q in (track, edge, thumb):
+                q.setAlpha(110)
+        pm = QPixmap(W * K, H * K)
+        pm.setDevicePixelRatio(K)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(track)
+        p.setPen(QPen(edge, 2))
+        p.drawRoundedRect(QRectF(1, 1, W - 2, H - 2), (H - 2) / 2, (H - 2) / 2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(thumb)
+        r = 8 if on else 5.5
+        cx = W - 12 if on else 12
+        p.drawEllipse(QRectF(cx - r, H / 2 - r, 2 * r, 2 * r))
+        p.end()
+        path = os.path.join(d, f"sw_{name}_{c['primary'][1:]}_{c['secondary_bg'][1:]}.png")
+        pm.save(path, "PNG")
+        out[name] = path.replace("\\", "/")
+    return out
+
+
 def material_qss(c: dict, dark: bool) -> str:
     """Material look: flat surfaces, teal accent, tabs with an underline, light-blue selected row,
     pale-rose main button (a floating "add torrent" button)."""
+    sw = _switch_images(c)
     return f"""
 * {{ font-family: "Roboto", "Segoe UI Variable Text", "Segoe UI", "Noto Sans", Arial; font-size: 10pt; }}
+QCheckBox::indicator, QCheckBox::indicator:hover {{ width: 38px; height: 22px; background: transparent; border: none; image: url("{sw['off']}"); }}
+QCheckBox::indicator:checked, QCheckBox::indicator:checked:hover {{ background: transparent; border: none; image: url("{sw['on']}"); }}
+QCheckBox::indicator:indeterminate {{ background: transparent; border: none; image: url("{sw['on']}"); }}
+QCheckBox::indicator:disabled {{ background: transparent; border: none; image: url("{sw['off_dis']}"); }}
+QCheckBox::indicator:checked:disabled {{ background: transparent; border: none; image: url("{sw['on_dis']}"); }}
+QTreeWidget#settingsNav {{ background: {c['body_bg']}; border: none; border-right: 1px solid {c['border']}; outline: none; }}
+QTreeWidget#settingsNav::item {{ border: none; }}
+QTreeWidget#settingsNav::branch {{ image: none; border: none; }}
 QMainWindow, QDialog, QWidget#page {{ background: {c['page_bg']}; }}
 QFrame#card, QFrame#headCard {{ background: {c['body_bg']}; border: none; border-bottom: 1px solid {c['border']}; border-radius: 0; }}
 QLabel#title {{ font-family: "{FLUENT_TITLE}"; font-size: 15pt; font-weight: 500; color: {c['emphasis']}; }}
@@ -637,6 +684,13 @@ QFrame#kpi[tone="active"] QLabel#kpiVal, QFrame#kpi[tone="session"] QLabel#kpiVa
 QPushButton#materialTonal {{ background: {c['tonal']}; color: {c['tonal_text']}; border: none; border-radius: 14px;
   padding: 9px 18px; margin: 10px 24px 6px 24px; font-weight: 500; }}
 QPushButton#materialTonal:hover {{ background: {c['tonal_hover']}; }}
+QWidget#materialFloat {{ background: transparent; }}
+QPushButton#materialTonalSmall {{ background: {c['tonal']}; color: {c['tonal_text']}; border: none; border-radius: 12px;
+  padding: 7px 18px; font-weight: 500; }}
+QPushButton#materialTonalSmall:hover {{ background: {c['tonal_hover']}; }}
+QPushButton#materialRound {{ background: {c['fab']}; color: {c['fab_text']}; border: none; border-radius: 23px; padding: 0; }}
+QPushButton#materialRound:hover {{ background: {c['fab_hover']}; }}
+QPushButton#materialRound:disabled {{ background: {c['secondary_bg']}; }}
 QPushButton#materialFab {{ background: {c['fab']}; color: {c['fab_text']}; border: none; border-radius: 14px;
   padding: 13px 22px; font-weight: 500; }}
 QPushButton#materialFab:hover {{ background: {c['fab_hover']}; }}

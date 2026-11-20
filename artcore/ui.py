@@ -130,6 +130,20 @@ FILTER_STATES = {
     "paused":      {"paused", "stopped", "queued", "missing"},
     "error":       {"error", "tracker_error", "missing"},
 }
+# Material look: three status tabs (All / Incomplete / Completed) go by progress, not by state
+PROGRESS_FILTERS = {
+    "incomplete": lambda r: r.progress < 1.0,
+    "completed":  lambda r: r.progress >= 1.0,
+}
+MATERIAL_TABS = ("all", "incomplete", "completed")
+
+
+def state_ok(r, key: str) -> bool:
+    """Does torrent row `r` belong to the status filter `key`?"""
+    if key in PROGRESS_FILTERS:
+        return PROGRESS_FILTERS[key](r)
+    states = FILTER_STATES[key]
+    return states is None or r.state in states
 
 
 def state_text(r) -> str:
@@ -290,8 +304,7 @@ class FilterProxy(QSortFilterProxyModel):
         if self.sidebar is not None:
             from .panels import sidebar_match
             return sidebar_match(r, self.sidebar) and self._text_ok(r)
-        states = FILTER_STATES[self.state]
-        return ((states is None or r.state in states)
+        return (state_ok(r, self.state)
                 and (not self.tracker or r.tracker_host == self.tracker)
                 and (not self.category or r.category == ("" if self.category == NO_CATEGORY else self.category))
                 and (not self.tag or (not r.tags if self.tag == NO_TAG else self.tag in r.tags))
@@ -687,12 +700,28 @@ class MaterialTreeDelegate(QStyledItemDelegate):
                 pct = ""
             line = "  •  ".join(v for v in (pct, g(1), g(3)) if v)
             ytxt = rect.top() + 36
-        else:
-            line = "  •  ".join(v for v in (g(3), g(4) and f"{g(4)}/{g(5)}/{g(6)}", g(8)) if v)
-            ytxt = rect.top() + 29
+        else:       # trackers: coloured status ("OK" in green) under the URL, then peers / message
+            st = index.siblingAtColumn(3).data(Qt.UserRole) or ""
+            tone = {"working": "success", "updating": "primary", "tracker_error": "danger",
+                    "not_working": "danger"}.get(st, "secondary")
+            head = t("material_tr_ok") if st == "working" else g(3)
+            rest = "  •  ".join(v for v in (g(4) and f"{g(4)}/{g(5)}/{g(6)}", g(8)) if v)
+            line, ytxt = rest, rect.top() + 29
+            fh = QFont(f2); fh.setWeight(QFont.DemiBold)
+            painter.setFont(fh)
+            painter.setPen(QColor(C[tone]))
+            hw = QFontMetrics(fh).horizontalAdvance(head) + 8
+            painter.drawText(QRectF(x, ytxt, hw, 18), Qt.AlignLeft | Qt.AlignVCenter, head)
+            painter.setFont(f2)
+            if rest:
+                painter.setPen(QColor(C["secondary"]))
+                painter.drawText(QRectF(x + hw, ytxt, max(0, w - hw), 18), Qt.AlignLeft | Qt.AlignVCenter,
+                                 QFontMetrics(f2).elidedText("•  " + rest, Qt.ElideRight, int(max(0, w - hw))))
+            line = ""
         painter.setPen(QColor(C["secondary"]))
-        painter.drawText(QRectF(x, ytxt, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
-                         QFontMetrics(f2).elidedText(line, Qt.ElideRight, w))
+        if line:
+            painter.drawText(QRectF(x, ytxt, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                             QFontMetrics(f2).elidedText(line, Qt.ElideRight, w))
         if self.mode == "trackers" and (nxt or mn):    # countdown to the next announce, top right
             rx = QRectF(rect.right() - 180, rect.top() + 6, 164, 20)
             fb = QFont(f2); fb.setWeight(QFont.DemiBold)
@@ -725,6 +754,82 @@ class MaterialTreeDelegate(QStyledItemDelegate):
                 painter.setPen(pen)
                 painter.drawRoundedRect(cb.adjusted(1, 1, -1, -1), 3, 3)
         painter.restore()
+
+
+class SettingsNavDelegate(QStyledItemDelegate):
+    """Material settings list: round light-blue badge with the section icon, title next to it."""
+    H = 56
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.H)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        r = option.rect
+        sel = bool(option.state & QStyle.State_Selected)
+        hov = bool(option.state & QStyle.State_MouseOver)
+        if sel or hov:
+            painter.fillRect(r, QColor(C["selection"] if sel else C["tertiary_bg"]))
+        cx, cy = r.left() + 34, r.center().y()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(C["primary_subtle"]))
+        painter.drawEllipse(QPointF(cx, cy), 19, 19)
+        ic = index.data(Qt.DecorationRole)
+        if isinstance(ic, QIcon):
+            painter.drawPixmap(int(cx - 9), int(cy - 9), ic.pixmap(18, 18))
+        f = QFont(painter.font()); f.setPointSizeF(10.5); f.setWeight(QFont.Medium if not sel else QFont.DemiBold)
+        painter.setFont(f)
+        painter.setPen(QColor(C["primary_text"] if sel else C["body"]))
+        painter.drawText(QRectF(r.left() + 62, r.top(), r.width() - 70, r.height()), Qt.AlignLeft | Qt.AlignVCenter,
+                         QFontMetrics(f).elidedText(str(index.data(Qt.DisplayRole) or ""), Qt.ElideRight, r.width() - 74))
+        painter.restore()
+
+
+class _SwitchRow(QWidget):
+    """Material toggle row: bold title (and the switch at the right edge); a click anywhere toggles it."""
+    def __init__(self, cb: QCheckBox, hint: str = ""):
+        super().__init__()
+        self.cb = cb
+        text = cb.text()
+        cb.setText("")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 4, 0, 4)
+        left = QVBoxLayout(); left.setSpacing(1)
+        self.lab = QLabel(text.replace("&&", "&"))
+        self.lab.setWordWrap(True)
+        self.lab.setStyleSheet("font-weight: 500;")
+        left.addWidget(self.lab)
+        self.hint = None
+        if hint:
+            self.hint = QLabel(hint); self.hint.setObjectName("meta"); self.hint.setWordWrap(True)
+            left.addWidget(self.hint)
+        lay.addLayout(left, 1)
+        lay.addWidget(cb, 0, Qt.AlignVCenter)
+        self.setCursor(Qt.PointingHandCursor)
+        cb.installEventFilter(self)
+        self.lab.setEnabled(cb.isEnabled())
+
+    def eventFilter(self, o, e):
+        if o is self.cb and e.type() == QEvent.EnabledChange:
+            self.lab.setEnabled(self.cb.isEnabled())
+            if self.hint is not None:
+                self.hint.setEnabled(self.cb.isEnabled())
+        return False
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.cb.isEnabled() and not self.cb.geometry().contains(e.position().toPoint()):
+            self.cb.toggle()
+        super().mouseReleaseEvent(e)
+
+
+def switchify(form: QFormLayout) -> None:
+    """Material: every check box that spans a form row becomes a title + switch row."""
+    for row in range(form.rowCount()):
+        it = form.itemAt(row, QFormLayout.SpanningRole)
+        w = it.widget() if it is not None else None
+        if isinstance(w, QCheckBox) and w.text():
+            form.setWidget(row, QFormLayout.SpanningRole, _SwitchRow(w))
 
 
 # ============================================================
@@ -1592,6 +1697,10 @@ class StatsView(QTableWidget):
 def _section(text: str, icon_name: str | None = None, color: str = "primary") -> QLabel:
     """Section title in Oswald; with an icon it becomes an HTML label with the icon inline."""
     lab = QLabel()
+    if theme.current_style == "material":          # Flud+: teal bold sub-section heading, no icon
+        lab.setStyleSheet(f'font-size: 10.5pt; font-weight: 700; color:{C["primary"]}; padding-top: 14px;')
+        lab.setText(text)
+        return lab
     lab.setStyleSheet(f'font-family:"{theme.TITLE_FONT}"; font-size: 12.5pt; font-weight: 600; '
                       f'color:{C["emphasis"]}; padding-top: 8px;')
     if icon_name:
@@ -1704,11 +1813,22 @@ class SettingsDialog(QDialog):
         self.nav.setIconSize(QSize(16, 16))
         self.nav.setUniformRowHeights(True)
         self.nav.setIndentation(16)
+        self._mat = theme.current_style == "material"
+        if self._mat:                          # Flud+: flat list of sections with round blue badges
+            self.nav.setObjectName("settingsNav")
+            self.nav.setIndentation(0)
+            self.nav.setRootIsDecorated(False)
+            self.nav.setItemsExpandable(False)
+            self.nav.setIconSize(QSize(18, 18))
+            self.nav.setMouseTracking(True)
+            self.nav.setItemDelegate(SettingsNavDelegate(self.nav))
+            self.nav.setFixedWidth(270)
         self.stack = QStackedWidget()
         body.addWidget(self.nav)
         body.addWidget(self.stack, 1)
         outer.addLayout(body, 1)
         self._items: dict[str, QTreeWidgetItem] = {}
+        self._forms: list[QFormLayout] = []
 
         def page(key, ic, color, parent_key=None):
             """New page: tree item + scrollable form with a title. Returns its QFormLayout."""
@@ -1719,14 +1839,18 @@ class SettingsDialog(QDialog):
             form.setHorizontalSpacing(14)
             form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             title = _section(t(key), ic, color)
-            title.setStyleSheet(title.styleSheet() + "font-size: 15pt; padding-bottom: 6px;")
+            if self._mat:
+                title.setStyleSheet(f'font-size: 17pt; font-weight: 500; color:{C["emphasis"]}; padding: 6px 0 4px 0;')
+            else:
+                title.setStyleSheet(title.styleSheet() + "font-size: 15pt; padding-bottom: 6px;")
             form.addRow(title)
+            self._forms.append(form)
             sc = QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QFrame.NoFrame)
             sc.setWidget(w)
             idx = self.stack.addWidget(sc)
             par = self._items.get(parent_key)
             it = QTreeWidgetItem(par if par is not None else self.nav, [t(key)])
-            it.setIcon(0, widgets.icon(ic, color))
+            it.setIcon(0, widgets.icon(ic, "primary_text" if self._mat else color))
             it.setData(0, Qt.UserRole, idx)
             self._items[key] = it
             return form
@@ -1894,7 +2018,9 @@ class SettingsDialog(QDialog):
         self.add_sub = QCheckBox(t("ad_subfolder")); self.add_sub.setChecked(cfg.get("add_subfolder", False))
         self.del_torrent = QCheckBox(t("sp_del_torrent")); self.del_torrent.setChecked(cfg.get("delete_torrent_file", False))
         self.cross = QCheckBox(t("set_cross")); self.cross.setChecked(cfg.get("cross_seed", True))
-        for w in (self.show_add, self.add_sub, self.del_torrent, self.cross):
+        self.seq_dl = QCheckBox(t("ad_sequential")); self.seq_dl.setChecked(cfg.get("sequential_download", False))
+        self.first_last = QCheckBox(t("ad_first_last")); self.first_last.setChecked(cfg.get("first_last_first", False))
+        for w in (self.show_add, self.add_sub, self.del_torrent, self.cross, self.seq_dl, self.first_last):
             form.addRow(w)
         form.addRow(_section(t("sp_done"), None))
         self.toasts = None
@@ -2152,6 +2278,9 @@ class SettingsDialog(QDialog):
             self._disk_timer.timeout.connect(self._disk_refresh)
             self._disk_timer.start(1000)
 
+        if self._mat:
+            for fm in self._forms:
+                switchify(fm)
         self.nav.expandAll()
         self.nav.currentItemChanged.connect(
             lambda it, _: it is not None and self.stack.setCurrentIndex(it.data(0, Qt.UserRole)))
@@ -2297,6 +2426,7 @@ class SettingsDialog(QDialog):
                  proxy_peers=self.px_peers.isChecked(), proxy_hostnames=self.px_dns.isChecked(),
                  auto_trackers_on=self.auto_trk_on.isChecked(), auto_trackers=self.auto_trk.toPlainText().strip(),
                  add_subfolder=self.add_sub.isChecked(), delete_torrent_file=self.del_torrent.isChecked(),
+                 sequential_download=self.seq_dl.isChecked(), first_last_first=self.first_last.isChecked(),
                  minimize_to_tray=self.tray.isChecked(), confirm_quit=self.confirm_quit.isChecked(),
                  show_add_dialog=self.show_add.isChecked(), check_updates=self.upd.isChecked(),
                  toasts=self.toasts.isChecked() if self.toasts is not None else c.get("toasts", True),
@@ -2494,142 +2624,154 @@ class AddTorrentDialog(QDialog):
         tabs = QTabWidget()
         lay.addWidget(tabs, 1)
 
-        # ── Basic settings ─────────────────────────────────────
-        basic = QWidget()
-        bl = QVBoxLayout(basic)
-        bl.setContentsMargins(6, 10, 6, 6)
-        bl.setSpacing(8)
-        bl.addWidget(_section(t("ad_save_to"), "fa6s.folder-open", "warning"))
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(8)
-        grid.addWidget(QLabel(t("ad_path")), 0, 0)
-        used = sorted({r.save_path for r in getattr(getattr(parent, "model", None), "rows", [])})
-        self.path = PathCombo(cfg, existing["save_path"] if existing else cfg.get("save_path", ""), used)
-        self.path.textChanged.connect(self._update)
-        grid.addWidget(self.path, 0, 1)
-        b = QPushButton("…")
-        b.setToolTip(t("set_browse"))
-        b.setFixedWidth(46)
-        b.clicked.connect(self._browse)
-        grid.addWidget(b, 0, 2)
-        self.cat = QComboBox()
-        self.cat.addItem(icon("fa6s.tag"), t("cat_none"), "")
-        for c in cfg.get("categories", []):
-            self.cat.addItem(icon("fa6s.tag", "purple"), c["name"], c["name"])
-        self.cat.currentIndexChanged.connect(self._cat_changed)
-        self.cat.setToolTip(t("cat_menu"))
-        self.cat.setVisible(existing is None)         # Task properties: category is set from the list
-        grid.addWidget(self.cat, 0, 3)
-        grid.addWidget(QLabel(t("ad_fname" if self.single or ti is None else "ad_folder")), 1, 0)
-        self.name_edit = QLineEdit(self.orig_name)
-        self.name_edit.setEnabled(ti is not None)
-        self.name_edit.textChanged.connect(self._update)
-        grid.addWidget(self.name_edit, 1, 1, 1, 3)
-        self.subfolder = QCheckBox(t("ad_subfolder"))
-        self.subfolder.setChecked(bool(cfg.get("add_subfolder")) and existing is None)
-        self.subfolder.setVisible(self.single)
-        self.subfolder.toggled.connect(self._update)
-        grid.addWidget(self.subfolder, 2, 1, 1, 3)
-        grid.setColumnStretch(1, 1)
-        bl.addLayout(grid)
-        self.disk = DiskBar()
-        bl.addWidget(self.disk)
+        mat_add = theme.current_style == "material" and existing is None     # Flud+ layout: Information / Files
+        if not mat_add:
+            # ── Basic settings ─────────────────────────────────────
+            basic = QWidget()
+            bl = QVBoxLayout(basic)
+            bl.setContentsMargins(6, 10, 6, 6)
+            bl.setSpacing(8)
+            bl.addWidget(_section(t("ad_save_to"), "fa6s.folder-open", "warning"))
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(8)
+            grid.addWidget(QLabel(t("ad_path")), 0, 0)
+            used = sorted({r.save_path for r in getattr(getattr(parent, "model", None), "rows", [])})
+            self.path = PathCombo(cfg, existing["save_path"] if existing else cfg.get("save_path", ""), used)
+            self.path.textChanged.connect(self._update)
+            grid.addWidget(self.path, 0, 1)
+            b = QPushButton("…")
+            b.setToolTip(t("set_browse"))
+            b.setFixedWidth(46)
+            b.clicked.connect(self._browse)
+            grid.addWidget(b, 0, 2)
+            self.cat = QComboBox()
+            self.cat.addItem(icon("fa6s.tag"), t("cat_none"), "")
+            for c in cfg.get("categories", []):
+                self.cat.addItem(icon("fa6s.tag", "purple"), c["name"], c["name"])
+            self.cat.currentIndexChanged.connect(self._cat_changed)
+            self.cat.setToolTip(t("cat_menu"))
+            self.cat.setVisible(existing is None)         # Task properties: category is set from the list
+            grid.addWidget(self.cat, 0, 3)
+            grid.addWidget(QLabel(t("ad_fname" if self.single or ti is None else "ad_folder")), 1, 0)
+            self.name_edit = QLineEdit(self.orig_name)
+            self.name_edit.setEnabled(ti is not None)
+            self.name_edit.textChanged.connect(self._update)
+            grid.addWidget(self.name_edit, 1, 1, 1, 3)
+            self.subfolder = QCheckBox(t("ad_subfolder"))
+            self.subfolder.setChecked(bool(cfg.get("add_subfolder")) and existing is None)
+            self.subfolder.setVisible(self.single)
+            self.subfolder.toggled.connect(self._update)
+            grid.addWidget(self.subfolder, 2, 1, 1, 3)
+            grid.setColumnStretch(1, 1)
+            bl.addLayout(grid)
+            self.disk = DiskBar()
+            bl.addWidget(self.disk)
+            if existing is None:
+                self.seq_cb = QCheckBox(t("ad_sequential")); self.seq_cb.setChecked(bool(cfg.get("sequential_download")))
+                self.fl_cb = QCheckBox(t("ad_first_last")); self.fl_cb.setChecked(bool(cfg.get("first_last_first")))
+                order_row = QHBoxLayout()
+                order_row.addWidget(self.seq_cb); order_row.addSpacing(18); order_row.addWidget(self.fl_cb); order_row.addStretch()
+                bl.addLayout(order_row)
 
-        bl.addWidget(_section(t("ad_contents"), "fa6s.box-open", "primary"))
-        info = QGridLayout()
-        info.setHorizontalSpacing(14)
-        info.setVerticalSpacing(4)
-        for r, (k, v) in enumerate((("gen_name", name),
-                                    ("gen_size", fmt_size(sum(f[2] for f in self.files)) if self.files else "—"))):
-            lab = QLabel(t(k)); lab.setObjectName("rowLbl")
-            val = QLabel(v); val.setObjectName("rowVal"); val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            info.addWidget(lab, r, 0)
-            info.addWidget(val, r, 1)
-        pub = self.meta.get("publisher") or ""
-        pub_url = self.meta.get("publisher-url") or ""
-        lab = QLabel(t("ad_publisher")); lab.setObjectName("rowLbl")
-        info.addWidget(lab, 2, 0)
-        pub_lbl = QLabel()
-        pub_lbl.setTextFormat(Qt.RichText)
-        pub_lbl.setOpenExternalLinks(True)
-        if pub_url:
-            pub_lbl.setText(f'<a href="{html.escape(pub_url)}" style="color:{C["primary"]}">{html.escape(pub or pub_url)}</a>')
-        else:
-            pub_lbl.setText(html.escape(pub) or "—")
-        info.addWidget(pub_lbl, 2, 1)
-        # seeds / leechers asked from the tracker in the background (scrape)
-        self.health = QLabel(); self.health.setObjectName("meta"); self.health.setTextFormat(Qt.RichText)
-        info.addWidget(self.health, 3, 0, 1, 2)
-        if theme.current_style == "material" and ti is not None:        # Material "Information" block
-            import datetime
-            try:
-                ih = ti.info_hashes()
-                h = str(ih.v1 if ih.has_v1() else ih.v2)
-            except Exception:
-                h = ""
-            ts = ti.creation_date()
-            extra = (("gen_hash1", h), ("gen_comment", ti.comment()),
-                     ("gen_created", datetime.datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M") if ts else ""))
-            for r, (k, v) in enumerate((e for e in extra if e[1]), start=4):
+            bl.addWidget(_section(t("ad_contents"), "fa6s.box-open", "primary"))
+            info = QGridLayout()
+            info.setHorizontalSpacing(14)
+            info.setVerticalSpacing(4)
+            for r, (k, v) in enumerate((("gen_name", name),
+                                        ("gen_size", fmt_size(sum(f[2] for f in self.files)) if self.files else "—"))):
                 lab = QLabel(t(k)); lab.setObjectName("rowLbl")
-                val = QLabel(v); val.setObjectName("rowVal"); val.setWordWrap(True)
-                val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                info.addWidget(lab, r, 0, Qt.AlignTop)
+                val = QLabel(v); val.setObjectName("rowVal"); val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                info.addWidget(lab, r, 0)
                 info.addWidget(val, r, 1)
-        info.setColumnStretch(1, 1)
-        top = QHBoxLayout()
-        top.addLayout(info, 1)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText(t("ad_search"))
-        self.search.addAction(icon("fa6s.magnifying-glass"), QLineEdit.LeadingPosition)
-        self.search.setFixedWidth(280)
-        self.search.textChanged.connect(self._filter)
-        self.search.setVisible(ti is not None)
-        top.addWidget(self.search, 0, Qt.AlignBottom)
-        bl.addLayout(top)
+            pub = self.meta.get("publisher") or ""
+            pub_url = self.meta.get("publisher-url") or ""
+            lab = QLabel(t("ad_publisher")); lab.setObjectName("rowLbl")
+            info.addWidget(lab, 2, 0)
+            pub_lbl = QLabel()
+            pub_lbl.setTextFormat(Qt.RichText)
+            pub_lbl.setOpenExternalLinks(True)
+            if pub_url:
+                pub_lbl.setText(f'<a href="{html.escape(pub_url)}" style="color:{C["primary"]}">{html.escape(pub or pub_url)}</a>')
+            else:
+                pub_lbl.setText(html.escape(pub) or "—")
+            info.addWidget(pub_lbl, 2, 1)
+            # seeds / leechers asked from the tracker in the background (scrape)
+            self.health = QLabel(); self.health.setObjectName("meta"); self.health.setTextFormat(Qt.RichText)
+            info.addWidget(self.health, 3, 0, 1, 2)
+            if theme.current_style == "material" and ti is not None:        # Material "Information" block
+                import datetime
+                try:
+                    ih = ti.info_hashes()
+                    h = str(ih.v1 if ih.has_v1() else ih.v2)
+                except Exception:
+                    h = ""
+                ts = ti.creation_date()
+                extra = (("gen_hash1", h), ("gen_comment", ti.comment()),
+                         ("gen_created", datetime.datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M") if ts else ""))
+                for r, (k, v) in enumerate((e for e in extra if e[1]), start=4):
+                    lab = QLabel(t(k)); lab.setObjectName("rowLbl")
+                    val = QLabel(v); val.setObjectName("rowVal"); val.setWordWrap(True)
+                    val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    info.addWidget(lab, r, 0, Qt.AlignTop)
+                    info.addWidget(val, r, 1)
+            info.setColumnStretch(1, 1)
+            top = QHBoxLayout()
+            top.addLayout(info, 1)
+            self.search = QLineEdit()
+            self.search.setPlaceholderText(t("ad_search"))
+            self.search.addAction(icon("fa6s.magnifying-glass"), QLineEdit.LeadingPosition)
+            self.search.setFixedWidth(280)
+            self.search.textChanged.connect(self._filter)
+            self.search.setVisible(ti is not None)
+            top.addWidget(self.search, 0, Qt.AlignBottom)
+            bl.addLayout(top)
 
-        self.kind_cbs: dict[str, QCheckBox] = {}
-        if ti is not None:
-            self.tree = QTreeWidget()
-            self.tree.setHeaderLabels([t("file_name"), t("col_size")] + (["%"] if existing else []))
-            self.tree.setRootIsDecorated(True)
-            self.tree.setUniformRowHeights(True)
-            hh = self.tree.header()
-            hh.setStretchLastSection(False)
-            hh.setSectionResizeMode(0, QHeaderView.Stretch)
-            hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-            if existing:
-                hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-            self._fill(self.files)
-            self.tree.itemChanged.connect(lambda *_: self._update())
-            bl.addWidget(self.tree, 1)
-            sel = QHBoxLayout()
-            self.all_cb = QCheckBox(t("ad_all_n", len(self.leaves)))
-            self.all_cb.setTristate(True)
-            self.all_cb.clicked.connect(lambda: self._check(lambda k: True, self.all_cb.checkState() != Qt.Unchecked))
-            sel.addWidget(self.all_cb)
-            sel.addSpacing(16)
-            self.sel_lbl = QLabel(); self.sel_lbl.setObjectName("meta")
-            sel.addWidget(self.sel_lbl)
-            sel.addStretch()
-            kinds = {self._kind(lf.text(0)) for lf, _, _ in self.leaves}
-            for k, key in self.KIND_BOXES:
-                cb = QCheckBox(t(key))
-                cb.setTristate(True)
-                cb.setEnabled(k in kinds)
-                cb.clicked.connect(lambda _=False, k=k, cb=cb: self._check(
-                    lambda kk, k=k: kk == k, cb.checkState() != Qt.Unchecked))
-                sel.addWidget(cb)
-                self.kind_cbs[k] = cb
-            bl.addLayout(sel)
+            self.kind_cbs: dict[str, QCheckBox] = {}
+            if ti is not None:
+                self.tree = QTreeWidget()
+                self.tree.setHeaderLabels([t("file_name"), t("col_size")] + (["%"] if existing else []))
+                self.tree.setRootIsDecorated(True)
+                self.tree.setUniformRowHeights(True)
+                hh = self.tree.header()
+                hh.setStretchLastSection(False)
+                hh.setSectionResizeMode(0, QHeaderView.Stretch)
+                hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+                if existing:
+                    hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+                self._fill(self.files)
+                self.tree.itemChanged.connect(lambda *_: self._update())
+                bl.addWidget(self.tree, 1)
+                sel = QHBoxLayout()
+                self.all_cb = QCheckBox(t("ad_all_n", len(self.leaves)))
+                self.all_cb.setTristate(True)
+                self.all_cb.clicked.connect(lambda: self._check(lambda k: True, self.all_cb.checkState() != Qt.Unchecked))
+                sel.addWidget(self.all_cb)
+                sel.addSpacing(16)
+                self.sel_lbl = QLabel(); self.sel_lbl.setObjectName("meta")
+                sel.addWidget(self.sel_lbl)
+                sel.addStretch()
+                kinds = {self._kind(lf.text(0)) for lf, _, _ in self.leaves}
+                for k, key in self.KIND_BOXES:
+                    cb = QCheckBox(t(key))
+                    cb.setTristate(True)
+                    cb.setEnabled(k in kinds)
+                    cb.clicked.connect(lambda _=False, k=k, cb=cb: self._check(
+                        lambda kk, k=k: kk == k, cb.checkState() != Qt.Unchecked))
+                    sel.addWidget(cb)
+                    self.kind_cbs[k] = cb
+                bl.addLayout(sel)
+            else:
+                note = QLabel(t("ad_magnet_note")); note.setObjectName("meta"); note.setWordWrap(True)
+                bl.addWidget(note)
+                bl.addStretch()
+            tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
+            self.tabs, self.basic_tab = tabs, basic
+            if theme.current_style == "material":
+                tabs.tabBar().setExpanding(True)
         else:
-            note = QLabel(t("ad_magnet_note")); note.setObjectName("meta"); note.setWordWrap(True)
-            bl.addWidget(note)
-            bl.addStretch()
-        tabs.addTab(basic, icon("fa6s.sliders"), t("ad_tab_basic"))
-        self.tabs, self.basic_tab = tabs, basic
-        if theme.current_style == "material":
+            basic, bl, pub, pub_url = self._build_material_pages(tabs, lay, name, ti, scrape_src)
+            self.tabs, self.basic_tab = tabs, basic
             tabs.tabBar().setExpanding(True)
 
         # ── Advanced · Publisher · Download order (same tabs as Task properties) ──
@@ -2668,20 +2810,21 @@ class AddTorrentDialog(QDialog):
             self.cross_cb.toggled.connect(cross_toggled)
             cross_toggled(True)
 
-        btns = QHBoxLayout()
-        btns.addStretch()
-        self.ok = QPushButton(icon("fa6s.download", "fab_text" if theme.current_style == "material" else "white"), t("ad_now"))
-        self.ok.setObjectName("primary")
-        self.ok.setDefault(True)
-        self.ok.clicked.connect(self.accept)
-        self.later = QPushButton(icon("fa6s.clock"), t("ad_later"))
-        self.later.clicked.connect(self._later)
-        cancel = QPushButton(t("cancel"))
-        cancel.clicked.connect(self.reject)
-        for w in (self.ok, self.later, cancel):
-            w.setMinimumWidth(150)
-            btns.addWidget(w)
-        lay.addLayout(btns)
+        if not mat_add:
+            btns = QHBoxLayout()
+            btns.addStretch()
+            self.ok = QPushButton(icon("fa6s.download", "fab_text" if theme.current_style == "material" else "white"), t("ad_now"))
+            self.ok.setObjectName("primary")
+            self.ok.setDefault(True)
+            self.ok.clicked.connect(self.accept)
+            self.later = QPushButton(icon("fa6s.clock"), t("ad_later"))
+            self.later.clicked.connect(self._later)
+            cancel = QPushButton(t("cancel"))
+            cancel.clicked.connect(self.reject)
+            for w in (self.ok, self.later, cancel):
+                w.setMinimumWidth(150)
+                btns.addWidget(w)
+            lay.addLayout(btns)
 
         self._scrape_res = None
         if scrape_src and scrape_src[0]:
@@ -2701,6 +2844,191 @@ class AddTorrentDialog(QDialog):
         else:
             self.health.hide()
         self._update()
+
+    def _build_material_pages(self, tabs, lay, name, ti, scrape_src):
+        """Flud+ add dialog: Cancel / title / Later / round "+" on top, then two tabs — Information
+        (name, path + free space, size, files, two switches, seeding limits, hash) and Files."""
+        cfg = self.cfg
+
+        def cap(text):
+            lab = QLabel(text.upper()); lab.setObjectName("rowLbl")
+            return lab
+
+        # top bar
+        head = QWidget(); hl = QHBoxLayout(head); hl.setContentsMargins(4, 0, 4, 0)
+        cancel = QPushButton(t("ad_reject")); cancel.setObjectName("materialLink")
+        cancel.setCursor(Qt.PointingHandCursor); cancel.clicked.connect(self.reject)
+        title = QLabel(t("ad_title")); title.setObjectName("title")
+        self.later = QPushButton(t("ad_later")); self.later.setObjectName("materialLink")
+        self.later.setCursor(Qt.PointingHandCursor); self.later.clicked.connect(self._later)
+        self.ok = QPushButton(icon("fa6s.plus", "fab_text"), "")
+        self.ok.setObjectName("materialRound"); self.ok.setFixedSize(46, 46); self.ok.setIconSize(QSize(20, 20))
+        self.ok.setToolTip(t("ad_now")); self.ok.setDefault(True); self.ok.setCursor(Qt.PointingHandCursor)
+        self.ok.clicked.connect(self.accept)
+        hl.addWidget(cancel); hl.addSpacing(8); hl.addWidget(title); hl.addStretch()
+        hl.addWidget(self.later); hl.addSpacing(6); hl.addWidget(self.ok)
+        lay.insertWidget(0, head)
+
+        # ── Information
+        info = QWidget()
+        bl = QVBoxLayout(info)
+        bl.setContentsMargins(18, 14, 18, 10)
+        bl.setSpacing(6)
+        bl.addWidget(cap(t("ad_fname" if self.single or ti is None else "ad_folder")))
+        self.name_edit = QLineEdit(self.orig_name)
+        self.name_edit.setEnabled(ti is not None)
+        self.name_edit.textChanged.connect(self._update)
+        self.name_edit.addAction(icon("fa6s.pencil", "primary"), QLineEdit.TrailingPosition)
+        bl.addWidget(self.name_edit)
+        bl.addSpacing(8)
+        bl.addWidget(cap(t("ad_path")))
+        prow = QHBoxLayout(); prow.setSpacing(8)
+        used = sorted({r.save_path for r in getattr(getattr(self.parent(), "model", None), "rows", [])})
+        self.path = PathCombo(cfg, cfg.get("save_path", ""), used)
+        self.path.textChanged.connect(self._update)
+        prow.addWidget(self.path, 1)
+        bb = QToolButton(); bb.setObjectName("iconBtn"); bb.setToolTip(t("set_browse")); bb.setCursor(Qt.PointingHandCursor)
+        bb.setIconSize(QSize(18, 18)); bb.clicked.connect(self._browse)
+        bb.setIcon(icon("fa6s.pencil", "primary"))
+        prow.addWidget(bb)
+        self.cat = QComboBox()
+        self.cat.addItem(icon("fa6s.tag"), t("cat_none"), "")
+        for c in cfg.get("categories", []):
+            self.cat.addItem(icon("fa6s.tag", "purple"), c["name"], c["name"])
+        self.cat.currentIndexChanged.connect(self._cat_changed)
+        self.cat.setToolTip(t("cat_menu"))
+        prow.addWidget(self.cat)
+        bl.addLayout(prow)
+        self.free_lbl = QLabel(); self.free_lbl.setObjectName("meta")
+        bl.addWidget(self.free_lbl)
+        self.disk = DiskBar(); self.disk.hide()          # kept for _update, the label shows the free space
+        self.subfolder = QCheckBox(t("ad_subfolder"))
+        self.subfolder.setChecked(bool(cfg.get("add_subfolder")))
+        self.subfolder.toggled.connect(self._update)
+        sub_row = _SwitchRow(self.subfolder)
+        sub_row.setVisible(self.single)
+        bl.addWidget(sub_row)
+        bl.addSpacing(8)
+
+        tiles = QGridLayout(); tiles.setHorizontalSpacing(24); tiles.setVerticalSpacing(4)
+        total = sum(f[2] for f in self.files)
+        for col, (k, v) in enumerate(((t("gen_size"), fmt_size(total) if self.files else "—"),
+                                      (t("ad_nfiles"), f"{len(self.files):,}".replace(",", "\u00a0") if self.files else "—"))):
+            tiles.addWidget(cap(k), 0, col)
+            val = QLabel(v); val.setObjectName("rowVal"); tiles.addWidget(val, 1, col)
+        tiles.setColumnStretch(2, 1)
+        bl.addLayout(tiles)
+        bl.addSpacing(8)
+
+        self.seq_cb = QCheckBox(t("ad_sequential")); self.seq_cb.setChecked(bool(cfg.get("sequential_download")))
+        self.fl_cb = QCheckBox(t("ad_first_last")); self.fl_cb.setChecked(bool(cfg.get("first_last_first")))
+        bl.addWidget(_SwitchRow(self.seq_cb, t("ad_sequential_hint")))
+        bl.addWidget(_SwitchRow(self.fl_cb, t("ad_first_last_hint")))
+        bl.addSpacing(8)
+
+        bl.addWidget(cap(t("ad_seed_limits")))
+        lrow = QHBoxLayout()
+        lv = QLabel(t("seed_lim_global")); lv.setObjectName("rowVal")
+        lrow.addWidget(lv, 1)
+        pen = QToolButton(); pen.setObjectName("iconBtn"); pen.setCursor(Qt.PointingHandCursor)
+        pen.setIconSize(QSize(16, 16)); pen.setIcon(icon("fa6s.pencil", "primary")); pen.setToolTip(t("ad_tab_adv"))
+        pen.clicked.connect(lambda: tabs.setCurrentWidget(self.adv))
+        lrow.addWidget(pen)
+        bl.addLayout(lrow)
+
+        pub = self.meta.get("publisher") or ""
+        pub_url = self.meta.get("publisher-url") or ""
+        if pub or pub_url:
+            bl.addSpacing(8)
+            bl.addWidget(cap(t("ad_publisher")))
+            pub_lbl = QLabel(); pub_lbl.setTextFormat(Qt.RichText); pub_lbl.setOpenExternalLinks(True)
+            pub_lbl.setText(f'<a href="{html.escape(pub_url)}" style="color:{C["primary"]}">{html.escape(pub or pub_url)}</a>'
+                            if pub_url else html.escape(pub))
+            bl.addWidget(pub_lbl)
+        if ti is not None:
+            import datetime
+            try:
+                ih = ti.info_hashes()
+                h = str(ih.v1 if ih.has_v1() else ih.v2)
+            except Exception:
+                h = ""
+            ts = ti.creation_date()
+            for k, v in (("gen_hash1", h), ("gen_comment", ti.comment()),
+                         ("gen_created", datetime.datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M") if ts else "")):
+                if v:
+                    bl.addSpacing(8)
+                    bl.addWidget(cap(t(k)))
+                    val = QLabel(v); val.setObjectName("rowVal"); val.setWordWrap(True)
+                    val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    bl.addWidget(val)
+        self.health = QLabel(); self.health.setObjectName("meta"); self.health.setTextFormat(Qt.RichText)
+        bl.addSpacing(8)
+        bl.addWidget(self.health)
+        bl.addStretch()
+        info_sc = QScrollArea(); info_sc.setWidgetResizable(True); info_sc.setFrameShape(QFrame.NoFrame)
+        info_sc.setWidget(info)
+        tabs.addTab(info_sc, t("ad_info_tab"))
+
+        # ── Files
+        fpage = QWidget()
+        fl = QVBoxLayout(fpage)
+        fl.setContentsMargins(8, 10, 8, 6)
+        fl.setSpacing(8)
+        self.kind_cbs = {}
+        self.kind_chips = {}
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(t("ad_search"))
+        self.search.addAction(icon("fa6s.magnifying-glass"), QLineEdit.LeadingPosition)
+        self.search.textChanged.connect(self._filter)
+        if ti is not None:
+            chips = QHBoxLayout(); chips.setSpacing(8)
+            chips.addWidget(self.search, 1)
+            self.tree = QTreeWidget()
+            self.tree.setHeaderLabels([t("file_name"), t("col_size")])
+            self.tree.setRootIsDecorated(True)
+            self.tree.setUniformRowHeights(True)
+            hh = self.tree.header()
+            hh.setStretchLastSection(False)
+            hh.setSectionResizeMode(0, QHeaderView.Stretch)
+            hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            self._fill(self.files)
+            self.tree.itemChanged.connect(lambda *_: self._update())
+            kinds = {self._kind(lf.text(0)) for lf, _, _ in self.leaves}
+            for k, key in self.KIND_BOXES:
+                cb = QCheckBox(t(key)); cb.setTristate(True)      # hidden state holder used by _update
+                self.kind_cbs[k] = cb
+                if k not in kinds:
+                    continue
+                chip = QPushButton(t(key)); chip.setObjectName("materialChip"); chip.setCheckable(True)
+                chip.setCursor(Qt.PointingHandCursor)
+                chip.clicked.connect(lambda _=False, k=k, ch=chip: self._check(lambda kk, k=k: kk == k, ch.isChecked()))
+                chips.addWidget(chip)
+                self.kind_chips[k] = chip
+            fl.addLayout(chips)
+            links = QHBoxLayout(); links.setSpacing(4)
+            self.all_cb = QCheckBox(); self.all_cb.setTristate(True)      # hidden state holder used by _update
+            for label, on in (("material_select_all", True), ("material_deselect", False)):
+                b = QPushButton(t(label)); b.setObjectName("materialLink"); b.setCursor(Qt.PointingHandCursor)
+                b.clicked.connect(lambda _=False, on=on: self._check(lambda k: True, on))
+                links.addWidget(b)
+            self.sel_lbl = QLabel(); self.sel_lbl.setObjectName("meta")
+            links.addStretch(); links.addWidget(self.sel_lbl)
+            fl.addLayout(links)
+            fl.addWidget(self.tree, 1)
+        else:
+            self.sel_lbl = QLabel(); self.all_cb = QCheckBox()
+            note = QLabel(t("ad_magnet_note")); note.setObjectName("meta"); note.setWordWrap(True)
+            fl.addWidget(note); fl.addStretch()
+        tabs.addTab(fpage, t("ad_files_tab"))
+        return info, bl, pub, pub_url
+
+    def sequential(self) -> bool:
+        cb = getattr(self, "seq_cb", None)
+        return bool(cb is not None and cb.isChecked())
+
+    def first_last(self) -> bool:
+        cb = getattr(self, "fl_cb", None)
+        return bool(cb is not None and cb.isChecked())
 
     def _later(self):
         self.start_paused = True
@@ -2845,8 +3173,17 @@ class AddTorrentDialog(QDialog):
         try:
             du = shutil.disk_usage(p)
             self.disk.set_values(du.total, du.free, need)
+            free_txt = t("material_free", fmt_size(du.free))
         except OSError:
             self.disk.set_values(0, 0, need)
+            free_txt = ""
+        fl_ = getattr(self, "free_lbl", None)
+        if fl_ is not None:
+            short = bool(free_txt) and need > du.free
+            fl_.setText(free_txt + (("   ·   " + t("ad_no_space")) if short else ""))
+            fl_.setStyleSheet(f"color:{C['danger']};" if short else "")
+        for k, chip in getattr(self, "kind_chips", {}).items():
+            chip.setChecked(self.kind_cbs[k].checkState() == Qt.Checked)
         name_ok = self.ti is None or bool(self.name_edit.text().strip()) and not any(
             ch in self.name_edit.text() for ch in '\\/:*?"<>|')
         self.name_edit.setStyleSheet("" if name_ok else f"border:1px solid {C['danger']};")
@@ -4074,6 +4411,15 @@ class MainWindow(QMainWindow):
         self._build_sort_menu()
         self.sort_btn.hide()
         lay.addWidget(self.sort_btn)
+        self.link_btn = QToolButton()          # Material: add by link (magnet / URL)
+        self.link_btn.setObjectName("iconBtn")
+        self.link_btn.setCursor(Qt.PointingHandCursor)
+        self.link_btn.setIconSize(QSize(18, 18))
+        self.link_btn.setToolTip(t("material_add_link"))
+        self.link_btn.clicked.connect(self.add_magnet_dialog)
+        self._themed_icon(self.link_btn.setIcon, "fa6s.link", "head_ic")
+        self.link_btn.hide()
+        lay.insertWidget(lay.indexOf(self.sort_btn), self.link_btn)
         self.more_btn = QToolButton()          # Material: the rest of the toolbar lives in this menu
         self.more_btn.setObjectName("iconBtn")
         self.more_btn.setCursor(Qt.PointingHandCursor)
@@ -4081,15 +4427,27 @@ class MainWindow(QMainWindow):
         self.more_btn.setPopupMode(QToolButton.InstantPopup)
         self._themed_icon(self.more_btn.setIcon, "fa6s.ellipsis-vertical", "head_ic")
         mm = QMenu(self.more_btn)
+        # Flud+: resume all, pause all, queue, status, settings, shutdown
+        mm.addAction(icon("fa6s.play", "success"), t("start_all"), lambda: self.start_keys(list(self.engine.handles)))
+        mm.addAction(icon("fa6s.pause"), t("pause_all"), lambda: self._all(self.engine.pause))
+        qm = mm.addMenu(icon("fa6s.arrow-down-1-9"), t("queue_menu"))
+        for lbl, where in (("queue_top", "top"), ("queue_up", "up"), ("queue_down", "down"), ("queue_bottom", "bottom")):
+            qm.addAction(t(lbl), lambda _=False, w=where: self.queue_move(w))
+        mm.addAction(icon("fa6s.chart-simple"), t("tab_stats"), self.stats_window)
+        mm.addAction(icon("fa6s.gear"), t("settings"), lambda: self.settings_dialog())
+        pw = mm.addMenu(icon("fa6s.power-off"), t("pw_menu"))
+        pw_acts = []
+        for kind in ("none", "sleep", "hibernate", "shutdown"):
+            act = pw.addAction(t("pw_" + kind))
+            act.setCheckable(True)
+            act.triggered.connect(lambda _=False, k=kind: self.set_after_done(k))
+            pw_acts.append((kind, act))
+        pw.aboutToShow.connect(lambda: [a.setChecked(self.after_done == k) for k, a in pw_acts])
+        mm.addSeparator()
         mm.addAction(icon("fa6s.magnet", "ic_magnet"), t("add_magnet"), self.add_magnet_dialog)
         mm.addAction(icon("fa6s.file-circle-plus", "ic_create"), t("create_torrent"), self.create_torrent_dialog)
-        mm.addSeparator()
-        mm.addAction(icon("fa6s.play", "success"), t("start"), lambda: self.start_selected(all_if_none=True))
-        mm.addAction(icon("fa6s.pause"), t("pause"), lambda: self._each(self.engine.pause, all_if_none=True))
-        mm.addAction(icon("fa6s.stop", "danger"), t("stop"), lambda: self._each(self.engine.stop, all_if_none=True))
-        mm.addSeparator()
-        mm.addAction(icon("fa6s.circle-arrow-up", "primary"), t("tb_up"), lambda: self.queue_move("up"))
-        mm.addAction(icon("fa6s.circle-arrow-down", "primary"), t("tb_down"), lambda: self.queue_move("down"))
+        mm.addAction(icon("fa6s.file-circle-question"), t("fs_title"), self.file_search)
+        mm.addAction(icon("fa6s.file-excel"), t("xl_menu"), self.export_list)
         self.more_btn.setMenu(mm)
         self.more_btn.hide()
         lay.addWidget(self.more_btn)
@@ -4123,8 +4481,9 @@ class MainWindow(QMainWindow):
         self.pills: dict[str, QPushButton] = {}
         pill_icons = {"all": ("fa6s.layer-group", "primary"), "downloading": ("fa6s.arrow-down", "primary"),
                       "seeding": ("fa6s.arrow-up", "success"), "paused": ("fa6s.pause", "secondary"),
-                      "error": ("fa6s.triangle-exclamation", "danger")}
-        for key in FILTER_STATES:
+                      "error": ("fa6s.triangle-exclamation", "danger"),
+                      "incomplete": ("fa6s.arrow-down", "primary"), "completed": ("fa6s.check", "success")}
+        for key in (*FILTER_STATES, *PROGRESS_FILTERS):
             b = QPushButton(t("f_" + key))
             b.setObjectName("pill")
             self._themed_icon(b.setIcon, *pill_icons[key])
@@ -4212,6 +4571,7 @@ class MainWindow(QMainWindow):
         e1 = QLabel(t("empty_title")); e1.setAlignment(Qt.AlignCenter)
         e1.setStyleSheet("font-weight: 600; font-size: 11pt;")
         e2 = QLabel(t("empty_text")); e2.setObjectName("meta"); e2.setAlignment(Qt.AlignCenter)
+        self.empty_title, self.empty_text = e1, e2
         el.addWidget(self.empty_ico, 0, Qt.AlignHCenter)
         el.addWidget(e1)
         el.addWidget(e2)
@@ -4242,6 +4602,51 @@ class MainWindow(QMainWindow):
         self._build_material_bar(box)
         return box
 
+    _PAUSED = ("paused", "stopped", "queued", "missing")
+
+    def _selected_rows(self) -> list:
+        keys = set(self.selected_keys())
+        return [r for r in self.model.rows if r.key in keys]
+
+    def _toggle_pause_selected(self) -> None:
+        """One button like in Flud+: pauses what runs, starts what is stopped."""
+        rows = self._selected_rows()
+        if rows and all(r.state in self._PAUSED for r in rows):
+            self.start_selected(all_if_none=False)
+        else:
+            self._each(self.engine.pause, all_if_none=False)
+
+    def _reannounce_selected(self) -> None:
+        for k in self.selected_keys():
+            self.engine.reannounce(k)
+        if self.selected_keys():
+            self.toast("info", t("reannounce"), "")
+
+    def _update_pause_btn(self) -> None:
+        b = getattr(self, "_mat_btns", {}).get("pause")
+        if b is None:
+            return
+        rows = self._selected_rows()
+        play = bool(rows) and all(r.state in self._PAUSED for r in rows)
+        b.setIcon(icon("fa6s.play" if play else "fa6s.pause", "secondary"))
+        b.setToolTip(t("start") if play else t("pause"))
+        for k, w in self._mat_btns.items():          # nothing selected: the bar's buttons wait
+            w.setEnabled(bool(rows))
+
+    def _sync_empty(self, have_rows: bool) -> None:
+        """Empty page: no torrents at all, or none in the chosen status tab (\"No completed torrents\")."""
+        if not have_rows:
+            self.empty_title.setText(t("empty_title")); self.empty_text.setText(t("empty_text"))
+            self.list_stack.setCurrentIndex(1)
+            return
+        if self.proxy.rowCount() == 0 and not self.proxy.text and not self.proxy.sidebar:
+            st = self.proxy.state
+            key = {"completed": "material_no_completed", "incomplete": "material_no_incomplete"}.get(st, "empty_filtered")
+            self.empty_title.setText(t(key)); self.empty_text.setText("")
+            self.list_stack.setCurrentIndex(1)
+            return
+        self.list_stack.setCurrentIndex(0)
+
     def _build_material_bar(self, box) -> None:
         """Material floating action bar (pause, recheck, magnet, properties, delete) over the list's
         bottom-right corner; only visible in the Material look."""
@@ -4251,17 +4656,21 @@ class MainWindow(QMainWindow):
         bar.setObjectName("materialBar")
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(8, 4, 8, 4); bl.setSpacing(2)
-        for icon_name, tip, fn in (
-                ("fa6s.play", t("start"), lambda: self.start_selected(all_if_none=False)),
-                ("fa6s.pause", t("pause"), lambda: self._each(self.engine.pause, all_if_none=False)),
-                ("fa6s.arrows-rotate", t("recheck"), self.recheck_selected),
-                ("fa6s.magnet", "Magnet", self.copy_magnet),
-                ("fa6s.gear", t("settings"), self.properties_dialog),
-                ("fa6s.trash-can", t("remove"), self.remove_selected)):
+        # Flud+ order: pause, recheck, announce, share, save .torrent, delete, properties
+        self._mat_btns = {}
+        for key, icon_name, tip, fn in (
+                ("pause", "fa6s.pause", t("pause"), self._toggle_pause_selected),
+                ("recheck", "fa6s.arrows-rotate", t("recheck"), self.recheck_selected),
+                ("announce", "fa6s.bullhorn", t("reannounce"), self._reannounce_selected),
+                ("share", "fa6s.share-nodes", t("material_share"), self.copy_magnet),
+                ("save", "fa6s.floppy-disk", t("material_save_torrent"), self.export_selected),
+                ("remove", "fa6s.trash-can", t("remove"), self.remove_selected),
+                ("props", "fa6s.sliders", t("properties").rstrip("…"), self.properties_dialog)):
             b = QToolButton(); b.setObjectName("materialBtn"); b.setToolTip(tip)
             b.setCursor(Qt.PointingHandCursor); b.setIconSize(QSize(18, 18))
             b.clicked.connect(lambda _=False, f=fn: f())
             self._themed_icon(b.setIcon, icon_name)
+            self._mat_btns[key] = b
             bl.addWidget(b)
         sh = QGraphicsDropShadowEffect(bar)
         sh.setBlurRadius(18); sh.setOffset(0, 3); sh.setColor(QColor(0, 0, 0, 70))
@@ -4300,18 +4709,22 @@ class MainWindow(QMainWindow):
     # ── Material strips over the Files / Trackers lists ───────────
     _VIDEO_EXT = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm", ".mpg", ".mpeg", ".flv"}
 
-    def _attach_strip(self, tree, strip, height: int) -> None:
+    def _attach_strip(self, tree, strip, height: int, bottom: bool = False) -> None:
         from PySide6.QtCore import QObject
+
+        def place(o):
+            strip.setGeometry(0, (o.height() - height) if bottom else 0, o.width(), height)
 
         class _Resize(QObject):
             def eventFilter(self_, o, e):
                 if e.type() == QEvent.Resize:
-                    strip.setGeometry(0, 0, o.width(), height)
+                    place(o)
                 return False
         flt = _Resize(tree)
         tree.installEventFilter(flt)
         strip._flt = flt
         strip._h = height
+        strip._place = place
 
     def _material_strips(self, want: bool) -> None:
         if not hasattr(self, "files_strip"):
@@ -4330,16 +4743,16 @@ class MainWindow(QMainWindow):
                 fl.addWidget(b)
             self._attach_strip(self.files_tbl, fs, 48)
             self.files_strip = fs
-            ts = QWidget(self.tr_tbl); ts.setObjectName("materialStrip")
-            tl = QHBoxLayout(ts); tl.setContentsMargins(0, 0, 0, 0)
-            ab = QPushButton("+  " + t("material_add_tracker")); ab.setObjectName("materialTonal")
+            ts = QWidget(self.tr_tbl); ts.setObjectName("materialFloat")     # Flud+: small, centred, under the list
+            tl = QHBoxLayout(ts); tl.setContentsMargins(0, 6, 0, 8)
+            ab = QPushButton("+  " + t("material_add_tracker")); ab.setObjectName("materialTonalSmall")
             ab.setCursor(Qt.PointingHandCursor)
             ab.clicked.connect(lambda: self.edit_trackers())
-            tl.addWidget(ab)
-            self._attach_strip(self.tr_tbl, ts, 64)
+            tl.addStretch(); tl.addWidget(ab); tl.addStretch()
+            self._attach_strip(self.tr_tbl, ts, 52, bottom=True)
             self.tr_strip = ts
         for tree, strip in ((self.files_tbl, self.files_strip), (self.tr_tbl, self.tr_strip)):
-            strip.setGeometry(0, 0, tree.width(), strip._h)
+            strip._place(tree)
             strip.setVisible(want)
         if not want:
             for b in self._chips.values():
@@ -4407,6 +4820,7 @@ class MainWindow(QMainWindow):
         head.installEventFilter(self._sel_cover)
 
     def _update_sel_bar(self, *_args) -> None:
+        self._update_pause_btn()
         n = len(self.selected_keys()) if theme.current_style == "material" else 0
         show = n >= 2
         if show:
@@ -4515,6 +4929,16 @@ class MainWindow(QMainWindow):
         self.material_edit.setVisible(want)
         self._place_material_overlays()
         # header: hamburger + title only; filters = status tabs, the sidebar is a drawer
+        for k, b in self.pills.items():          # Material: three status tabs, the others: five
+            b.setVisible(k in MATERIAL_TABS if want else k not in PROGRESS_FILTERS)
+        if self.proxy.state not in (MATERIAL_TABS if want else FILTER_STATES):
+            self.proxy.set_filter(state="all")
+            self.pills["all"].setChecked(True)
+        # Flud+ on a wide window: list on the left, details beside it (otherwise list above details)
+        if getattr(self, "split", None) is not None and getattr(self, "_split_mat", None) != want:
+            self.split.setOrientation(Qt.Horizontal if want else Qt.Vertical)
+            self.split.setSizes([780, 520] if want else [470, 210])
+            self._split_mat = want
         self.menu_btn.setVisible(want)
         self.head_icon.setVisible(not want)
         self.meta.setVisible(not want)
@@ -4532,6 +4956,9 @@ class MainWindow(QMainWindow):
                 w.setVisible(not want)
         self.more_btn.setVisible(want)
         self.sort_btn.setVisible(want)
+        self.link_btn.setVisible(want)
+        for w in (self.sb_btn, self.compact_btn, self.fs_btn, self.xl_btn):    # Flud+: search, link, sort, ⋮
+            w.setVisible(not want)
         for k in (self.k_down, self.k_up, self.k_active, self.k_session):
             k.setVisible(not want)
         tb = self.tabs.tabBar()
@@ -4543,7 +4970,10 @@ class MainWindow(QMainWindow):
                 self._hdr_saved[name] = tree.header().saveState()
                 for c in range(1, tree.columnCount()):
                     tree.setColumnHidden(c, True)
-                tree.header().setFixedHeight(48 if mode == "files" else 64)   # room for the strip
+                if mode == "files":
+                    tree.header().setFixedHeight(48)           # room for the chips strip
+                else:
+                    tree.header().setFixedHeight(1)
                 tree.setItemDelegateForColumn(0, MaterialTreeDelegate(
                     tree, mode, self._files_check if mode == "files" else None))
                 tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -4685,7 +5115,7 @@ class MainWindow(QMainWindow):
     # Summary layout: (left key, right key) per row, like BitComet's two-column summary
     SUM_TRANSFER = [("gen_active", "gen_eta"), ("gen_downloaded", "gen_uploaded"),
                     ("gen_dl_speed", "gen_ul_speed"), ("gen_dl_limit", "gen_ul_limit"),
-                    ("gen_ratio", "gen_conn")]
+                    ("gen_ratio", "gen_conn"), ("gen_seed_limits", None)]
     SUM_BASIC = [("gen_name", "gen_tags"), ("gen_path", "gen_cat"), ("gen_size", "gen_left"),
                  ("gen_hash1", "gen_piece_info"), ("gen_hash2", "gen_files"),
                  ("gen_added", "gen_creator"), ("gen_completed", "gen_created"),
@@ -4704,7 +5134,8 @@ class MainWindow(QMainWindow):
                  "gen_eta": ("fa6s.hourglass-half", "info"), "gen_dl_speed": ("fa6s.gauge-high", "primary"),
                  "gen_ul_speed": ("fa6s.gauge-high", "success"), "gen_dl_limit": ("fa6s.sliders", "primary"),
                  "gen_ul_limit": ("fa6s.sliders", "success"), "gen_conn": ("fa6s.users", "info"),
-                 "gen_name": ("fa6s.file", "secondary"), "gen_left": ("fa6s.download", "primary")}
+                 "gen_name": ("fa6s.file", "secondary"), "gen_left": ("fa6s.download", "primary"),
+                 "gen_seed_limits": ("fa6s.hand", "danger")}
 
     def _sum_grid(self, rows) -> QWidget:
         w = QWidget()
@@ -4713,7 +5144,8 @@ class MainWindow(QMainWindow):
             grid.setContentsMargins(8, 10, 8, 10)
             grid.setHorizontalSpacing(18)
             grid.setVerticalSpacing(16)
-            wide = {"gen_name", "gen_path", "gen_hash1", "gen_hash2", "gen_tracker", "gen_comment", "gen_error"}
+            wide = {"gen_name", "gen_path", "gen_hash1", "gen_hash2", "gen_tracker", "gen_comment", "gen_error",
+                    "gen_seed_limits"}
             r = c = 0
             for k in (k for pair in rows for k in pair if k):
                 span = 4 if k in wide else 1
@@ -4724,7 +5156,18 @@ class MainWindow(QMainWindow):
                 lab = QLabel(t(k).upper()); lab.setObjectName("rowLbl")
                 val = QLabel(); val.setObjectName("rowVal"); val.setWordWrap(True)
                 val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                cl.addWidget(lab); cl.addWidget(val)
+                cl.addWidget(lab)
+                if k == "gen_seed_limits":          # Flud+: value + pencil that opens the torrent's rule
+                    vr = QHBoxLayout(); vr.setSpacing(8)
+                    vr.addWidget(val, 1)
+                    pen = QToolButton(); pen.setObjectName("iconBtn"); pen.setCursor(Qt.PointingHandCursor)
+                    pen.setIconSize(QSize(16, 16)); pen.setToolTip(t("material_edit"))
+                    pen.clicked.connect(lambda _=False: self.properties_dialog())
+                    self._themed_icon(pen.setIcon, "fa6s.pencil", "primary")
+                    vr.addWidget(pen)
+                    cl.addLayout(vr)
+                else:
+                    cl.addWidget(val)
                 grid.addWidget(cell, r, c, 1, span)
                 self.g[k] = val
                 c += span
@@ -5204,6 +5647,7 @@ class MainWindow(QMainWindow):
         self.theme_btn.setIcon(icon("fa6s.sun" if dark else "fa6s.moon", "head_ic"))
         self._apply_backdrop(dark)
         self.table.viewport().update()
+        self._update_pause_btn()
         self.sidebar._keys = {k: [] for k in self.sidebar._keys}     # rebuild with icons in the new colours
         self.sidebar.retheme()
         self.sidebar.refresh(self.model.rows, [c["name"] for c in self.cfg.get("categories", [])],
@@ -5330,6 +5774,7 @@ class MainWindow(QMainWindow):
         is_magnet = item.startswith("magnet:")
         try:
             save_path, paused, prios, category, renames, task = None, False, None, "", {}, None
+            seq = first_last = None            # None = the defaults from Settings → Tasks
             ti = None if is_magnet else lt.torrent_info(item)
             cross = self.engine.find_cross(ti) if ti is not None and self.cfg.get("cross_seed", True) else None
             if self.cfg.get("show_add_dialog", True):
@@ -5351,6 +5796,7 @@ class MainWindow(QMainWindow):
                 save_path, paused, prios = d.path.text().strip() or None, d.start_paused, d.priorities()
                 renames = d.renames()
                 task = d.task()
+                seq, first_last = d.sequential(), d.first_last()
                 for idx, new_path in renames.items():      # the existing-files check below sees the new names
                     ti.rename_file(idx, new_path)
                 category = d.cat.currentData() or ""
@@ -5377,10 +5823,12 @@ class MainWindow(QMainWindow):
                 key = self.engine.add_cross(item, cross, paused=paused)
                 self.log_event("torrent", t("cross_found", cross["name"]))
             elif is_magnet:
-                key = self.engine.add_magnet(item, save_path=save_path, paused=paused)
+                key = self.engine.add_magnet(item, save_path=save_path, paused=paused,
+                                             sequential=seq, first_last=first_last)
             else:
                 key = self.engine.add_torrent_file(item, save_path=save_path, paused=paused, file_priorities=prios,
-                                                   seed_mode=seed_mode, renames=renames, task=task)
+                                                   seed_mode=seed_mode, renames=renames, task=task,
+                                                   sequential=seq, first_last=first_last)
             if category:
                 self.engine.set_category(key, category)
             if not cross:
@@ -6186,11 +6634,10 @@ class MainWindow(QMainWindow):
         self.engine.poll()
         rows = self.engine.rows()
         self.model.update(rows)
-        self.list_stack.setCurrentIndex(0 if rows else 1)
+        self._sync_empty(bool(rows))
 
         for key, b in self.pills.items():
-            states = FILTER_STATES[key]
-            n = len(rows) if states is None else sum(1 for r in rows if r.state in states)
+            n = sum(1 for r in rows if state_ok(r, key))
             b.setText(f"{t('f_' + key)}  {n}")
 
         hosts = sorted({r.tracker_host for r in rows})
@@ -6408,6 +6855,7 @@ class MainWindow(QMainWindow):
             "gen_hnr": row.hnr or ("✓" if self.engine.tracker_rule(row.tracker_host) else "—"),
             "gen_tags": ", ".join(row.tags) or "—",
             "gen_cat": row.category or "—",
+            "gen_seed_limits": self._seed_limits_text(row.key),
         }
         for k, v in vals.items():
             lab = self.g[k]
@@ -6415,6 +6863,23 @@ class MainWindow(QMainWindow):
                 lab.setText(v)
                 lab.setToolTip(v if len(v) > 30 else "")
         self.g["gen_error"].setStyleSheet(f"color:{C['danger']};" if row.error else "")
+
+    def _seed_limits_text(self, key: str) -> str:
+        """Per-torrent stop-seeding rule: the global one / switched off / its own ratio and hours."""
+        try:
+            p = self.engine.props(key)
+        except KeyError:
+            return "—"
+        if p["stop_mode"] == "never":
+            return t("seed_lim_off")
+        if p["stop_mode"] == "custom":
+            parts = []
+            if p["stop_ratio"]:
+                parts.append(t("seed_lim_ratio", f"{p['stop_ratio']:g}"))
+            if p["stop_hours"]:
+                parts.append(t("seed_lim_hours", p["stop_hours"]))
+            return " · ".join(parts) or t("seed_lim_off")
+        return t("seed_lim_global")
 
     def _refresh_peers(self, row):
         peers = self.engine.peers(row.key)

@@ -163,6 +163,10 @@ class PieceMapView(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 6)
         lay.setSpacing(6)
+        self.cap = QLabel()                       # Material: caps caption over the map
+        self.cap.setObjectName("rowLbl")
+        self.cap.hide()
+        lay.addWidget(self.cap)
         self.info = QLabel()
         self.info.setObjectName("meta")
         lay.addWidget(self.info)
@@ -188,6 +192,8 @@ class PieceMapView(QWidget):
         from .ui import fmt_size
         st = pm.get("states", [])
         self.grid.set_states(st, complete)
+        self.cap.setVisible(theme.current_style == "material")
+        self.cap.setText(t("tab_piecemap").upper())
         if st and theme.current_style == "material":           # caps captions over the values
             self.info.setTextFormat(Qt.RichText)
             cap = f'font-size:8pt; font-weight:700; color:{C["primary"]};'
