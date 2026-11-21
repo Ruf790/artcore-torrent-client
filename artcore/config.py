@@ -78,6 +78,11 @@ DEFAULTS = {
     "auto_trackers":    "",
     "add_subfolder":    False,      # add dialog: subfolder for a single-file torrent by default
     "delete_torrent_file": False,   # remove the .torrent file after it was added
+    "new_on_top":          False,   # new torrents go to the top of the queue
+    "announce_all":        True,    # announce to every tracker and tier
+    "piecemap_style":      "grid",  # piece map: grid | bar
+    "sequential_download": False,   # new torrents: pieces in order (watch while downloading)
+    "first_last_first":    False,   # new torrents: first and last piece of every file first (previews, indexes)
     "export_dir":       "",         # copy the .torrent of every added torrent here, "" = off
     "export_done_dir":  "",         # … of every finished download here
     # Settings → Advanced → Disk & cache (libtorrent defaults)
