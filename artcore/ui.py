@@ -717,6 +717,8 @@ class MaterialTreeDelegate(QStyledItemDelegate):
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
         x, w_all = rect.left() + 10, rect.width()
         ic = index.data(Qt.DecorationRole)
+        if not isinstance(ic, QIcon) and self.mode == "trackers":
+            ic = index.siblingAtColumn(3).data(Qt.DecorationRole)      # announce endpoints: their status icon
         if isinstance(ic, QIcon):
             painter.drawPixmap(x, int(rect.center().y() - 10), ic.pixmap(20, 20))
             x += 30
@@ -755,6 +757,19 @@ class MaterialTreeDelegate(QStyledItemDelegate):
             fh = QFont(f2); fh.setWeight(QFont.DemiBold)
             painter.setFont(fh)
             painter.setPen(QColor(C[tone]))
+            proto = g(2)
+            if proto:                                   # BitTorrent protocol of this announce: v1 / v2
+                fp = QFont(f2); fp.setPointSizeF(8); fp.setWeight(QFont.DemiBold)
+                pw = QFontMetrics(fp).horizontalAdvance(proto) + 14
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(C["primary_subtle"]))
+                painter.drawRoundedRect(QRectF(x, ytxt + 1, pw, 16), 8, 8)
+                painter.setFont(fp)
+                painter.setPen(QColor(C["primary_text"]))
+                painter.drawText(QRectF(x, ytxt + 1, pw, 16), Qt.AlignCenter, proto)
+                x += pw + 8
+                painter.setFont(fh)
+                painter.setPen(QColor(C[tone]))
             hw = QFontMetrics(fh).horizontalAdvance(head) + 8
             painter.drawText(QRectF(x, ytxt, hw, 18), Qt.AlignLeft | Qt.AlignVCenter, head)
             painter.setFont(f2)
@@ -4535,6 +4550,11 @@ class MainWindow(QMainWindow):
         # Flud+: resume all, pause all, queue, status, settings, shutdown
         mm.addAction(icon("fa6s.play", "success"), t("start_all"), lambda: self.start_keys(list(self.engine.handles)))
         mm.addAction(icon("fa6s.pause"), t("pause_all"), lambda: self._all(self.engine.pause))
+        mm.addAction(icon("fa6s.stop", "danger"), t("stop_all"), lambda: self._all(self.engine.stop))
+        mm.addSeparator()
+        mm.addAction(icon("fa6s.square-check", "primary"), t("material_select_all"), lambda: self._select_all(True))
+        mm.addAction(icon("fa6s.square", "secondary"), t("material_clear"), lambda: self._select_all(False))
+        mm.addSeparator()
         qm = mm.addMenu(icon("fa6s.arrow-down-1-9"), t("queue_menu"))
         for lbl, where in (("queue_top", "top"), ("queue_up", "up"), ("queue_down", "down"), ("queue_bottom", "bottom")):
             qm.addAction(t(lbl), lambda _=False, w=where: self.queue_move(w))
@@ -4583,6 +4603,15 @@ class MainWindow(QMainWindow):
         pills = QHBoxLayout(self.pill_bar)
         pills.setContentsMargins(12, 9, 12, 9)
         pills.setSpacing(6)
+        self.sel_all_btn = QToolButton()               # Material: select every torrent shown / clear
+        self.sel_all_btn.setObjectName("iconBtn")
+        self.sel_all_btn.setCursor(Qt.PointingHandCursor)
+        self.sel_all_btn.setIconSize(QSize(18, 18))
+        self.sel_all_btn.setToolTip(t("material_select_all"))
+        self.sel_all_btn.clicked.connect(lambda: self._select_all_toggle())
+        self._themed_icon(self.sel_all_btn.setIcon, "fa6s.square-check", "primary")
+        self.sel_all_btn.hide()
+        pills.addWidget(self.sel_all_btn)
         self.pill_group = QButtonGroup(self)
         self.pills: dict[str, QPushButton] = {}
         pill_icons = {"all": ("fa6s.layer-group", "primary"), "downloading": ("fa6s.arrow-down", "primary"),
@@ -4723,10 +4752,54 @@ class MainWindow(QMainWindow):
             self._each(self.engine.pause, all_if_none=False)
 
     def _reannounce_selected(self) -> None:
-        for k in self.selected_keys():
+        keys = self.selected_keys()
+        for k in keys:
             self.engine.reannounce(k)
-        if self.selected_keys():
+        if keys:
             self.toast("info", t("reannounce"), "")
+            if theme.current_style == "material":       # show what the trackers answer, announce by announce
+                self.tabs.setCurrentWidget(self.tr_tbl)
+                self._set_tracker_detail(True)
+                QTimer.singleShot(1200, self.refresh_details)     # the first answers arrive almost at once
+                QTimer.singleShot(4000, self.refresh_details)
+
+    _tr_detail = False
+
+    def _set_tracker_detail(self, on: bool) -> None:
+        """Material: trackers as the full table (URL, tier, protocol, state, peers, seeds … per announce)
+        instead of the two-line cards."""
+        self._tr_detail = on
+        chip = getattr(self, "tr_detail_chip", None)
+        if chip is not None and chip.isChecked() != on:
+            chip.blockSignals(True); chip.setChecked(on); chip.blockSignals(False)
+        self._apply_tracker_detail()
+
+    def _apply_tracker_detail(self) -> None:
+        tree = self.tr_tbl
+        detail = theme.current_style == "material" and self._tr_detail
+        if detail == getattr(self, "_tr_detail_on", False) or "tr" not in self._hdr_saved:
+            if not detail:
+                self._tr_detail_on = False
+            return
+        self._tr_detail_on = detail
+        h = tree.header()
+        if detail:
+            tree.setItemDelegateForColumn(0, QStyledItemDelegate(tree))
+            h.setMinimumHeight(0); h.setMaximumHeight(16777215)
+            h.restoreState(self._hdr_saved["tr"])
+            for c in range(tree.columnCount()):
+                tree.setColumnHidden(c, False)
+            h.setFixedHeight(36)
+            tree.setUniformRowHeights(False)
+            tree.expandAll()
+        else:
+            for c in range(1, tree.columnCount()):
+                tree.setColumnHidden(c, True)
+            h.setFixedHeight(1)
+            tree.setItemDelegateForColumn(0, MaterialTreeDelegate(tree, "trackers", None))
+            h.setSectionResizeMode(0, QHeaderView.Stretch)
+            tree.setUniformRowHeights(True)
+        tree.viewport().update()
 
     def _update_pause_btn(self) -> None:
         b = getattr(self, "_mat_btns", {}).get("pause")
@@ -4861,7 +4934,10 @@ class MainWindow(QMainWindow):
             ab = QPushButton("+  " + t("material_add_tracker")); ab.setObjectName("materialTonalSmall")
             ab.setCursor(Qt.PointingHandCursor)
             ab.clicked.connect(lambda: self.edit_trackers())
-            tl.addStretch(); tl.addWidget(ab); tl.addStretch()
+            self.tr_detail_chip = QPushButton(t("material_tr_detail")); self.tr_detail_chip.setObjectName("materialChip")
+            self.tr_detail_chip.setCheckable(True); self.tr_detail_chip.setCursor(Qt.PointingHandCursor)
+            self.tr_detail_chip.toggled.connect(self._set_tracker_detail)
+            tl.addStretch(); tl.addWidget(ab); tl.addSpacing(10); tl.addWidget(self.tr_detail_chip); tl.addStretch()
             self._attach_strip(self.tr_tbl, ts, 52, bottom=True)
             self.tr_strip = ts
         for tree, strip in ((self.files_tbl, self.files_strip), (self.tr_tbl, self.tr_strip)):
@@ -4919,9 +4995,10 @@ class MainWindow(QMainWindow):
         self.sel_label = QLabel(); self.sel_label.setObjectName("selLabel")
         bl.addWidget(self.sel_label)
         bl.addStretch()
-        bl.addWidget(tool("fa6s.check-double", t("material_select_all"), lambda: self.table.selectAll()))
+        bl.addWidget(tool("fa6s.check-double", t("material_select_all"), lambda: self._select_all(True)))
         bl.addWidget(tool("fa6s.play", t("start"), lambda: self.start_selected(all_if_none=False)))
         bl.addWidget(tool("fa6s.pause", t("pause"), lambda: self._each(self.engine.pause, all_if_none=False)))
+        bl.addWidget(tool("fa6s.stop", t("stop"), lambda: self._each(self.engine.stop, all_if_none=False)))
         bl.addWidget(tool("fa6s.trash-can", t("remove"), lambda: self.remove_selected()))
         bar.hide()
         self.sel_bar = bar
@@ -4934,12 +5011,28 @@ class MainWindow(QMainWindow):
         self._sel_cover = _Cover(head)
         head.installEventFilter(self._sel_cover)
 
+    _sel_forced = False
+
+    def _select_all(self, on: bool) -> None:
+        """Select (or clear) every torrent that is shown now - the list filters decide which ones."""
+        self._sel_forced = on
+        self.table.setFocus()
+        self.table.selectAll() if on else self.table.clearSelection()
+        self._update_sel_bar()
+
+    def _select_all_toggle(self) -> None:
+        total = self.table.model().rowCount()
+        self._select_all(bool(total) and len(self.selected_keys()) < total)
+
     def _update_sel_bar(self, *_args) -> None:
         self._update_pause_btn()
         n = len(self.selected_keys()) if theme.current_style == "material" else 0
-        show = n >= 2
+        if n == 0:
+            self._sel_forced = False
+        show = n >= 2 or (self._sel_forced and n >= 1)      # "select all" also works with a single torrent
         if show:
-            self.sel_label.setText(f"{t('material_selected')} {n}")
+            total = self.table.model().rowCount()
+            self.sel_label.setText(f"{t('material_selected')} {n} / {total}")
             self.sel_bar.setGeometry(0, 0, self.sel_bar.parent().width(), self.sel_bar.parent().height())
             self.sel_bar.raise_()
         self.sel_bar.setVisible(show)
@@ -5077,6 +5170,7 @@ class MainWindow(QMainWindow):
         self.more_btn.setVisible(want)
         self.sort_btn.setVisible(want)
         self.link_btn.setVisible(want)
+        self.sel_all_btn.setVisible(want)
         self.rss_btn.setVisible(want)
         for w in (self.sb_btn, self.compact_btn, self.fs_btn, self.xl_btn):    # Flud+: search, link, sort, ⋮
             w.setVisible(not want)
@@ -5113,6 +5207,10 @@ class MainWindow(QMainWindow):
             self._sel_connected = True
         self._update_sel_bar()
         self._material_strips(want)
+        if not want:
+            self._tr_detail_on = False
+        else:
+            self._apply_tracker_detail()
         if getattr(self, "_sum_style", None) != theme.current_style:
             self._rebuild_summary()
         self.table.viewport().update()
@@ -5332,8 +5430,8 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(inner)
         v.setContentsMargins(16, 10, 16, 10)
         v.setSpacing(4)
-        top = QHBoxLayout()
-        top.setSpacing(18)
+        top = QVBoxLayout() if theme.current_style == "material" else QHBoxLayout()   # narrow pane: stack
+        top.setSpacing(8 if theme.current_style == "material" else 18)
         speed = QVBoxLayout()
         speed.setSpacing(2)
         cap = QLabel(t("gen_dl_speed")); cap.setObjectName("rowLbl")
@@ -6927,6 +7025,9 @@ class MainWindow(QMainWindow):
             self.refresh_files(row.key)
         elif cur is self.tr_tbl:
             self.tr_tbl.update_trackers(row.key, self.engine.trackers(row.key), self.engine.peer_sources(row.key))
+            if getattr(self, "_tr_detail_on", False) and not getattr(self.tr_tbl, "_opened", None) == row.key:
+                self.tr_tbl.expandAll()                 # a new torrent: open every tracker's announces
+                self.tr_tbl._opened = row.key
         elif cur is self.peers_page:
             self._refresh_peers(row)
         elif cur is self.task_log:

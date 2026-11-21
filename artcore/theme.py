@@ -673,7 +673,7 @@ QTreeWidget#sidebar::item:selected {{ background: {c['selection']}; color: {c['p
 
 QTabWidget::pane, QTabWidget#pillTabs::pane {{ border: none; border-top: 1px solid {c['border']}; background: {c['body_bg']}; }}
 QTabBar::tab, QTabWidget#pillTabs QTabBar::tab {{ background: transparent; color: {c['body']}; border: none;
-  border-bottom: 2px solid transparent; border-radius: 0; padding: 11px 18px; margin: 0; font-weight: 500; }}
+  border-bottom: 2px solid transparent; border-radius: 0; padding: 11px 12px; margin: 0; font-weight: 500; }}
 QTabBar::tab:hover, QTabWidget#pillTabs QTabBar::tab:hover {{ background: {c['tertiary_bg']}; color: {c['body']}; }}
 QTabBar::tab:selected, QTabWidget#pillTabs QTabBar::tab:selected {{ background: transparent; color: {c['primary_text']};
   border: none; border-bottom: 2px solid {c['primary']}; }}

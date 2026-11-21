@@ -24,6 +24,8 @@ from .widgets import icon
 
 UA = "Mozilla/5.0 (compatible; ArtCore RSS)"
 SEEN_CAP = 3000
+MAX_PER_CHECK = 20      # a feed that suddenly posts hundreds of matching items never floods the client
+MAX_RETRIES = 3         # a .torrent that cannot be downloaded is tried again at the next checks
 
 
 # ── parsing ─────────────────────────────────────────────────────────────────
@@ -138,6 +140,8 @@ class FetchThread(QThread):
 
     def run(self):
         try:
+            if not self.url.lower().startswith(("http://", "https://")):      # never file:// or ftp://
+                raise ValueError("only http:// and https:// addresses are allowed")
             req = urllib.request.Request(self.url, headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=20) as r:
                 data = r.read(8 * 1024 * 1024)
@@ -161,6 +165,9 @@ class RssManager:
     def __init__(self, win):
         self.win = win
         self._threads: list[FetchThread] = []
+        self._quiet = False
+        self._pending: set[str] = set()        # .torrent downloads in flight (not "seen" until they arrive)
+        self._fails: dict[str, int] = {}
         self._last = 0.0
         self.timer = QTimer(win)
         self.timer.timeout.connect(self._tick)
@@ -204,13 +211,26 @@ class RssManager:
             self._trim()
             self.win.save_config()
             return
-        for it in items:
-            if it["guid"] in seen_set or not it["link"]:
-                continue
-            if not matches(it["title"], feed.get("include", ""), feed.get("exclude", "")):
-                continue
-            seen.append(it["guid"]); seen_set.add(it["guid"])
-            self._add(it, feed)
+        todo = [it for it in items
+                if it["guid"] not in seen_set and it["guid"] not in self._pending and it["link"]
+                and matches(it["title"], feed.get("include", ""), feed.get("exclude", ""))]
+        capped = len(todo) > MAX_PER_CHECK
+        todo = todo[:MAX_PER_CHECK]                    # the rest is picked up at the next check
+        self._quiet = len(todo) > 3                    # a pile of items gets one summary, not a toast each
+        try:
+            for it in todo:
+                g = it["guid"]
+                if it["link"].lower().startswith(("http://", "https://")):
+                    self._pending.add(g)               # "seen" only once the .torrent has really arrived
+                else:
+                    seen.append(g); seen_set.add(g)    # magnet (added at once) or a link we cannot use
+                self._add(it, feed)
+        finally:
+            self._quiet = False
+        if len(todo) > 3:
+            self.win.toast("success", t("rss_title"), t("rss_added_n", len(todo)))
+        if capped:
+            self.win.toast("info", t("rss_title"), t("rss_capped", len(todo)))
         self._trim()
         self.win.save_config()
 
@@ -226,21 +246,43 @@ class RssManager:
         elif link.lower().startswith(("http://", "https://")):
             self._start(FetchThread((it, feed), link, "file"), self._file_done)
 
+    def _mark_seen(self, guid: str) -> None:
+        seen = self.cfg.setdefault("rss_seen", [])
+        if guid not in seen:
+            seen.append(guid)
+        self._trim()
+        self.win.save_config()
+
+    def _failed(self, it: dict, err) -> None:
+        """Not downloaded: stays unseen (so the next check tries again) until MAX_RETRIES is used up."""
+        g = it["guid"]
+        self._pending.discard(g)
+        self._fails[g] = self._fails.get(g, 0) + 1
+        if self._fails[g] >= MAX_RETRIES:
+            self._mark_seen(g)
+            self._fails.pop(g, None)
+            self.win.toast("error", t("rss_title"), t("rss_gave_up", MAX_RETRIES, f"{it['title'][:60]}: {err}"))
+        else:
+            self.win.toast("error", t("rss_title"), t("rss_err", f"{it['title'][:60]}: {err}"))
+
     def _file_done(self, tag, path, err) -> None:
         it, feed = tag
         if err or not path:
-            self.win.toast("error", t("rss_title"), t("rss_err", f"{it['title'][:60]}: {err}"))
+            self._failed(it, err)
             return
         try:
             key = self.win.engine.add_torrent_file(path)
         except Exception as e:
-            self.win.toast("error", t("rss_title"), t("rss_err", f"{it['title'][:60]}: {e}"))
+            self._failed(it, e)
             return
         finally:
             try:
                 os.remove(path)
             except OSError:
                 pass
+        self._pending.discard(it["guid"])
+        self._fails.pop(it["guid"], None)
+        self._mark_seen(it["guid"])
         self._added(key, it, feed)
 
     def _added(self, key: str, it: dict, feed: dict) -> None:
@@ -249,7 +291,8 @@ class RssManager:
                 self.win.engine.set_category(key, feed["category"])
             except Exception:
                 pass
-        self.win.toast("success", t("rss_title"), t("rss_added", it["title"][:80]))
+        if not self._quiet:
+            self.win.toast("success", t("rss_title"), t("rss_added", it["title"][:80]))
         self.win.tick()
 
 
