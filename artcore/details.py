@@ -108,6 +108,8 @@ def copies(avail: list[int]) -> float:
 # ── piece map ─────────────────────────────────────────────────────
 class _Grid(QWidget):
     CELL = 12
+    BAR_H = 28
+    style = "grid"                     # grid | bar (Settings → View)
 
     def __init__(self):
         super().__init__()
@@ -122,6 +124,9 @@ class _Grid(QWidget):
         self.update()
 
     def _fit(self):
+        if self.style == "bar":
+            self.setMinimumHeight(self.BAR_H + 2)
+            return
         cols = max(1, (self.width() - 2) // self.CELL)
         rows = (len(self.states) + cols - 1) // cols
         self.setMinimumHeight(rows * self.CELL + 2)
@@ -130,8 +135,29 @@ class _Grid(QWidget):
         self._fit()
         super().resizeEvent(e)
 
+    def _paint_bar(self, p):
+        """One continuous strip: each pixel column shows the most common state of its pieces."""
+        n, w = len(self.states), max(1, self.width() - 2)
+        colors = {k: QColor(C[v]) for k, v in STATE_COLOR.items()}
+        if self.complete:
+            colors[2] = QColor(C["success"])
+        p.fillRect(QRectF(1, 1, w, self.BAR_H), QColor(C["border_soft"]))
+        if not n:
+            return
+        for x in range(w):
+            i0 = x * n // w
+            i1 = max(i0 + 1, (x + 1) * n // w)
+            seg = self.states[i0:i1]
+            st = max(set(seg), key=seg.count)
+            if st:
+                p.fillRect(QRectF(1 + x, 1, 1, self.BAR_H), colors[st])
+
     def paintEvent(self, e):
         p = QPainter(self)
+        if self.style == "bar":
+            self._paint_bar(p)
+            p.end()
+            return
         cell = self.CELL
         cols = max(1, (self.width() - 2) // cell)
         colors = {k: QColor(C[v]) for k, v in STATE_COLOR.items()}
@@ -163,6 +189,10 @@ class PieceMapView(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 6)
         lay.setSpacing(6)
+        self.cap = QLabel()                       # Material: caps caption over the map
+        self.cap.setObjectName("rowLbl")
+        self.cap.hide()
+        lay.addWidget(self.cap)
         self.info = QLabel()
         self.info.setObjectName("meta")
         lay.addWidget(self.info)
@@ -188,6 +218,8 @@ class PieceMapView(QWidget):
         from .ui import fmt_size
         st = pm.get("states", [])
         self.grid.set_states(st, complete)
+        self.cap.setVisible(theme.current_style == "material")
+        self.cap.setText(t("tab_piecemap").upper())
         if st and theme.current_style == "material":           # caps captions over the values
             self.info.setTextFormat(Qt.RichText)
             cap = f'font-size:8pt; font-weight:700; color:{C["primary"]};'

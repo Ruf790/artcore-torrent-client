@@ -352,6 +352,10 @@ class TrackersView(QTreeWidget):
     expands into its single announces. Built once per torrent / tracker list, then only updated."""
     COLS = ("tr_url", "tr_tier", "tr_proto", "tr_state", "tr_peers", "tr_seeds", "tr_leeches",
             "tr_downloaded", "tr_msg", "tr_next", "tr_min")
+
+    def set_footer(self, px: int) -> None:
+        """Room under the last row for the floating "add tracker" button."""
+        self.setViewportMargins(0, 0, 0, px)
     STATUS_ICON = {
         "working": ("fa6s.circle-check", "success"), "updating": ("fa6s.rotate", "info"),
         "tracker_error": ("fa6s.circle-exclamation", "danger"), "not_working": ("fa6s.circle-xmark", "danger"),
@@ -459,6 +463,7 @@ class TrackersView(QTreeWidget):
                 it.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
         it.setToolTip(8, vals.get(8, ""))
         it.setToolTip(0, it.text(0))
+        it.setData(3, Qt.UserRole, status)          # the Material look colours the status line by it
         ic, col = self.STATUS_ICON.get(status, ("fa6s.circle-question", "secondary"))
         it.setIcon(3, icon(ic, col))
         bad = status in ("tracker_error", "not_working")

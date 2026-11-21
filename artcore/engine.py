@@ -226,8 +226,8 @@ class Engine:
             "connections_limit":   int(c.get("max_connections", 200)) or 65535,
             "unchoke_slots_limit": int(c.get("upload_slots", 8)) or -1,
             # Private-tracker friendly: announce honestly to every tracker tier
-            "announce_to_all_trackers": True,
-            "announce_to_all_tiers":    True,
+            "announce_to_all_trackers": bool(c.get("announce_all", True)),
+            "announce_to_all_tiers":    bool(c.get("announce_all", True)),
             "alert_mask": (lt.alert_category.error | lt.alert_category.status
                            | lt.alert_category.storage | lt.alert_category.tracker
                            | lt.alert_category.port_mapping | lt.alert_category.performance_warning
@@ -690,7 +690,8 @@ class Engine:
     # ── adding / removing ──────────────────────────────────────
     def add_torrent_file(self, path: str, save_path: str | None = None, paused: bool = False,
                          file_priorities: list[int] | None = None, seed_mode: bool = False,
-                         renames: dict[int, str] | None = None, task: dict | None = None) -> str:
+                         renames: dict[int, str] | None = None, task: dict | None = None,
+                         sequential: bool | None = None, first_last: bool | None = None) -> str:
         ti = lt.torrent_info(path)
         for idx, new_path in (renames or {}).items():     # name edited in the add dialog
             ti.rename_file(idx, new_path)
@@ -700,16 +701,25 @@ class Engine:
             atp.flags |= lt.torrent_flags.seed_mode
         if file_priorities is not None:
             atp.file_priorities = file_priorities
-        key = self._add(atp, save_path, paused)
+        key = self._add(atp, save_path, paused, sequential, first_last)
         if task:
             self.set_task_props(key, task)
         return key
 
-    def add_magnet(self, uri: str, save_path: str | None = None, paused: bool = False) -> str:
+    def add_magnet(self, uri: str, save_path: str | None = None, paused: bool = False,
+                   sequential: bool | None = None, first_last: bool | None = None) -> str:
         atp = lt.parse_magnet_uri(uri)
-        return self._add(atp, save_path, paused)
+        return self._add(atp, save_path, paused, sequential, first_last)
 
-    def _add(self, atp: lt.add_torrent_params, save_path: str | None, paused: bool) -> str:
+    def _add(self, atp: lt.add_torrent_params, save_path: str | None, paused: bool,
+             sequential: bool | None = None, first_last: bool | None = None) -> str:
+        """sequential / first_last: None = the defaults from Settings → Tasks."""
+        if sequential is None:
+            sequential = bool(self.cfg.get("sequential_download"))
+        if first_last is None:
+            first_last = bool(self.cfg.get("first_last_first"))
+        if sequential:
+            atp.flags |= lt.torrent_flags.sequential_download
         atp.save_path = save_path or self.cfg.get("save_path") or os.path.expanduser("~/Downloads")
         if self.cfg.get("preallocate"):     # reserve the whole size at once: no fragmentation, no "disk full" later
             atp.storage_mode = lt.storage_mode_t.storage_mode_allocate
@@ -726,12 +736,46 @@ class Engine:
             self.opts.setdefault(key, {})["ac"] = reused
             self._save_opts()
         self._apply_conn_limits(key, h)
+        if first_last:
+            self.opts.setdefault(key, {})["first_last"] = True
+            self._save_opts()
+            self._first_last_pieces(h)
+        if self.cfg.get("new_on_top"):
+            self.queue_move([key], "top")
         self.count_event("added")
         self._add_auto_trackers(h)
         if h.status().has_metadata:
             self._export_pending.add(key)     # once its resume data is written (v2 piece layers)
         h.save_resume_data(lt.torrent_handle.save_info_dict)
         return key
+
+    def set_sequential(self, key: str, on: bool) -> None:
+        h = self.handles.get(key)
+        if h:
+            h.set_flags(lt.torrent_flags.sequential_download) if on else h.unset_flags(lt.torrent_flags.sequential_download)
+
+    def is_sequential(self, key: str) -> bool:
+        h = self.handles.get(key)
+        return bool(h and h.flags() & lt.torrent_flags.sequential_download)
+
+    @staticmethod
+    def _first_last_pieces(h: lt.torrent_handle) -> None:
+        """Top priority for the first and the last piece of every wanted file (needs the metadata:
+        for a magnet it runs again when the metadata arrives)."""
+        try:
+            ti = h.torrent_file()
+            if ti is None:
+                return
+            fprio = h.get_file_priorities()
+            fs = ti.files()
+            for i in range(fs.num_files()):
+                size = fs.file_size(i)
+                if size <= 0 or (i < len(fprio) and fprio[i] == 0):
+                    continue
+                h.piece_priority(ti.map_file(i, 0, 1).piece, 7)
+                h.piece_priority(ti.map_file(i, size - 1, 1).piece, 7)
+        except Exception:
+            pass
 
     @staticmethod
     def _reuse_incomplete(atp: lt.add_torrent_params) -> list[int]:
@@ -1264,6 +1308,8 @@ class Engine:
                 a.handle.save_resume_data(lt.torrent_handle.save_info_dict)
                 if self._cur_key in self.handles:          # a magnet got its metadata
                     self._export_pending.add(self._cur_key)
+                    if self.opts.get(self._cur_key, {}).get("first_last"):
+                        self._first_last_pieces(a.handle)
             elif isinstance(a, lt.tracker_error_alert) and _is_skip_notice(a):
                 pass   # libtorrent skipped a local endpoint (127.0.0.1, ::1, fe80::) that can't reach the tracker
             elif isinstance(a, lt.tracker_error_alert):
