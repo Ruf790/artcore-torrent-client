@@ -35,6 +35,15 @@ STATE_NAMES = {
 }
 
 
+def force_announce(h) -> None:
+    """Announce now. Without ignore_min_interval libtorrent waits out the tracker's «min interval» and the
+    countdown of the next announce never moves — that's what «Force reannounce» looked like."""
+    try:                                   # the Python binding: force_reannounce(seconds, flags)
+        h.force_reannounce(0, lt.reannounce_flags_t.ignore_min_interval)
+    except (TypeError, AttributeError):    # (Boost.Python.ArgumentError is a TypeError) — an old binding
+        h.force_reannounce()
+
+
 @dataclass
 class TorrentRow:
     key: str            # info-hash (hex), stable id for the UI
@@ -1214,7 +1223,7 @@ class Engine:
     def reannounce(self, key: str) -> None:
         h = self.handles.get(key)
         if h:
-            h.force_reannounce()
+            force_announce(h)
 
     # ── polling ────────────────────────────────────────────────
     def poll(self) -> None:
@@ -1978,7 +1987,7 @@ class Engine:
             entries.append(e)
         h.replace_trackers(entries)
         self._hosts.pop(key, None)
-        h.force_reannounce()
+        force_announce(h)
         h.save_resume_data(lt.torrent_handle.save_info_dict)
 
     def replace_in_trackers(self, keys: list[str], old: str, new: str) -> int:
