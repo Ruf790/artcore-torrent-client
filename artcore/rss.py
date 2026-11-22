@@ -9,12 +9,13 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
-from PySide6.QtCore import QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QFormLayout, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
@@ -130,32 +131,56 @@ def matches(title: str, include: str, exclude: str) -> bool:
 
 
 # ── network, off the GUI thread ─────────────────────────────────────────────
-class FetchThread(QThread):
-    """kind "feed": result is a list of items; kind "file": result is a path of a downloaded .torrent."""
+class FetchThread(QObject):
+    """kind "feed": result is a list of items; kind "file": result is a path of a downloaded .torrent.
+
+    1.0.52: a plain daemon thread instead of a QThread. A QThread owned by the feeds window was destroyed
+    with it when the window was closed while a feed was still loading (up to 20 s), and Qt then aborted
+    the whole client ("QThread: Destroyed while thread is still running"); quitting during an automatic
+    check did the same. A daemon thread is simply dropped with the process, and the result of a fetch
+    whose window is gone goes nowhere (Qt disconnects a deleted receiver)."""
     done = Signal(object, object, str)          # tag, result, error
+    finished = Signal()
+    _live: set = set()                          # keeps the object alive until its thread is over
 
     def __init__(self, tag, url: str, kind: str = "feed", parent=None):
-        super().__init__(parent)
+        super().__init__(None)                  # never owned by a window (see above); parent is ignored
         self.tag, self.url, self.kind = tag, url, kind
 
-    def run(self):
+    def start(self) -> None:
+        FetchThread._live.add(self)
+        threading.Thread(target=self._work, name="rss-fetch", daemon=True).start()
+
+    def _emit(self, signal, *args) -> None:
         try:
-            if not self.url.lower().startswith(("http://", "https://")):      # never file:// or ftp://
-                raise ValueError("only http:// and https:// addresses are allowed")
-            req = urllib.request.Request(self.url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                data = r.read(8 * 1024 * 1024)
-            if self.kind == "feed":
-                self.done.emit(self.tag, parse_feed(data), "")
-            else:
-                if not data.startswith(b"d"):
-                    raise ValueError("not a .torrent file")
-                fd, path = tempfile.mkstemp(suffix=".torrent", prefix="rss_")
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-                self.done.emit(self.tag, path, "")
+            signal.emit(*args)
+        except RuntimeError:                    # the application is shutting down
+            pass
+
+    def _work(self) -> None:
+        try:
+            result = self.run()
+            self._emit(self.done, self.tag, result, "")
         except Exception as e:          # network, XML, anything: shown to the person, never raised
-            self.done.emit(self.tag, None, str(e) or e.__class__.__name__)
+            self._emit(self.done, self.tag, None, str(e) or e.__class__.__name__)
+        finally:
+            self._emit(self.finished)
+            FetchThread._live.discard(self)
+
+    def run(self):
+        if not self.url.lower().startswith(("http://", "https://")):      # never file:// or ftp://
+            raise ValueError("only http:// and https:// addresses are allowed")
+        req = urllib.request.Request(self.url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read(8 * 1024 * 1024)
+        if self.kind == "feed":
+            return parse_feed(data)
+        if not data.startswith(b"d"):
+            raise ValueError("not a .torrent file")
+        fd, path = tempfile.mkstemp(suffix=".torrent", prefix="rss_")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        return path
 
 
 # ── automatic downloading ───────────────────────────────────────────────────
@@ -242,7 +267,12 @@ class RssManager:
     def _add(self, it: dict, feed: dict) -> None:
         link = it["link"]
         if link.startswith("magnet:"):
-            self._added(self.win.engine.add_magnet(link), it, feed)
+            try:
+                key = self.win.engine.add_magnet(link)
+            except Exception as e:                 # a broken magnet must not stop the rest of the feed
+                self.win.toast("error", t("rss_title"), t("rss_err", f"{it['title'][:60]}: {e}"))
+                return
+            self._added(key, it, feed)
         elif link.lower().startswith(("http://", "https://")):
             self._start(FetchThread((it, feed), link, "file"), self._file_done)
 
