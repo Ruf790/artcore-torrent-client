@@ -37,11 +37,27 @@ class _Dim(QWidget):
         p.fillRect(self.rect(), QColor(0, 0, 0, 105))
 
 
+class _ElideLabel(QLabel):
+    """One line, "…" in the middle when it doesn't fit the width it actually gets."""
+    def __init__(self, text: str):
+        super().__init__()
+        self._full = text
+        from PySide6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def resizeEvent(self, e):
+        from PySide6.QtGui import QFontMetrics
+        super().resizeEvent(e)
+        self.setText(QFontMetrics(self.font()).elidedText(self._full, Qt.ElideMiddle, max(10, self.width())))
+
+
 class Swal(QDialog):
     def __init__(self, parent, kind: str, title: str, text: str = "",
                  buttons: list[tuple[str, str]] | None = None, default: int = 0, cancel: int | None = None,
-                 checkbox: str = ""):
+                 checkbox: str = "", items: list[tuple[str, str, str]] | None = None, more: str = ""):
         """buttons: [(label, style)] left to right; style "" | "primary" | "danger".
+        items: [(icon, name, detail)] shown in a framed list under the text (e.g. the torrents
+        being removed); `more` is a last grey line such as "…and 5 more".
         exec() returns the index of the clicked button, or `cancel` on Esc / close."""
         from . import theme
         from .ui import C
@@ -82,6 +98,8 @@ class Swal(QDialog):
             body.setTextInteractionFlags(Qt.TextSelectableByMouse)
             body.setStyleSheet(f"color: {C['secondary']}; font-size: 10.5pt;")
             v.addWidget(body)
+        if items:
+            v.addWidget(self._item_list(items, more, C))
         self.check = None
         if checkbox:
             self.check = QCheckBox(checkbox)
@@ -103,8 +121,43 @@ class Swal(QDialog):
             self.buttons[default].setDefault(True)
             self.buttons[default].setFocus()
         outer.addWidget(box)
-        self.setMinimumWidth(500)
-        self.setMaximumWidth(640)
+        self.setMinimumWidth(600 if items else 500)
+        self.setMaximumWidth(680 if items else 640)
+
+    @staticmethod
+    def _item_list(items, more: str, C) -> QFrame:
+        """Framed list: icon · name (elided in the middle) · grey detail on the right."""
+        import qtawesome as qta
+        from PySide6.QtGui import QFontMetrics
+        fr = QFrame(); fr.setObjectName("swalItems")
+        fr.setStyleSheet(f"#swalItems {{ background: {C['tertiary_bg']}; border: 1px solid {C['border']};"
+                         f" border-radius: 10px; }} #swalItems QLabel {{ background: transparent; }}")
+        lay = QVBoxLayout(fr)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(4)
+        for ic, name, detail in items:
+            row = QHBoxLayout(); row.setSpacing(8)
+            if ic:
+                il = QLabel(); il.setPixmap(qta.icon(ic, color=C["secondary"]).pixmap(14, 14))
+                row.addWidget(il, 0, Qt.AlignVCenter)
+            if len(items) == 1 and not more:          # one torrent: the whole name, wrapped
+                nl = QLabel(name.replace(".", ".\u200b").replace("_", "_\u200b").replace("-", "-\u200b"))
+                nl.setWordWrap(True)
+            else:
+                nl = _ElideLabel(name)
+            nl.setStyleSheet(f"color: {C['emphasis']};")
+            f = nl.font(); f.setPointSizeF(10); f.setBold(True); nl.setFont(f)
+            nl.setToolTip(name)
+            nl.setMinimumWidth(60)
+            row.addWidget(nl, 1)
+            if detail:
+                dl = QLabel(detail); dl.setStyleSheet(f"color: {C['secondary']}; font-size: 9.5pt;")
+                row.addWidget(dl, 0, Qt.AlignRight | Qt.AlignVCenter)
+            lay.addLayout(row)
+        if more:
+            ml = QLabel(more); ml.setStyleSheet(f"color: {C['secondary']}; font-size: 9.5pt;")
+            lay.addWidget(ml)
+        return fr
 
     def _pick(self, i: int):
         self.result_index = i

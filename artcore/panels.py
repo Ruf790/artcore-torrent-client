@@ -7,12 +7,13 @@ import shutil
 import tempfile
 from datetime import date, datetime, timedelta
 
-from PySide6.QtCore import Qt, QRectF, QPointF, QThread, Signal, QSize, QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QFontMetrics, QGuiApplication
+from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QThread, Signal, QSize, QTimer, QUrl
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QFontMetrics, QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
                                QRadioButton, QTableWidget, QTableWidgetItem, QToolTip, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget, QAbstractItemView)
+                               QTreeWidgetItem, QVBoxLayout, QWidget, QAbstractItemView,
+                               QStyle, QStyledItemDelegate, QStyleOptionViewItem)
 
 from . import APP_TITLE, theme, widgets
 from .i18n import t
@@ -50,6 +51,61 @@ SIDEBAR_STATES = {
 TRACKER_ERR = "\x00err"       # pseudo tracker: torrents whose trackers all fail
 ROLE_KEY = Qt.UserRole
 ROLE_SECTION = Qt.UserRole + 1
+ROLE_SUB = Qt.UserRole + 2       # second, small grey line (tracker totals)
+
+
+class _SubLineDelegate(QStyledItemDelegate):
+    """Sidebar rows with a ROLE_SUB text get a second line under the label:
+    "↑ 12.40 GB · ↓ 3.10 GB · R 4.00" for trackers. Other rows are drawn as before."""
+    def _sub(self, index) -> str:
+        return index.sibling(index.row(), 0).data(ROLE_SUB) or ""
+
+    @staticmethod
+    def _small(font: QFont) -> QFont:
+        f = QFont(font)
+        f.setPointSizeF(max(7.0, (font.pointSizeF() if font.pointSizeF() > 0 else 9.0) - 1.5))
+        f.setWeight(QFont.Normal)
+        return f
+
+    def sizeHint(self, option, index):
+        sz = super().sizeHint(option, index)
+        if self._sub(index):
+            sz.setHeight(sz.height() + QFontMetrics(self._small(option.font)).height())
+        return sz
+
+    def paint(self, painter, option, index):
+        sub = self._sub(index)
+        if not sub:
+            return super().paint(painter, option, index)
+        widget = option.widget
+        style = widget.style() if widget else None
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        small = self._small(opt.font)
+        line_h = QFontMetrics(small).height()
+        # 1) background / hover over the whole (taller) row, no text or icon
+        bg = QStyleOptionViewItem(opt)
+        bg.text = ""
+        bg.icon = QIcon()
+        bg.features &= ~(QStyleOptionViewItem.HasDisplay | QStyleOptionViewItem.HasDecoration)
+        style.drawControl(QStyle.CE_ItemViewItem, bg, painter, widget)
+        # 2) icon + label + count in the upper part, as on a normal row
+        top = QStyleOptionViewItem(opt)
+        top.rect = QRect(opt.rect.x(), opt.rect.y(), opt.rect.width(), opt.rect.height() - line_h)
+        top.backgroundBrush = QBrush()
+        top.state &= ~QStyle.State_MouseOver
+        style.drawControl(QStyle.CE_ItemViewItem, top, painter, widget)
+        # 3) the small grey line (column 0 only)
+        if index.column() != 0:
+            return
+        tr = style.subElementRect(QStyle.SE_ItemViewItemText, top, widget)
+        r = QRect(tr.left() + 2, top.rect.bottom() - 3, opt.rect.right() - tr.left() - 4, line_h)
+        painter.save()
+        painter.setFont(small)
+        painter.setPen(QColor(C["secondary"]))
+        painter.drawText(r, Qt.AlignLeft | Qt.AlignTop,
+                         QFontMetrics(small).elidedText(sub, Qt.ElideRight, r.width()))
+        painter.restore()
 
 
 class FilterSidebar(QTreeWidget):
@@ -70,7 +126,10 @@ class FilterSidebar(QTreeWidget):
         self.setIndentation(6)
         self.setFocusPolicy(Qt.NoFocus)
         self.setSelectionMode(QAbstractItemView.NoSelection)
-        self.setUniformRowHeights(True)
+        self.setUniformRowHeights(False)            # tracker rows are taller (totals line)
+        self.setItemDelegate(_SubLineDelegate(self))
+        self.tr_totals: dict[str, tuple[int, int]] = {}   # host → (uploaded, downloaded) all time
+        self.show_tr_stats = True
         self.setIconSize(QSize(14, 14))
         self.setMouseTracking(True)
         self.header().setStretchLastSection(False)
@@ -161,6 +220,29 @@ class FilterSidebar(QTreeWidget):
             trs.append((h, t("sb_no_tracker") if h == "DHT" else h,
                         "fa6s.diagram-project" if h == "DHT" else "fa6s.globe", "info", hosts[h]))
         self._sync("tracker", trs)
+        self._tracker_lines(hosts)
+
+    def set_tracker_totals(self, totals: list[tuple[str, int, int, int]], show: bool = True):
+        """From Engine.tracker_totals(): [(host, uploaded, downloaded, torrents)]."""
+        self.tr_totals = {h: (up, down) for h, up, down, _n in totals}
+        self.show_tr_stats = show
+
+    def _tracker_lines(self, hosts: dict[str, int]):
+        top = self.tops["tracker"]
+        for i in range(top.childCount()):
+            it = top.child(i)
+            key = it.data(0, ROLE_KEY)
+            sub, tip = "", it.text(0)
+            if key and key != TRACKER_ERR and key in self.tr_totals:
+                up, down = self.tr_totals[key]
+                ratio = f"{up / down:.2f}" if down else ("∞" if up else "—")
+                if self.show_tr_stats:
+                    sub = t("sb_tr_line", fmt_size(up), fmt_size(down), ratio)
+                tip = t("sb_tr_tip", it.text(0), hosts.get(key, 0), fmt_size(up), fmt_size(down), ratio)
+            if it.data(0, ROLE_SUB) != sub:
+                it.setData(0, ROLE_SUB, sub)
+            if it.toolTip(0) != tip:
+                it.setToolTip(0, tip)
 
     def _style(self, only: str | None = None):
         for sec, top in self.tops.items():
@@ -214,6 +296,9 @@ class FilterSidebar(QTreeWidget):
                 m.addAction(widgets.icon("fa6s.trash-can", "danger"), t("sb_m_tag_del"),
                             lambda: self.action.emit("tag_del", sec, key))
             m.addSeparator()
+        if it is not None and it.data(0, ROLE_SECTION) == "tracker":
+            a = m.addAction(t("sb_tr_stats"), lambda: self.action.emit("tr_stats", "", ""))
+            a.setCheckable(True); a.setChecked(self.show_tr_stats)
         m.addAction(widgets.icon("fa6s.table-columns"), t("sb_hide") + "\tCtrl+B", lambda: self.action.emit("hide", "", ""))
         m.exec(self.viewport().mapToGlobal(pos))
 
