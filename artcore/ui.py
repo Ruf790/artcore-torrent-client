@@ -6985,6 +6985,11 @@ class MainWindow(QMainWindow):
             else:
                 self.notify(t("miss_many", len(found)), "", folder=False)
 
+        while self.engine.partial_names:            # 1.0.55: some files of a complete torrent deleted
+            name, key, n, total, first = self.engine.partial_names.pop(0)
+            self.log_event("error", t("part_log", name, n, total, first))
+            self.notify(t("part_note", name, n, total, first), key, folder=True, kind="error")
+
         while self.engine.stopped_names:
             name, key = self.engine.stopped_names.pop(0)
             self.log_event("torrent", t("stopped_note", name))
