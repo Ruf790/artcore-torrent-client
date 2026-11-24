@@ -3977,6 +3977,7 @@ class MainWindow(QMainWindow):
             self.check_updates()
 
         self._tr_bad: set[str] = set()          # torrents already toasted for a tracker error
+        self._io_bad: set[str] = set()          # torrents already toasted for a disk / file error
         if self.cfg.get("mini_widget"):
             self.set_mini(True)
         self.timer = QTimer(self)
@@ -6940,6 +6941,15 @@ class MainWindow(QMainWindow):
             if r.key in bad and r.key not in self._tr_bad:
                 self.notify(f"{t('toast_tr_error')}: {r.name}\n{r.error}", r.key, folder=False, kind="error")
         self._tr_bad = bad
+
+        # 1.0.55: the torrent itself stopped on an error (file in use, no access, disk gone…)
+        io_bad = {r.key for r in rows if r.state == "error"}
+        for r in rows:
+            if r.key in io_bad and r.key not in self._io_bad:
+                self.log_event("error", t("toast_io_error_log", r.name, r.error or "?"))
+                self.notify(f"{t('toast_io_error')}: {r.name}\n{r.error or ''}".rstrip(), r.key,
+                            folder=True, kind="error")
+        self._io_bad = io_bad
 
         self.refresh_tag_combo()
         if self.sidebar.isVisible():

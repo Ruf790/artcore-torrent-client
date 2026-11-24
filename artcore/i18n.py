@@ -1442,6 +1442,9 @@ STRINGS = {
     "sb_tr_tip":       ("{0}\nРаздач: {1}\nОтдано за всё время: {2}\nСкачано за всё время: {3}\nРейтинг: {4}",
                         "{0}\nTorrents: {1}\nUploaded all time: {2}\nDownloaded all time: {3}\nRatio: {4}"),
     "sb_tr_stats":     ("Показывать отдано / скачано у трекеров", "Show uploaded / downloaded under trackers"),
+    # 1.0.55: disk / file errors
+    "toast_io_error":  ("Ошибка раздачи", "Torrent error"),
+    "toast_io_error_log": ("Ошибка раздачи «{0}»: {1}", "Torrent “{0}” stopped on an error: {1}"),
 }
 
 
