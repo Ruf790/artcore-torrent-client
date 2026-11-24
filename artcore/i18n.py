@@ -1420,6 +1420,28 @@ STRINGS = {
     "dl_not_torrent":  ("по ссылке не .torrent-файл (возможно, нужен вход на сайт)",
                         "the link is not a .torrent file (maybe the site needs a login)"),
     "folder_torrents": ("В папке .torrent-файлов: {0}. Добавить все?", "{0} .torrent files in the folder. Add them all?"),
+    # 1.0.54: removing shows the names
+    "remove_text_one": ("Удалить этот торрент?",             "Remove this torrent?"),
+    "remove_text_n":   ("Удалить выбранные торренты ({0})?", "Remove the selected torrents ({0})?"),
+    "remove_more":     ("…и ещё {0}",                        "…and {0} more"),
+    # 1.0.54: ArtCore Player / Music / Convert
+    "app_menu":        ("ArtCore",                           "ArtCore"),
+    "app_play":        ("Открыть в ArtCore Player",          "Open in ArtCore Player"),
+    "app_music":       ("Открыть в ArtCore Music",           "Open in ArtCore Music"),
+    "app_convert":     ("Конвертировать в ArtCore Convert",  "Convert in ArtCore Convert"),
+    "app_n_files":     ("файлов: {0}",                       "{0} files"),
+    "app_missing":     ("{0} не установлен — скачать…",      "{0} isn't installed — download…"),
+    "app_none":        ("Нет скачанных видео- или аудиофайлов", "No finished video or audio files"),
+    "app_sent":        ("Отправлено в {0}: {1}",             "Sent to {0}: {1}"),
+    "app_fail":        ("Не удалось запустить {0}: {1}",     "Could not start {0}: {1}"),
+    "set_done_convert": ("Отправлять скачанное видео в ArtCore Convert", "Send finished videos to ArtCore Convert"),
+    "set_done_convert_tip": ("Видеофайлы раздачи сразу попадают в очередь ArtCore Convert. Программа должна быть установлена.",
+                             "The torrent's video files go straight into ArtCore Convert's queue. The program must be installed."),
+    # 1.0.54: per-tracker totals in the sidebar
+    "sb_tr_line":      ("↑ {0} · ↓ {1} · R {2}",             "↑ {0} · ↓ {1} · R {2}"),
+    "sb_tr_tip":       ("{0}\nРаздач: {1}\nОтдано за всё время: {2}\nСкачано за всё время: {3}\nРейтинг: {4}",
+                        "{0}\nTorrents: {1}\nUploaded all time: {2}\nDownloaded all time: {3}\nRatio: {4}"),
+    "sb_tr_stats":     ("Показывать отдано / скачано у трекеров", "Show uploaded / downloaded under trackers"),
 }
 
 

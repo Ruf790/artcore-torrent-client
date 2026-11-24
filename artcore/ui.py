@@ -2119,6 +2119,9 @@ class SettingsDialog(QDialog):
             form.addRow(self.toasts)
         self.done_open = QCheckBox(t("set_done_open")); self.done_open.setChecked(cfg.get("done_open_folder", False))
         form.addRow(self.done_open)
+        self.done_conv = QCheckBox(t("set_done_convert")); self.done_conv.setChecked(cfg.get("done_convert", False))
+        self.done_conv.setToolTip(t("set_done_convert_tip"))
+        form.addRow(self.done_conv)
         self.done_cmd = QLineEdit(cfg.get("done_cmd", ""))
         self.done_cmd.setPlaceholderText('"C:\\Program Files\\Windows Defender\\MpCmdRun.exe" -Scan -ScanType 3 -File "%F"')
         form.addRow(t("set_done_cmd"), self.done_cmd)
@@ -2551,7 +2554,7 @@ class SettingsDialog(QDialog):
                  tracker_rules=self.tr_rules.rules(), ban_bad_peers=self.ban_bad.isChecked(),
                  cross_seed=self.cross.isChecked(),
                  keep_awake=self.awake.isChecked(), keep_awake_seed=self.awake_seed.isChecked(),
-                 min_free_gb=self.min_free.value(), done_open_folder=self.done_open.isChecked(),
+                 min_free_gb=self.min_free.value(), done_open_folder=self.done_open.isChecked(), done_convert=self.done_conv.isChecked(),
                  done_cmd=self.done_cmd.text().strip(), mini_widget=self.mini_cb.isChecked(),
                  speed_in_title=self.title_speed.isChecked(),
                  watch_dir=self.watch.text().strip(), watch_category=self.watch_cat.currentData() or "",
@@ -5294,9 +5297,28 @@ class MainWindow(QMainWindow):
         act[sec] = key
         return [r.key for r in self.model.rows if sidebar_match(r, act)]
 
+    def _refresh_sidebar(self, rows):
+        """Counts every tick; the all-time per-tracker totals every 5 s (they ask every torrent)."""
+        import time as _time
+        now = _time.monotonic()
+        if now - getattr(self, "_tr_totals_at", 0) >= 5:
+            self._tr_totals_at = now
+            try:
+                self.sidebar.set_tracker_totals(self.engine.tracker_totals(),
+                                                self.cfg.get("sidebar_tr_stats", True))
+            except Exception:
+                pass
+        self.sidebar.refresh(rows, [c["name"] for c in self.cfg.get("categories", [])],
+                             self.engine.all_tags())
+
     def _sidebar_action(self, what: str, sec: str, key: str):
         if what == "hide":
             self.set_sidebar(False)
+        elif what == "tr_stats":
+            self.cfg["sidebar_tr_stats"] = not self.cfg.get("sidebar_tr_stats", True)
+            config.save(self.cfg)
+            self._tr_totals_at = 0
+            self._refresh_sidebar(self.model.rows)
         elif what in ("start", "pause", "stop"):
             keys = self._sidebar_keys(sec, key)
             if what == "start":
@@ -5775,6 +5797,16 @@ class MainWindow(QMainWindow):
         full = os.path.join(row.save_path, row.name)
         if self.cfg.get("done_open_folder"):
             QDesktopServices.openUrl(QUrl.fromLocalFile(row.save_path))
+        if self.cfg.get("done_convert"):
+            from . import apps
+            if apps.find("convert"):
+                try:
+                    vids = apps.ready_media(self.engine, key)["video"]
+                except Exception:
+                    vids = []
+                if vids and self.send_to_app("convert", vids):
+                    self.toast("success", apps.title("convert"),
+                               t("app_sent", apps.title("convert"), row.name))
         cmd = self.cfg.get("done_cmd", "").strip()
         if cmd:
             import subprocess
@@ -5876,8 +5908,8 @@ class MainWindow(QMainWindow):
         self._update_pause_btn()
         self.sidebar._keys = {k: [] for k in self.sidebar._keys}     # rebuild with icons in the new colours
         self.sidebar.retheme()
-        self.sidebar.refresh(self.model.rows, [c["name"] for c in self.cfg.get("categories", [])],
-                             self.engine.all_tags())
+        self._tr_totals_at = 0
+        self._refresh_sidebar(self.model.rows)
 
     def _apply_backdrop(self, dark: bool):
         """Mica behind the window in the Windows 11 style, otherwise the title bar in the page colour."""
@@ -6267,14 +6299,20 @@ class MainWindow(QMainWindow):
             return
         rows = {r.key: r for r in self.model.rows}
         owe = [rows[k] for k in keys if k in rows and self.engine.hnr_left(k)]
-        text = t("remove_text", len(keys))
+        text = t("remove_text_one") if len(keys) == 1 else t("remove_text_n", len(keys))
         if owe:
             lines = "\n".join(f"• {r.name[:70]} — {self.engine.hnr_left(r.key)}" for r in owe[:8])
             text += "\n\n" + t("hnr_remove_warn", lines)
+        # 1.0.54: the names of what is being removed (first 6, then "…and N more")
+        shown = [rows[k] for k in keys if k in rows][:6]
+        items = [("fa6s.arrow-up" if r.progress >= 1 else "fa6s.arrow-down", r.name or r.key,
+                  fmt_size(r.size)) for r in shown]
+        rest = len(keys) - len(shown)
         from .swal import Swal
         box = Swal(self, "warning" if owe else "danger", t("remove_title"), text,
                    [(t("remove_btn"), "danger"), (t("cancel"), "")], default=0, cancel=1,
-                   checkbox=t("remove_files"))
+                   checkbox=t("remove_files"), items=items,
+                   more=t("remove_more", rest) if rest > 0 else "")
         box.check.setChecked(with_files)
         if box.exec() == 0:
             files = box.checked()
@@ -6399,6 +6437,7 @@ class MainWindow(QMainWindow):
         m.addAction(icon("fa6s.list-check", "primary"), t("select_all") + "\tCtrl+A", self.select_all)
         m.addSeparator()
         m.addAction(icon("fa6s.folder-open"), t("open_folder") + "\tEnter", self.open_folder)
+        self._apps_menu(m, [(k, None) for k in self.selected_keys()[:200]])
         m.addAction(icon("fa6s.rotate"), t("recheck") + "\tCtrl+R", self.recheck_selected)
         m.addAction(icon("fa6s.bullhorn"), t("reannounce") + "\tF5", lambda: self._each(self.engine.reannounce))
         m.addAction(icon("fa6s.link"), t("copy_magnet") + "\tCtrl+M", self.copy_magnet)
@@ -6904,8 +6943,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_tag_combo()
         if self.sidebar.isVisible():
-            self.sidebar.refresh(rows, [c["name"] for c in self.cfg.get("categories", [])],
-                                 self.engine.all_tags())
+            self._refresh_sidebar(rows)
             if self.proxy.sidebar is not None:
                 self.proxy.invalidateFilter()      # counts / states moved: re-apply the live filters
         while self.engine.cross_results:
@@ -7232,6 +7270,7 @@ class MainWindow(QMainWindow):
         if len(idxs) == 1:
             m.addAction(icon("fa6s.file-arrow-up", "primary"), t("file_open"), lambda: self.open_file(key, idxs[0]))
         m.addAction(icon("fa6s.folder-open", "warning"), t("file_show"), lambda: self.show_file(key, idxs[0]))
+        self._apps_menu(m, [(key, list(idxs))])
         m.addSeparator()
         if len(idxs) > 1:
             m.addSection(t("file_prio_n", len(idxs)))
@@ -7243,6 +7282,62 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(icon("fa6s.folder-open", "warning"), t("open_folder"), self.open_folder)
         m.exec(self.files_tbl.viewport().mapToGlobal(pos))
+
+    # ── ArtCore Player / Music / Convert (1.0.54) ─────────────────
+    def _apps_menu(self, m: QMenu, targets: list[tuple[str, list[int] | None]]):
+        """Adds "Open in ArtCore Player / Music" and "Convert in ArtCore Convert" for the finished
+        video / audio files of the targets [(torrent key, file indices or None = all)]."""
+        from . import apps
+        video: list[str] = []
+        audio: list[str] = []
+        for key, idxs in targets:
+            try:
+                got = apps.ready_media(self.engine, key, idxs)
+            except Exception:
+                continue
+            video += got["video"]
+            audio += got["audio"]
+        if not video and not audio:
+            return
+        sub = m.addMenu(icon("fa6s.photo-film", "primary"), t("app_menu"))
+        jobs = []
+        if video:
+            jobs.append(("player", "fa6s.circle-play", "primary", t("app_play"), video))
+        if audio:
+            jobs.append(("music", "fa6s.music", "purple", t("app_music"),
+                         [p for p in audio if os.path.splitext(p)[1].lower() not in apps.PLAYLIST_EXT]
+                         or audio))
+        conv = [p for p in video + audio if os.path.splitext(p)[1].lower() not in apps.PLAYLIST_EXT]
+        if conv:
+            jobs.append(("convert", "fa6s.film", "orange", t("app_convert"), conv))
+        for app, ic, col, label, files in jobs:
+            if apps.find(app):
+                text = label + (f"  ({t('app_n_files', len(files))})" if len(files) > 1 else "")
+                sub.addAction(icon(ic, col), text, lambda a=app, f=files: self.send_to_app(a, f))
+            else:
+                url = apps.releases_url(app)
+                sub.addAction(icon(ic, "secondary"), t("app_missing", apps.title(app)),
+                              lambda u=url: QDesktopServices.openUrl(QUrl(u)))
+
+    def send_to_app(self, app: str, files: list[str]) -> bool:
+        from . import apps
+        if not files:
+            return False
+        # Windows' command line holds ~32 000 characters — very large packs go in part
+        out, length = [], 0
+        for f in files:
+            length += len(f) + 3
+            if length > 30000:
+                break
+            out.append(f)
+        err = apps.launch(app, out)
+        what = os.path.basename(out[0]) if len(out) == 1 else t("app_n_files", len(out))
+        if err:
+            self.log_event("error", t("app_fail", apps.title(app), err))
+            self.toast("error", apps.title(app), t("app_fail", apps.title(app), err))
+            return False
+        self.log_event("system", t("app_sent", apps.title(app), what))
+        return True
 
     def open_file(self, key: str, idx: int):
         path = self.engine.abs_file_path(key, idx)

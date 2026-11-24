@@ -58,6 +58,8 @@ DEFAULTS = {
     "min_free_gb":      0,          # pause downloads below this free space, 0 = off
     "done_cmd":         "",         # run when a torrent finishes: %N name, %F full path, %D folder, %H hash, %L category
     "done_open_folder": False,
+    "done_convert":     False,      # 1.0.54: finished video files go to ArtCore Convert's queue
+    "sidebar_tr_stats": True,       # 1.0.54: uploaded / downloaded / ratio under each tracker in the sidebar
     "mini_widget":      False,      # floating speed window
     "mini_pos":         None,
     "mini_opacity":     85,         # % when the mouse is not over it
