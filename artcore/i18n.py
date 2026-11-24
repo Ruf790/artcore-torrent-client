@@ -1445,6 +1445,10 @@ STRINGS = {
     # 1.0.55: disk / file errors
     "toast_io_error":  ("Ошибка раздачи", "Torrent error"),
     "toast_io_error_log": ("Ошибка раздачи «{0}»: {1}", "Torrent “{0}” stopped on an error: {1}"),
+    "part_note":       ("Не хватает файлов: {0}\nУдалено {1} из {2}, например: {3}\nТоррент остановлен. «Проверить» (Ctrl+R) докачает их.",
+                        "Files missing: {0}\n{1} of {2} deleted, e.g. {3}\nThe torrent is stopped. “Recheck” (Ctrl+R) downloads them again."),
+    "part_log":        ("«{0}»: на диске нет {1} из {2} файлов (например, {3}) — торрент остановлен",
+                        "“{0}”: {1} of {2} files are not on disk (e.g. {3}) — the torrent is stopped"),
 }
 
 

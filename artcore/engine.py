@@ -157,6 +157,11 @@ class Engine:
         self._user_ranges: list[tuple[str, str]] = []
         self._peer_prog: dict[tuple, tuple] = {}      # (key, ip) → (uploaded to it, its progress) at first sight
         self._miss_hits: dict[str, int] = {}          # missing-files scans in a row that found nothing
+        # 1.0.55: some files of a complete torrent deleted (the rest still there)
+        self._part_hits: dict[str, tuple[int, frozenset]] = {}   # key → (scans in a row, missing indices)
+        self._part_done: dict[str, frozenset] = {}    # already reported → not stopped again for the same set
+        self._part_pos = 0                            # where the next scan continues (stat budget)
+        self.partial_names: list[tuple[str, str, int, int, str]] = []  # (name, key, missing, wanted, first)
         self._limited: set[str] = set()                # torrents whose limits come from a tracker rule
         self._cross_check: set[str] = set()            # cross-seeded, waiting for the hash check
         self.cross_results: list[tuple[str, str, float]] = []   # (name, key, progress) for the UI
@@ -1209,6 +1214,7 @@ class Engine:
             if not gone:
                 self._miss_hits.pop(key, None)
                 continue
+            self._part_hits.pop(key, None)
             self._miss_hits[key] = self._miss_hits.get(key, 0) + 1
             if self._miss_hits[key] < 2:          # seen twice in a row (≈1 min) — not a hiccup
                 continue
@@ -1219,6 +1225,66 @@ class Engine:
             h.pause()
             self.missing_names.append((s.name, key, s.save_path))
             self._log("error", f"{s.name}: files not found in {s.save_path}")
+
+    PART_BUDGET = 20000          # files looked at per scan — big libraries are covered over several scans
+
+    def _scan_partial(self) -> None:
+        """Every 30 s: complete torrents where only some wanted files were deleted. libtorrent
+        would only notice when a peer asks for a piece of such a file, so the torrent is stopped
+        and reported now; "Recheck" downloads the files again. Reported once per set of missing
+        files — started again by hand with the same files gone, it is left alone."""
+        keys = [k for k in list(self.handles) if not self.opts.get(k, {}).get("missing") and k not in self._moves]
+        if not keys:
+            return
+        budget = self.PART_BUDGET
+        start = self._part_pos % len(keys)
+        order = keys[start:] + keys[:start]
+        done = 0
+        for key in order:
+            if budget <= 0:
+                break
+            done += 1
+            h = self.handles.get(key)
+            if h is None or not h.is_valid():
+                continue
+            s = h.status()
+            if (not s.has_metadata or s.progress < 1.0 or getattr(s, "moving_storage", False)
+                    or s.state in (lt.torrent_status.checking_files, lt.torrent_status.checking_resume_data)
+                    or not os.path.isdir(s.save_path)):
+                self._part_hits.pop(key, None)
+                continue
+            fs = h.torrent_file().files()
+            try:
+                prios = list(h.get_file_priorities())
+            except Exception:
+                prios = []
+            gone, wanted = [], 0
+            for i in range(fs.num_files()):
+                if fs.file_flags(i) & lt.file_storage.flag_pad_file or (i < len(prios) and prios[i] == 0):
+                    continue
+                wanted += 1
+                budget -= 1
+                if not os.path.exists(os.path.join(s.save_path, self.disk_rel(key, fs, i))):
+                    gone.append(i)
+            missing = frozenset(gone)
+            if not missing or len(missing) >= wanted:       # all there / all gone (_scan_missing's case)
+                self._part_hits.pop(key, None)
+                self._part_done.pop(key, None)
+                continue
+            if self._part_done.get(key) == missing:
+                continue
+            n, last = self._part_hits.get(key, (0, frozenset()))
+            n = n + 1 if last == missing else 1
+            if n < 2:                                       # seen twice in a row (≈1 min) — not a hiccup
+                self._part_hits[key] = (n, missing)
+                continue
+            self._part_hits.pop(key, None)
+            self._part_done[key] = missing
+            self.stop(key)
+            first = self.file_path(key, fs, min(missing))
+            self.partial_names.append((s.name, key, len(missing), wanted, first))
+            self._log("error", f"{s.name}: {len(missing)} of {wanted} files not found on disk (e.g. {first})")
+        self._part_pos = (start + done) % max(len(keys), 1)
 
     def reannounce(self, key: str) -> None:
         h = self.handles.get(key)
@@ -1375,6 +1441,10 @@ class Engine:
                 self._scan_missing()
             except Exception as e:
                 self._log("error", f"missing-files scan: {e}")
+            try:
+                self._scan_partial()
+            except Exception as e:
+                self._log("error", f"partial-files scan: {e}")
         if self._polls % 10 == 0:
             self._count_days()
         if self._polls % 2 == 0:
